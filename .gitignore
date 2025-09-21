@@ -112,3 +112,8 @@ tags
 cscope.out
 # Persistent undo
 [._]*.un~
+
+# Nix
+.direnv/
+result
+Justfile
