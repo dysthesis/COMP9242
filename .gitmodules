@@ -1,0 +1,3 @@
+[submodule "projects/aos/libclock/libpqueue"]
+	path = projects/aos/libclock/libpqueue
+	url = https://github.com/vy/libpqueue
