@@ -103,10 +103,10 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
 
   // get the timestamp of the future where the callback needs to be called from
   // delay future timestamp = current timestamp + delay
-  uint64_t current_timestamp = get_time();
-  uint64_t timeout_timestamp = current_timestamp + delay;
+  timestamp_t current_timestamp = get_time();
+  timestamp_t timeout_timestamp = current_timestamp + delay;
 
-  // check for overflow
+  // check for overflow 
   if (timeout_timestamp < current_timestamp) {
     printf("[register_timer]: overflow\n");
     return 0; // too large to handle
@@ -145,29 +145,28 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
 
   if (slot_index == -1) {
     // need to reallocate memory
-    clock.num_timeouts++;
     clock.timeouts =
-        realloc(clock.timeouts, clock.num_timeouts * sizeof(timeout_t *));
+        realloc(clock.timeouts, 2 * clock.num_timeouts * sizeof(timeout_t *));
     if (clock.timeouts == NULL) {
       printf("[register_timer]: failed to reallocate memory for timeouts\n");
       return 0;
     }
+    clock.num_timeouts = clock.num_timeouts * 2;
     slot_index = clock.num_timeouts - 1;
   }
 
   // now we have a slot to store the timeout, update the id
-
   new_timeout->id = slot_index;
-
-  // now insert
-  clock.timeouts[slot_index] = new_timeout;
 
   int success = pqueue_insert(clock.timeouts_queue, new_timeout);
   if (success != 0) {
     printf("[register_timer]: failed to insert\n");
-    // should free the memory here, but i am lazy
+
+    free(new_timeout);
     return 0; // failed to insert
   }
+  // now insert
+  clock.timeouts[slot_index] = new_timeout;
 
   // after we insert the timeout, we need to set the timer to the earliest
   // timeout
@@ -175,6 +174,7 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
   // get next earliest timeout
   timeout_t *earliest = pqueue_peek(clock.timeouts_queue);
 
+  // if earliest set time out
   if (earliest->id == new_timeout->id) {
     // if we reach here, I am the earliest timeout, I set the timer
 
@@ -184,13 +184,10 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
     // we repeat this process until the delay is less than the max value which
     // then we set the timer to that value
 
-    uint64_t timeout_us = delay;
-    if (timeout_us > UINT16_MAX) {
-      timeout_us = UINT16_MAX;
-    }
+    struct delay delay_data = delay_to_16(new_timeout->deadline - current_timestamp);
 
     configure_timeout(clock.regs, MESON_TIMER_A, true, false,
-                      TIMEOUT_TIMEBASE_1_US, (uint16_t)timeout_us);
+                      delay_data.timer_base, delay_data.start_count);
   } else {
     // not the earliest timeout, do nothing
   }
@@ -269,7 +266,7 @@ struct delay delay_to_16(uint64_t real_delay) {
     delay.timer_base = TIMEOUT_TIMEBASE_1_MS;
     // case it cant be represented so do longest delay possible?
   } else {
-    delay.start_count = 0xFFFF;
+    delay.start_count = UINT16_MAX;
     delay.timer_base = TIMEOUT_TIMEBASE_1_MS;
   }
   return delay;
