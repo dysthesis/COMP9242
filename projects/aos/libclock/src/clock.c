@@ -181,7 +181,7 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
 
   if (slot_index == -1) {
     // need to reallocate memory
-    uint32_t new_size = clock.num_timeouts * 2;
+    uint32_t new_size = clock.num_timeouts + 1;
     clock.timeouts = realloc(clock.timeouts, new_size * sizeof(timeout_t *));
     if (clock.timeouts == NULL) {
       printf("[register_timer]: failed to reallocate memory for timeouts\n");
