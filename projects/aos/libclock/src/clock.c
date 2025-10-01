@@ -185,13 +185,13 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
 
   if (slot_index == -1) {
     // need to reallocate memory
-    clock.timeouts =
-        realloc(clock.timeouts, 2 * clock.num_timeouts * sizeof(timeout_t *));
+    uint32_t new_size = clock.num_timeouts + 1;
+    clock.timeouts = realloc(clock.timeouts, new_size * sizeof(timeout_t *));
     if (clock.timeouts == NULL) {
       printf("[register_timer]: failed to reallocate memory for timeouts\n");
       return 0;
     }
-    clock.num_timeouts = clock.num_timeouts * 2;
+    clock.num_timeouts = new_size;
     slot_index = clock.num_timeouts - 1;
   }
 
