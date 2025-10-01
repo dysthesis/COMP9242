@@ -154,11 +154,7 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
 
   // set the timer to trigger an interrupt after the delay
   // delay is in microseconds and it is a 64 bit value
-  // all the timers are 16 bit, which are fucking useless and
-  // we have to break them into several timer interrupts
-
-  // i wont do a sophisticated timebase selection algorithm
-  // for now, let's just use the 1us one which will trigger more interrupts
+  // all the timers are 16 bit so need to convert
 
   // now we need store this timeout information somewhere and allocate an id
 
@@ -185,7 +181,7 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
 
   if (slot_index == -1) {
     // need to reallocate memory
-    uint32_t new_size = clock.num_timeouts + 1;
+    uint32_t new_size = clock.num_timeouts * 2;
     clock.timeouts = realloc(clock.timeouts, new_size * sizeof(timeout_t *));
     if (clock.timeouts == NULL) {
       printf("[register_timer]: failed to reallocate memory for timeouts\n");
@@ -281,9 +277,6 @@ int remove_timer(uint32_t id) {
 struct delay delay_to_16(uint64_t real_delay) {
   struct delay delay;
   delay.start_count = 0;
-  // TODO: note, if more than the first 36 bits are set, it is impossible to
-  // represent as: 2^35 < 2^16 -1 * 10^6 < 2^36 unless we make multiple delays
-  // for one delay? case only lower 16 bits are set (keep in microseconds)
   if (real_delay >> 16 == 0) {
     delay.start_count |= real_delay;
     delay.timer_base = TIMEOUT_TIMEBASE_1_US;
@@ -364,17 +357,7 @@ int timer_irq(void *data, seL4_Word irq, seL4_IRQHandler irq_handler) {
 
   if (earliest != NULL) {
     // set the timer to the next earliest timeout
-    uint64_t timeout_us = earliest->deadline - current_timestamp;
-    uint64_t timeout_ms = timeout_us / 1000;
 
-    // same reason as before, break into several interrupts if the delay is too
-    // long
-    if (timeout_ms > UINT16_MAX) {
-      configure_timeout(clock.regs, MESON_TIMER_A, true, false,
-                        TIMEOUT_TIMEBASE_1_MS, UINT16_MAX);
-    }
-
-    // Otherwise, we can just one-shot it.
     struct delay delay_data =
         delay_to_16(earliest->deadline - current_timestamp);
 
