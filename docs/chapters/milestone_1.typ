@@ -6,4 +6,8 @@ We achieve this by registering a timeout on the timer device in the OdroidC2's S
 
 == Challenge
 
-The primary challenge for this therefore becomes the limited register size for the counter. For instance, Timer A has a counter size of 16 bits, which means that the maximum counter value is $65535$.
+The primary challenge for this therefore becomes the limited register size for the counter. For instance, Timer A has a counter size of 16 bits, which means that the maximum counter value is $65535$. Consequently, selecting a timebase becomes a tradeoff decision between higher precision and higher maximum duration (and therefore less interrupts required). We take the approach of selecting the finest timebase we can that can fit the target duration.
+
+== Design
+
+We implement the timer driver with a tickless design. We maintain the active timers in a priority queue, such that the head is always the earliest-due timer. When registering a timer, we peek at the head, and see if it is due. If it is, then we pop it off of the queue, and trigger its callback. Otherwise, we re-arm the timer device with the finest timebase possible, and calculate the counter value accordingly.
