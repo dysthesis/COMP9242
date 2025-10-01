@@ -29,4 +29,5 @@ target_link_libraries(
   muslc
   sel4
   utils
+  libpqueue
 )
