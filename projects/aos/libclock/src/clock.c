@@ -18,6 +18,9 @@
  * to set registers and configure timeouts. */
 #include "device.h"
 
+// initial number of timeouts
+#define INITIAL_TIMEOUTS 0
+
 /*
  * A singular timeout, consisting of the deadline and callback.
  *
@@ -78,13 +81,50 @@ timestamp_t get_time(void) {
   // read the current time from timer E
   return read_timestamp(clock.regs);
 }
+
 int start_timer(unsigned char *timer_vaddr) {
-  int err = stop_timer();
-  if (err != 0) {
-    return err;
+
+  if (clock.timer_running) {
+    // perform implicit stop if timer is already initialised
+    int ret = stop_timer();
+    if (ret != CLOCK_R_OK) {
+      printf("[start_timer]: failed to stop timer\n");
+      return ret;
+    }
   }
 
   clock.regs = (meson_timer_reg_t *)(timer_vaddr + TIMER_REG_START);
+
+  // timer E is the system clock, we use this to get the current time in
+  // microseconds
+  configure_timestamp(clock.regs, TIMESTAMP_TIMEBASE_1_US);
+
+  // and set timer E to zero on start up
+  // according to datasheet, write any value to ISA_TIMERE 0x2662 will reset it
+  // see 101/336 in the datasheet
+  clock.regs->timer_e = 0;
+
+  // initialise the timeouts
+
+  clock.timeouts_queue = pqueue_init(INITIAL_TIMEOUTS, cmp_pri, get_pri,
+                                     set_pri, get_pos, set_pos);
+  if (clock.timeouts_queue == NULL) {
+    printf("[start_timer]: failed to initialise pqueue\n");
+    stop_timer();
+    return CLOCK_R_FAIL;
+  }
+
+  clock.timeouts = malloc(sizeof(timeout_t *) * INITIAL_TIMEOUTS);
+  if (clock.timeouts == NULL) {
+    printf("[start_timer]: failed to allocate memory for timeouts\n");
+    stop_timer();
+    return CLOCK_R_FAIL;
+  }
+  clock.num_timeouts = INITIAL_TIMEOUTS;
+  // clear the memory, for sanity
+  memset(clock.timeouts, 0, sizeof(timeout_t *) * INITIAL_TIMEOUTS);
+
+  clock.timer_running = true;
 
   return CLOCK_R_OK;
 }

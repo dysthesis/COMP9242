@@ -69,6 +69,5 @@ void test_clock() {
   register_timer(15030000, test_timeout_single, NULL); // 15.03s
   register_timer(15020000, test_timeout_single, NULL); // 15.02s
   register_timer(15010000, test_timeout_single, NULL); // 15.01s
-                                                       //
   return;
 }
