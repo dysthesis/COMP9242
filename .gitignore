@@ -117,3 +117,4 @@ cscope.out
 .direnv/
 result
 Justfile
+.cache/
