@@ -46,6 +46,7 @@
 in {
   default = pkgs.unstable.mkShell {
     name = "COMP9242 SOS";
+    inputsFrom = [self.packages.${pkgs.system}.default];
     packages =
       (with pkgs; [
         cmake
