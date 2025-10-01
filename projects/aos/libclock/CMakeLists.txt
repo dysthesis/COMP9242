@@ -10,9 +10,23 @@
 # @TAG(DATA61_GPL)
 #
 cmake_minimum_required(VERSION 3.7.2)
-
 project(libclock C)
 
-add_library(clock EXCLUDE_FROM_ALL src/clock.c src/device.c)
+add_library(
+  clock 
+  EXCLUDE_FROM_ALL
+  src/clock.c
+  src/device.c
+  src/clock_tests.c
+)
+
 target_include_directories(clock PUBLIC include)
-target_link_libraries(clock muslc sel4 utils)
+
+target_link_libraries(
+  clock
+  PUBLIC
+  sel4runtime
+  muslc
+  sel4
+  utils
+)

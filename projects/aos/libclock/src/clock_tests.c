@@ -1,7 +1,9 @@
 #include <clock/clock.h>
 #include <clock/clock_tests.h>
+#include <inttypes.h>
 #include <sel4runtime.h>
 #include <stdio.h>
+#include <utils/util.h>
 
 /*
  * A nice pretty-printer for timestamps
@@ -46,7 +48,7 @@ static void test_timeout_single(UNUSED uint32_t id, UNUSED void *data) {
   print_timestamp(now);
 }
 
-static void test_clock() {
+void test_clock() {
   // test timeouts recursively
   // TODO: Figure out how to terminate this
   // register_timer(10000000, test_timeout_periodic, &num_itr);
