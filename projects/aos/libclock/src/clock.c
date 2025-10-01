@@ -32,6 +32,8 @@ typedef struct {
   uint32_t id;
   uint64_t deadline;         // when is this timer due (in absolute terms)?
   timer_callback_t callback; // what should this timout trigger when it expires?
+  size_t pos; // comforms to the pqueue_t struct, set by the pqueue functions
+              // automatically
 } timeout_t;
 
 static struct {
@@ -43,7 +45,31 @@ static struct {
   int num_timeouts;     // how many pending timeouts there are
   bool timer_running;   // is the timer running?
 } clock;
+static int cmp_pri(pqueue_pri_t next, pqueue_pri_t curr) {
+  return (next > curr); // higher priority is lower value, we need a min heap
+}
 
+static pqueue_pri_t get_pri(void *a) { return ((timeout_t *)a)->deadline; }
+
+static void set_pri(void *a, pqueue_pri_t pri) {
+  ((timeout_t *)a)->deadline = pri;
+}
+
+static size_t get_pos(void *a) { return ((timeout_t *)a)->pos; }
+
+static void set_pos(void *a, size_t pos) { ((timeout_t *)a)->pos = pos; }
+
+timestamp_t get_time(void) {
+  /* Return the current time in microseconds */
+
+  if (!clock.timer_running) {
+    printf("[get_time]: timer not running\n");
+    return 0;
+  }
+
+  // read the current time from timer E
+  return read_timestamp(clock.regs);
+}
 int start_timer(unsigned char *timer_vaddr) {
   int err = stop_timer();
   if (err != 0) {
