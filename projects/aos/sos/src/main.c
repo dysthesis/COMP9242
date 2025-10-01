@@ -21,6 +21,7 @@
 #include <cspace/cspace.h>
 
 #include <clock/clock.h>
+#include <clock/clock_tests.h>
 #include <cpio/cpio.h>
 #include <elf/elf.h>
 #include <networkconsole/networkconsole.h>
@@ -585,6 +586,10 @@ NORETURN void *main_continued(UNUSED void *arg) {
 #endif /* CONFIG_SOS_GDB_ENABLED */
 
   frame_table_init(&cspace, seL4_CapInitThreadVSpace);
+
+  /* run sos initialisation tests */
+  run_tests(&cspace);
+
   /* Map the timer device (NOTE: this is the same mapping you will use for your
    * timer driver - sos uses the watchdog timers on this page to implement reset
    * infrastructure & network ticks, so touching the watchdog timers here is not
@@ -608,14 +613,36 @@ NORETURN void *main_continued(UNUSED void *arg) {
   start_timer(timer_vaddr);
   /* You will need to register an IRQ handler for the timer here.
    * See "irq.h". */
+  seL4_IRQHandler timeout_irq_handler = 0;
+  // use edge triggered since we only want to handle the interrupt once
+  // after it is handled, we will re-config the timer
+  int init_irq_err =
+      sos_register_irq_handler(meson_timeout_irq(MESON_TIMER_A), true,
+                               timer_irq, NULL, &timeout_irq_handler);
+  ZF_LOGF_IF(init_irq_err != 0, "Failed to initialise timeout IRQ");
+  seL4_IRQHandler_Ack(timeout_irq_handler);
 
-  /*
-   * run sos initialisation tests
-   *
-   * NOTE: The clock tests require the timer to have been started. Therefore, we
-   * start it here.
-   */
-  run_tests(&cspace);
+  int num_itr = 0;
+  // test timeouts recursively
+  register_timer(10000000, test_timeout_periodic, &num_itr);
+
+  // register a few more concurrent timeouts
+
+  // a really long one
+  register_timer(100000000, test_timeout_single, NULL); // 100s
+
+  // a few out of order one
+  register_timer(15000000, test_timeout_single, NULL); // 15s
+  register_timer(13000000, test_timeout_single, NULL); // 13s
+  register_timer(20000000, test_timeout_single, NULL); // 20s
+  register_timer(18000000, test_timeout_single, NULL); // 18s
+  register_timer(14000000, test_timeout_single, NULL); // 14s
+
+  // and a few precise ones to test 10ms precision
+  register_timer(15040000, test_timeout_single, NULL); // 15.04s
+  register_timer(15030000, test_timeout_single, NULL); // 15.03s
+  register_timer(15020000, test_timeout_single, NULL); // 15.02s
+  register_timer(15010000, test_timeout_single, NULL); // 15.01s
 
   /* Start the user application */
   printf("Start first process\n");

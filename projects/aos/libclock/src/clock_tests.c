@@ -8,7 +8,7 @@
 /*
  * A nice pretty-printer for timestamps
  */
-static void print_timestamp(uint64_t microseconds) {
+void print_timestamp(uint64_t microseconds) {
   // Convert microseconds to total seconds and remaining microseconds
   uint64_t total_seconds = microseconds / 1000000;
   uint64_t remaining_microseconds = microseconds % 1000000;
@@ -23,7 +23,7 @@ static void print_timestamp(uint64_t microseconds) {
          minutes, seconds, remaining_microseconds);
 }
 
-static void test_timeout_periodic(UNUSED uint32_t id, void *data) {
+void test_timeout_periodic(UNUSED uint32_t id, void *data) {
 
   timestamp_t now = get_time();
 
@@ -41,7 +41,7 @@ static void test_timeout_periodic(UNUSED uint32_t id, void *data) {
   register_timer(100000, test_timeout_periodic, data);
 }
 
-static void test_timeout_single(UNUSED uint32_t id, UNUSED void *data) {
+void test_timeout_single(UNUSED uint32_t id, UNUSED void *data) {
   timestamp_t now = get_time();
 
   printf("[test_timeout_single]  : Timestamp: ");

@@ -195,7 +195,6 @@ void run_tests(cspace_t *cspace) {
   /* test frame table */
   test_frame_table();
   ZF_LOGI("Frame table test passed!");
-
-  test_clock();
-  ZF_LOGI("Clock tests passed!");
+  // test_clock();
+  // ZF_LOGI("Clock tests passed!");
 }

@@ -11,22 +11,22 @@
  */
 #pragma once
 
-#include <stdint.h>
-#include <sel4/sel4.h>
 #include <clock/device.h>
 #include <clock/timestamp.h>
+#include <sel4/sel4.h>
+#include <stdint.h>
+#include <utils/util.h>
 
 /*
  * Return codes for driver functions
  */
-#define CLOCK_R_OK     0        /* success */
-#define CLOCK_R_UINT (-1)       /* driver not initialised */
-#define CLOCK_R_CNCL (-2)       /* operation cancelled (driver stopped) */
-#define CLOCK_R_FAIL (-3)       /* operation failed for other reason */
+#define CLOCK_R_OK 0      /* success */
+#define CLOCK_R_UINT (-1) /* driver not initialised */
+#define CLOCK_R_CNCL (-2) /* operation cancelled (driver stopped) */
+#define CLOCK_R_FAIL (-3) /* operation failed for other reason */
 
 typedef uint64_t timestamp_t;
 typedef void (*timer_callback_t)(uint32_t id, void *data);
-
 
 /*
  * Initialise driver. Performs implicit stop_timer() if already initialised.
@@ -70,8 +70,4 @@ int stop_timer(void);
 /*
  * Signal to the timer than an IRQ was received.
  */
-int timer_irq(
-    void *data,
-    seL4_Word irq,
-    seL4_IRQHandler irq_handler
-);
+int timer_irq(void *data, seL4_Word irq, seL4_IRQHandler irq_handler);
