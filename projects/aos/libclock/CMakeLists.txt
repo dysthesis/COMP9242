@@ -24,10 +24,9 @@ target_include_directories(clock PUBLIC include)
 
 target_link_libraries(
   clock
-  PUBLIC
+  pqueue
   sel4runtime
   muslc
   sel4
   utils
-  libpqueue
 )

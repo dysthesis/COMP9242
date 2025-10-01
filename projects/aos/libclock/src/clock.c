@@ -89,7 +89,7 @@ int start_timer(unsigned char *timer_vaddr) {
   return CLOCK_R_OK;
 }
 
-uint32_t jegister_timer(uint64_t delay, timer_callback_t callback, void *data) {
+uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
   if (!clock.timer_running) {
     printf("[register_timer]: timer not running\n");
     return CLOCK_R_UINT;

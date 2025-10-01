@@ -22,6 +22,7 @@ add_subdirectory(sos)
 
 # add libraries
 add_subdirectory(libaos)
+add_subdirectory(libpqueue)
 add_subdirectory(libclock)
 add_subdirectory(libco)
 add_subdirectory(libethernet)
@@ -29,7 +30,6 @@ add_subdirectory(libsel4cspace)
 add_subdirectory(libnetworkconsole)
 add_subdirectory(libsosapi)
 # add any additional libs here
-add_subdirectory(libpqueue)
 
 # enable our networking libs
 set(LibPicotcp ON CACHE BOOL "" FORCE)
