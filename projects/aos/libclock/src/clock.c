@@ -89,7 +89,7 @@ int start_timer(unsigned char *timer_vaddr) {
   return CLOCK_R_OK;
 }
 
-uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
+uint32_t jegister_timer(uint64_t delay, timer_callback_t callback, void *data) {
   if (!clock.timer_running) {
     printf("[register_timer]: timer not running\n");
     return CLOCK_R_UINT;
@@ -106,7 +106,7 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
   timestamp_t current_timestamp = get_time();
   timestamp_t timeout_timestamp = current_timestamp + delay;
 
-  // check for overflow 
+  // check for overflow
   if (timeout_timestamp < current_timestamp) {
     printf("[register_timer]: overflow\n");
     return 0; // too large to handle
@@ -184,7 +184,8 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
     // we repeat this process until the delay is less than the max value which
     // then we set the timer to that value
 
-    struct delay delay_data = delay_to_16(new_timeout->deadline - current_timestamp);
+    struct delay delay_data =
+        delay_to_16(new_timeout->deadline - current_timestamp);
 
     configure_timeout(clock.regs, MESON_TIMER_A, true, false,
                       delay_data.timer_base, delay_data.start_count);
@@ -272,15 +273,122 @@ struct delay delay_to_16(uint64_t real_delay) {
   return delay;
 }
 
+/*
+ * Handle the timer that has been triggered (by the timer device).
+ */
 int timer_irq(void *data, seL4_Word irq, seL4_IRQHandler irq_handler) {
+  // irq is the timer irq that has been triggered
+
+  if (!clock.timer_running) {
+    printf("[timer_irq]: timer not running\n");
+    return CLOCK_R_UINT;
+  }
+
   /* Handle the IRQ */
 
+  // when this irq is triggered, we have pass at least one timeout
+  // which means at least the earliest timeout has expired, may have more,
+  // we need to service all of them
+
+  // get the current timestamp
+  uint64_t current_timestamp = get_time();
+
+  timeout_t *earliest = pqueue_peek(clock.timeouts_queue);
+
+  while (earliest != NULL && earliest->deadline <= current_timestamp) {
+    // means the time now has reached or gone past the earliest timeout, timer
+    // expired
+
+    // need to service the this timeout now
+
+    // call the callback
+    earliest->callback(earliest->id, earliest->data);
+
+    int success = remove_timer(earliest->id);
+    if (success != CLOCK_R_OK) {
+      printf("[timer_irq]: failed to remove timeout\n");
+      return CLOCK_R_FAIL;
+    }
+
+    // check the next earliest timeout
+    earliest = pqueue_peek(clock.timeouts_queue);
+  }
+
+  // if we reach here, we have serviced all the timeouts that have expired
+  // unless the delay is too long and we break it
+  // into several interrupts
+
+  // if there are no timeouts, we should turn off the timer
+
+  // otherwise, we need to set the timer to the next earliest timeout
+
+  if (earliest != NULL) {
+    // set the timer to the next earliest timeout
+    uint64_t timeout_us = earliest->deadline - current_timestamp;
+    uint64_t timeout_ms = timeout_us / 1000;
+
+    // same reason as before, break into several interrupts if the delay is too
+    // long
+    if (timeout_ms > UINT16_MAX) {
+      configure_timeout(clock.regs, MESON_TIMER_A, true, false,
+                        TIMEOUT_TIMEBASE_1_MS, UINT16_MAX);
+    }
+
+    // Otherwise, we can just one-shot it.
+    struct delay delay_data =
+        delay_to_16(earliest->deadline - current_timestamp);
+
+    configure_timeout(clock.regs, MESON_TIMER_A, true, false,
+                      delay_data.timer_base, delay_data.start_count);
+  } else {
+    // no more timeouts, turn off the timer
+    configure_timeout(clock.regs, MESON_TIMER_A, false, false,
+                      TIMEOUT_TIMEBASE_1_MS, 0);
+    printf("[timer_irq]: no more timeouts, timer turned off\n");
+  }
+
   /* Acknowledge that the IRQ has been handled */
-  return CLOCK_R_FAIL;
+  seL4_IRQHandler_Ack(irq_handler);
+  return CLOCK_R_OK;
 }
 
 int stop_timer(void) {
   /* Stop the timer from producing further interrupts and remove all
    * existing timeouts */
-  return CLOCK_R_FAIL;
+
+  if (!clock.timer_running) {
+    printf("[stop_timer]: timer already stopped\n");
+    return CLOCK_R_OK;
+  }
+
+  clock.timer_running = false;
+
+  // stop the timer
+  configure_timeout(clock.regs, MESON_TIMER_A, false, false,
+                    TIMEOUT_TIMEBASE_1_MS, 0);
+
+  for (int i = 0; i < clock.num_timeouts; i++) {
+    if (clock.timeouts[i] != NULL) {
+      int success = remove_timer(clock.timeouts[i]->id);
+      if (success != CLOCK_R_OK) {
+        printf("[stop_timer]: failed to remove timeout\n");
+        return CLOCK_R_FAIL;
+      }
+    }
+  }
+  // free the timeouts array
+  free(clock.timeouts);
+  clock.timeouts = NULL; // for sanity
+
+  // free the queue
+  pqueue_free(clock.timeouts_queue);
+  clock.timeouts_queue = NULL; // for sanity
+
+  // set these to NULL for sanity
+  clock.regs = NULL;
+  clock.num_timeouts = 0;
+
+  printf("[stop_timer]: timer freed and stopped\n");
+
+  return CLOCK_R_OK;
 }
