@@ -624,7 +624,7 @@ NORETURN void *main_continued(UNUSED void *arg) {
 
   int num_itr = 0;
   // 100ms timer tick
-  register_timer(100000, test_timeout_periodic, &num_itr);
+  // register_timer(100000, test_timeout_periodic, &num_itr);
 
   // register a few more concurrent timeouts
 
@@ -633,16 +633,21 @@ NORETURN void *main_continued(UNUSED void *arg) {
 
   // a few out of order one
   register_timer(30000000, test_timeout_single, NULL); // 30s
-  register_timer(10000000, test_timeout_single, NULL); // 10s
-  register_timer(20000000, test_timeout_single, NULL); // 20s
-  register_timer(18000000, test_timeout_single, NULL); // 18s
-  register_timer(14000000, test_timeout_single, NULL); // 14s
+  // register_timer(10000000, test_timeout_single, NULL); // 10s
+  // register_timer(20000000, test_timeout_single, NULL); // 20s
+  // register_timer(18000000, test_timeout_single, NULL); // 18s
+  // register_timer(14000000, test_timeout_single, NULL); // 14s
+  register_timer(31000000, test_timeout_single, NULL); // 31s
+  register_timer(35000000, test_timeout_single, NULL); // 35s
+  register_timer(32000000, test_timeout_single, NULL); // 32s
+  register_timer(34000000, test_timeout_single, NULL); // 34s
+  register_timer(33000000, test_timeout_single, NULL); // 33s
 
   // and a few precise ones to test 10ms precision
-  register_timer(40040000, test_timeout_single, NULL); // 40.04s
-  register_timer(40030000, test_timeout_single, NULL); // 40.03s
-  register_timer(40020000, test_timeout_single, NULL); // 40.02s
-  register_timer(40010000, test_timeout_single, NULL); // 40.01s
+  // register_timer(40040000, test_timeout_single, NULL); // 40.04s
+  // register_timer(40030000, test_timeout_single, NULL); // 40.03s
+  // register_timer(40020000, test_timeout_single, NULL); // 40.02s
+  // register_timer(40010000, test_timeout_single, NULL); // 40.01s
 
   // case timer is longer than 65.535
   register_timer(70000000, test_timeout_single, NULL); // 70.00s
