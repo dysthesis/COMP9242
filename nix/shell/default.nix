@@ -8,8 +8,8 @@
 }: let
   pkgs' = pkgs.unstable.pkgsCross.aarch64-multiplatform;
   gdb = pkgs'.writeShellScriptBin "gdb" ''
-      exec ${pkgs'.buildPackages.gdb}/bin/aarch64-unknown-linux-gnu-gdb "$@"
-    '';
+    exec ${pkgs'.buildPackages.gdb}/bin/aarch64-unknown-linux-gnu-gdb "$@"
+  '';
   gef' = pkgs'.buildPackages.gef.override {
     inherit gdb;
   };
@@ -46,6 +46,7 @@
 in {
   default = pkgs.unstable.mkShell {
     name = "COMP9242 SOS";
+    inputsFrom = [self.packages.${pkgs.system}.default];
     packages =
       (with pkgs; [
         cmake
@@ -68,6 +69,13 @@ in {
         unstable.deadnix
         unstable.clang-tools
         gef'
+        (unstable.typst.withPackages (ps:
+          with ps; [
+            algo
+            algorithmic
+            cetz
+          ]))
+        unstable.tinymist
         (pkgs.writeShellScriptBin "gdb"
           # sh
           ''
