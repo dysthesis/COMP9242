@@ -19,7 +19,7 @@
 #include "device.h"
 
 // initial number of timeouts
-#define INITIAL_TIMEOUTS 0
+#define INITIAL_TIMEOUTS 10
 
 /*
  * A singular timeout, consisting of the deadline and callback.
@@ -211,7 +211,7 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
   timeout_t *earliest = pqueue_peek(clock.timeouts_queue);
 
   // if earliest set time out
-  if (earliest->id == new_timeout->id) {
+  if (earliest && earliest->id == new_timeout->id) {
     // if we reach here, I am the earliest timeout, I set the timer
 
     // if the delay is bigger than the max value of 16 bit timer, we have no
@@ -274,36 +274,25 @@ int remove_timer(uint32_t id) {
 }
 
 // converts a 64 bit delay into a 32 bit number (where lower 16 bits are..)
-struct delay delay_to_16(uint64_t real_delay) {
-  struct delay delay;
-  delay.start_count = 0;
-  if (real_delay >> 16 == 0) {
-    delay.start_count |= real_delay;
-    delay.timer_base = TIMEOUT_TIMEBASE_1_US;
-  }
-  uint64_t temp_dealy = real_delay / 10;
-  // case 10 microseconds
-  if (temp_dealy >> 16 == 0) {
-    delay.start_count |= temp_dealy;
-    delay.timer_base = TIMEOUT_TIMEBASE_10_US;
-  }
-  temp_dealy /= 10;
-  // case 100 microseconds
-  if (temp_dealy >> 16 == 0) {
-    delay.start_count |= temp_dealy;
-    delay.timer_base = TIMEOUT_TIMEBASE_100_US;
-  }
-  temp_dealy /= 10;
-  // case 1 milisecond
-  if (temp_dealy >> 16 == 0) {
-    delay.start_count |= temp_dealy;
-    delay.timer_base = TIMEOUT_TIMEBASE_1_MS;
-    // case it cant be represented so do longest delay possible?
+struct delay delay_to_16(uint64_t us) {
+  struct delay d;
+  if ((us >> 16) == 0) {
+    d.start_count = (uint16_t)us;
+    d.timer_base = TIMEOUT_TIMEBASE_1_US;
+  } else if ((us /= 10, (us >> 16) == 0)) {
+    d.start_count = (uint16_t)us;
+    d.timer_base = TIMEOUT_TIMEBASE_10_US;
+  } else if ((us /= 10, (us >> 16) == 0)) {
+    d.start_count = (uint16_t)us;
+    d.timer_base = TIMEOUT_TIMEBASE_100_US;
+  } else if ((us /= 10, (us >> 16) == 0)) {
+    d.start_count = (uint16_t)us;
+    d.timer_base = TIMEOUT_TIMEBASE_1_MS;
   } else {
-    delay.start_count = UINT16_MAX;
-    delay.timer_base = TIMEOUT_TIMEBASE_1_MS;
+    d.start_count = UINT16_MAX;
+    d.timer_base = TIMEOUT_TIMEBASE_1_MS;
   }
-  return delay;
+  return d;
 }
 
 /*
