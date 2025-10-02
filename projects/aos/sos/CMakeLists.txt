@@ -76,6 +76,7 @@ target_link_libraries(
     sel4
     elf
     cpio
+    pqueue
     networkconsole
     clock
     sel4cspace

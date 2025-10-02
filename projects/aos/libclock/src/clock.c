@@ -13,6 +13,7 @@
 #include <pqueue.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* The functions in src/device.h should help you interact with the timer
  * to set registers and configure timeouts. */
