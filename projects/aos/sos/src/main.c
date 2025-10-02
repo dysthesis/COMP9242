@@ -623,8 +623,8 @@ NORETURN void *main_continued(UNUSED void *arg) {
   seL4_IRQHandler_Ack(timeout_irq_handler);
 
   int num_itr = 0;
-  // test timeouts recursively
-  register_timer(10000000, test_timeout_periodic, &num_itr);
+  // 100ms timer tick
+  register_timer(100000, test_timeout_periodic, &num_itr);
 
   // register a few more concurrent timeouts
 
@@ -632,17 +632,21 @@ NORETURN void *main_continued(UNUSED void *arg) {
   register_timer(100000000, test_timeout_single, NULL); // 100s
 
   // a few out of order one
-  register_timer(15000000, test_timeout_single, NULL); // 15s
-  register_timer(13000000, test_timeout_single, NULL); // 13s
+  register_timer(30000000, test_timeout_single, NULL); // 30s
+  register_timer(10000000, test_timeout_single, NULL); // 10s
   register_timer(20000000, test_timeout_single, NULL); // 20s
   register_timer(18000000, test_timeout_single, NULL); // 18s
   register_timer(14000000, test_timeout_single, NULL); // 14s
 
   // and a few precise ones to test 10ms precision
-  register_timer(15040000, test_timeout_single, NULL); // 15.04s
-  register_timer(15030000, test_timeout_single, NULL); // 15.03s
-  register_timer(15020000, test_timeout_single, NULL); // 15.02s
-  register_timer(15010000, test_timeout_single, NULL); // 15.01s
+  register_timer(40040000, test_timeout_single, NULL); // 40.04s
+  register_timer(40030000, test_timeout_single, NULL); // 40.03s
+  register_timer(40020000, test_timeout_single, NULL); // 40.02s
+  register_timer(40010000, test_timeout_single, NULL); // 40.01s
+
+  // case timer is longer than 65.535
+  register_timer(70000000, test_timeout_single, NULL); // 70.00s
+
 
   /* Start the user application */
   printf("Start first process\n");

@@ -27,7 +27,7 @@ void test_timeout_periodic(UNUSED uint32_t id, void *data) {
 
   timestamp_t now = get_time();
 
-  printf("[test_timeout_periodic]: Timestamp: ");
+  printf("[test_timeout_periodic]: itteration %d Timestamp: ", *(int *)data);
   print_timestamp(now);
 
   // increment the number of iterations
