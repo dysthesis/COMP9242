@@ -61,7 +61,7 @@
 #define IRQ_EP_BADGE BIT(seL4_BadgeBits - 1ul)
 #define IRQ_IDENT_BADGE_BITS MASK(seL4_BadgeBits - 1ul)
 
-#define APP_NAME "console_test"
+#define APP_NAME "syscall_test"
 #define APP_PRIORITY (0)
 #define APP_EP_BADGE (101)
 
@@ -651,7 +651,6 @@ NORETURN void *main_continued(UNUSED void *arg) {
 
   // case timer is longer than 65.535
   register_timer(70000000, test_timeout_single, NULL); // 70.00s
-
 
   /* Start the user application */
   printf("Start first process\n");
