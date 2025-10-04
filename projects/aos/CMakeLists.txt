@@ -30,6 +30,7 @@ add_subdirectory(libethernet)
 add_subdirectory(libsel4cspace)
 add_subdirectory(libnetworkconsole)
 add_subdirectory(libsosapi)
+add_subdirectory(libshmem)
 # add any additional libs here
 
 # enable our networking libs
