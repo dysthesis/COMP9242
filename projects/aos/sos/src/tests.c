@@ -171,6 +171,8 @@ static void test_shared_frame(cspace_t *cspace) {
   int err = sos_alloc_shared_page(cspace, seL4_CapInitThreadVSpace, u_va,
                                   k_va, &shared_page);
   assert(err == 0);
+  assert(shared_page.k_cap != seL4_CapNull);
+  assert(shared_page.u_cap != seL4_CapNull);
 
   volatile uint8_t *k_ptr = (volatile uint8_t *)k_va;
   volatile uint8_t *u_ptr = (volatile uint8_t *)u_va;
@@ -193,6 +195,7 @@ static void test_shared_frame(cspace_t *cspace) {
   sos_free_shared_page(cspace, &shared_page);
   assert(shared_page.frame == NULL_FRAME);
   assert(shared_page.k_cap == seL4_CapNull);
+  assert(shared_page.u_cap == seL4_CapNull);
   assert(shared_page.k_va == 0);
   assert(shared_page.u_va == 0);
 }

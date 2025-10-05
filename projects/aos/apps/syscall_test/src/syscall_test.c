@@ -116,7 +116,7 @@ int test_buffers(int console_fd) {
 
 int main(void) {
   ZF_LOGV("[syscall_test] Entered syscall testing app!\n");
-  // test_shared_page();
+  test_shared_page();
   test_buffers(10);
 
   return 0;

@@ -39,7 +39,7 @@ int sos_alloc_shared_page(cspace_t *sos_cspace, seL4_CPtr client_vspace_root,
     free_frame(frame);
     return -EIO;
   }
-  err = map_frame(sos_cspace, frame_cap, seL4_CapInitThreadVSpace, k_va,
+  err = map_frame(sos_cspace, k_cap, seL4_CapInitThreadVSpace, k_va,
                   seL4_AllRights, seL4_ARM_Default_VMAttributes);
   if (err) {
     ZF_LOGE("[ipc] failed to map the frame to SOS' virtual address space!");
@@ -51,8 +51,29 @@ int sos_alloc_shared_page(cspace_t *sos_cspace, seL4_CPtr client_vspace_root,
   // Zero the page to avoid leaking data.
   memset((void *)k_va, 0, PAGE_SIZE_4K);
 
+  seL4_CPtr u_cap = cspace_alloc_slot(sos_cspace);
+  if (u_cap == seL4_CapNull) {
+    ZF_LOGE("[ipc] no more space left in SOS' capability space for client!");
+    seL4_ARM_Page_Unmap(k_cap);
+    cspace_delete(sos_cspace, k_cap);
+    cspace_free_slot(sos_cspace, k_cap);
+    free_frame(frame);
+    return -ENOSPC;
+  }
+  err =
+      cspace_copy(sos_cspace, u_cap, sos_cspace, frame_cap, seL4_AllRights);
+  if (err) {
+    ZF_LOGE("[ipc] failed to copy frame capability to client slot!");
+    seL4_ARM_Page_Unmap(k_cap);
+    cspace_delete(sos_cspace, k_cap);
+    cspace_free_slot(sos_cspace, k_cap);
+    cspace_free_slot(sos_cspace, u_cap);
+    free_frame(frame);
+    return -EIO;
+  }
+
   // Map the allocated frame into the client's virtual address space.
-  err = map_frame(sos_cspace, frame_cap, client_vspace_root, u_va,
+  err = map_frame(sos_cspace, u_cap, client_vspace_root, u_va,
                   seL4_ReadWrite, seL4_ARM_Default_VMAttributes);
   if (err) {
     ZF_LOGE(
@@ -60,12 +81,15 @@ int sos_alloc_shared_page(cspace_t *sos_cspace, seL4_CPtr client_vspace_root,
     seL4_ARM_Page_Unmap(k_cap);
     cspace_delete(sos_cspace, k_cap);
     cspace_free_slot(sos_cspace, k_cap);
+    cspace_delete(sos_cspace, u_cap);
+    cspace_free_slot(sos_cspace, u_cap);
     free_frame(frame);
     return -EFAULT;
   }
 
   shared_page->frame = frame;
   shared_page->k_cap = k_cap;
+  shared_page->u_cap = u_cap;
   shared_page->k_va = k_va;
   shared_page->u_va = u_va;
 
@@ -85,7 +109,11 @@ void sos_free_shared_page(cspace_t *sos_cspace, shared_page_t *shared_page) {
   }
 
   // Unmap shared frame from the client
-  seL4_ARM_Page_Unmap(frame_page(shared_page->frame));
+  if (shared_page->u_cap) {
+    seL4_ARM_Page_Unmap(shared_page->u_cap);
+    cspace_delete(sos_cspace, shared_page->u_cap);
+    cspace_free_slot(sos_cspace, shared_page->u_cap);
+  }
 
   // Return frame to frame table
   free_frame(shared_page->frame);

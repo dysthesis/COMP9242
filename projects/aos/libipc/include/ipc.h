@@ -85,6 +85,7 @@ static inline unsigned badge_gen(seL4_Word b) {
 typedef struct {
   frame_ref_t frame; // handle to the frame table
   seL4_CPtr k_cap;   // page capability held by SOS
+  seL4_CPtr u_cap;   // page capability mapped into the client
   uintptr_t k_va;    // SOS' virtual address space where the page is mapped
   uintptr_t u_va;    // client virtual address space where the page is mapped
 } shared_page_t;
