@@ -5,46 +5,8 @@
 
 #include "cspace/cspace.h"
 #include "frame_table.h"
+#include "ipc_common.h"
 #include "sel4/simple_types.h"
-#include <stdint.h>
-
-#define SOS_IPC_MSG_WORDS 4u
-typedef enum {
-  SYSNO_OPEN,
-  SYSNO_CLOSE,
-  SYSNO_READ,
-  SYSNO_WRITE,
-  SYSNO_USLEEP,
-  SYSNO_TIMESTAMP,
-} sos_sysno_t;
-
-#define SOS_SYS_OPEN SYSNO_OPEN
-#define SOS_SYS_CLOSE SYSNO_CLOSE
-#define SOS_SYS_READ SYSNO_READ
-#define SOS_SYS_WRITE SYSNO_WRITE
-#define SOS_SYS_USLEEP SYSNO_USLEEP
-#define SOS_SYS_TIMESTAMP SYSNO_TIMESTAMP
-
-/*
- * An IPC message.
- *
- * NOTE: We keep this to SOS_IPC_MSG_WORDS words in order to allow our messages
- * to remain on the fastpath. See https://docs.sel4.systems/Tutorials/ipc.html
- * for more information.
- */
-typedef struct {
-  sos_sysno_t sysno; // syscall number
-  seL4_Word arg;     // arguments to provide the syscall, e.g. a file descriptor
-  seL4_Word buf_addr; // address of shared memory buffer
-  seL4_Word buf_size; // size of the shared memory buffer
-} sos_ipc_msg_t;
-
-_Static_assert(SOS_IPC_MSG_WORDS <= seL4_FastMessageRegisters,
-               "Keep IPC on fast path");
-
-seL4_MessageInfo_t sos_serialise_ipc_msg(const sos_ipc_msg_t *msg);
-int sos_deserialise_ipc_msg(const seL4_MessageInfo_t *msg_info,
-                            sos_ipc_msg_t *out);
 
 #define MAX_CLIENTS                                                            \
   1024u // how many clients can perform a system call simultaneously

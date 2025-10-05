@@ -13,8 +13,10 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <sos.h>
 
+#include <ipc_common.h>
 #include <sel4/sel4.h>
 
 static size_t sos_debug_print(const void *vData, size_t count)
@@ -31,8 +33,33 @@ static size_t sos_debug_print(const void *vData, size_t count)
 
 int sos_open(const char *path, fmode_t mode)
 {
-    assert(!"You need to implement this");
-    return -1;
+    if (!path) {
+        return -EINVAL;
+    }
+
+    size_t len = strnlen(path, MAX_IO_BUF);
+    if (len >= MAX_IO_BUF) {
+        return -ENAMETOOLONG;
+    }
+
+    char *shbuf = sos_shbuf_ptr();
+    memcpy(shbuf, path, len + 1);
+
+    sos_ipc_msg_t msg = {
+        .sysno = SOS_SYS_OPEN,
+        .arg = (seL4_Word)mode,
+        .buf_addr = PROCESS_SHBUF_UVA,
+        .buf_size = (seL4_Word)(len + 1),
+    };
+
+    seL4_MessageInfo_t request = sos_serialise_ipc_msg(&msg);
+    seL4_MessageInfo_t reply = seL4_Call(SOS_IPC_EP_CAP, request);
+
+    if (seL4_MessageInfo_get_length(reply) < 1) {
+        return -EINVAL;
+    }
+
+    return (int)seL4_GetMR(0);
 }
 
 int sos_close(int file)

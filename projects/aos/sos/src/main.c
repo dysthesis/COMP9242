@@ -11,7 +11,10 @@
  */
 #include <assert.h>
 #include <autoconf.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <ipc.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -95,6 +98,20 @@ uint8_t generations[MAX_CLIENTS]; // keep track of the current generation
 uint16_t free_ids[MAX_CLIENTS];   // free IDs for new clients
 size_t free_top;
 
+#define SOS_MAX_OPEN_FILES 32
+typedef struct {
+  bool used;
+  bool readable;
+  bool writable;
+} sos_fd_entry_t;
+
+typedef struct {
+  bool initialised;
+  sos_fd_entry_t fds[SOS_MAX_OPEN_FILES];
+} sos_client_io_state_t;
+
+static sos_client_io_state_t client_io_state[MAX_CLIENTS];
+
 /* the one process we start */
 static struct {
   ut_t *tcb_ut;
@@ -120,30 +137,119 @@ static struct {
  * Deals with a syscall and sets the message registers before returning the
  * message info to be passed through to seL4_ReplyRecv()
  */
-seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge, UNUSED int num_args,
+seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
+                                  const seL4_MessageInfo_t *message,
                                   bool *have_reply, client_t *caller) {
   seL4_MessageInfo_t reply_msg;
 
-  /* get the first word of the message, which in the SOS protocol is the number
-   * of the SOS "syscall". */
-  seL4_Word syscall_number = seL4_GetMR(0);
+  seL4_Word raw_syscall = seL4_GetMR(0);
+  if (raw_syscall == SOS_SYSCALL0) {
+    reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+    seL4_SetMR(0, 0);
+    *have_reply = true;
+    return reply_msg;
+  }
+
+  sos_ipc_msg_t ipc_msg;
+  if (sos_deserialise_ipc_msg(message, &ipc_msg) != 0) {
+    reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+    seL4_SetMR(0, -EINVAL);
+    *have_reply = true;
+    return reply_msg;
+  }
+
+  sos_sysno_t syscall_number = ipc_msg.sysno;
 
   /* Set the reply flag */
   *have_reply = true;
 
   /* Process system call */
   switch (syscall_number) {
-  case SOS_SYSCALL0:
-    ZF_LOGV("syscall: thread example made syscall 0!\n");
-    /* construct a reply message of length 1 */
+  case SYSNO_OPEN: {
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
-    /* Set the first (and only) word in the message to 0 */
-    seL4_SetMR(0, 0);
 
+    if (!caller) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    unsigned client_id = caller->id;
+    if (client_id >= MAX_CLIENTS) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    sos_client_io_state_t *state = &client_io_state[client_id];
+    if (!state->initialised) {
+      memset(state->fds, 0, sizeof(state->fds));
+      for (int i = 0; i < MIN(3, SOS_MAX_OPEN_FILES); i++) {
+        state->fds[i].used = true; // reserve stdin/out/err
+      }
+      state->initialised = true;
+    }
+
+    int mode = (int)ipc_msg.arg;
+    seL4_Word user_buf = ipc_msg.buf_addr;
+    seL4_Word buf_len = ipc_msg.buf_size;
+
+    if (user_buf != PROCESS_SHBUF_UVA) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    if (buf_len == 0 || buf_len > PAGE_SIZE_4K) {
+      seL4_SetMR(0, -EMSGSIZE);
+      break;
+    }
+
+    char *shared_str = (char *)caller->shbuf.k_va;
+    size_t max_copy = MIN((size_t)buf_len, (size_t)PAGE_SIZE_4K);
+    size_t name_len = strnlen(shared_str, max_copy);
+    if (name_len == max_copy) {
+      seL4_SetMR(0, -ENAMETOOLONG);
+      break;
+    }
+
+    char filename[PAGE_SIZE_4K];
+    memcpy(filename, shared_str, name_len + 1);
+
+    if (strcmp(filename, "console") != 0) {
+      seL4_SetMR(0, -ENODEV);
+      break;
+    }
+
+    int accmode = mode & O_ACCMODE;
+    bool want_read = (accmode == O_RDONLY) || (accmode == O_RDWR);
+    bool want_write = (accmode == O_WRONLY) || (accmode == O_RDWR);
+
+    if (!want_read && !want_write) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    int fd = -1;
+    for (int i = 0; i < SOS_MAX_OPEN_FILES; i++) {
+      if (!state->fds[i].used) {
+        fd = i;
+        break;
+      }
+    }
+
+    if (fd < 0) {
+      seL4_SetMR(0, -EMFILE);
+      break;
+    }
+
+    state->fds[fd].used = true;
+    state->fds[fd].readable = want_read;
+    state->fds[fd].writable = want_write;
+
+    seL4_SetMR(0, fd);
     break;
+  }
   default:
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
-    ZF_LOGE("Unknown syscall %lu\n", syscall_number);
+    ZF_LOGE("Unknown syscall %lu\n", (unsigned long)syscall_number);
     /* Don't reply to an unknown syscall */
     *have_reply = false;
   }
@@ -193,8 +299,7 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
 
       /* It's not a fault or an interrupt, it must be an IPC
        * message from console_test! */
-      reply_msg = handle_syscall(
-          badge, seL4_MessageInfo_get_length(message) - 1, &have_reply, caller);
+      reply_msg = handle_syscall(badge, &message, &have_reply, caller);
     } else {
       /* some kind of fault */
       debug_print_fault(message, APP_NAME);
