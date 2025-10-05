@@ -17,9 +17,9 @@
 #include <assert.h>
 #include <clock/clock_tests.h>
 #include <cspace/cspace.h>
+#include <ipc.h>
 #include <sel4/sel4.h>
 #include <utils/util.h>
-#include <ipc.h>
 
 #define TEST_FRAMES 10
 
@@ -168,8 +168,8 @@ static void test_shared_frame(cspace_t *cspace) {
   const uintptr_t u_va = SOS_SCRATCH + PAGE_SIZE_4K;
 
   shared_page_t shared_page;
-  int err = sos_alloc_shared_page(cspace, seL4_CapInitThreadVSpace, u_va,
-                                  k_va, &shared_page);
+  int err = sos_alloc_shared_page(cspace, seL4_CapInitThreadVSpace, u_va, k_va,
+                                  &shared_page);
   assert(err == 0);
   assert(shared_page.k_cap != seL4_CapNull);
   assert(shared_page.u_cap != seL4_CapNull);
@@ -235,9 +235,10 @@ void run_tests(cspace_t *cspace) {
   test_frame_table();
   ZF_LOGI("Frame table test passed!");
 
+  test_clock();
+  ZF_LOGI("Clock test passed!");
+
   /* test shared page allocation */
   test_shared_frame(cspace);
   ZF_LOGI("Shared frame test passed!");
-  // test_clock();
-  // ZF_LOGI("Clock tests passed!");
 }
