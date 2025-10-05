@@ -4,7 +4,6 @@
 #include "sel4/shared_types.h"
 #include "sel4/simple_types.h"
 #include "utils/zf_log.h"
-#include <cerrno>
 #include <cspace/cspace.h>
 #include <errno.h>
 #include <frame_table.h>
