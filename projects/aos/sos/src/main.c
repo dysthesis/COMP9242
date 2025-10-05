@@ -119,7 +119,7 @@ static struct {
  * message info to be passed through to seL4_ReplyRecv()
  */
 seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge, UNUSED int num_args,
-                                  bool *have_reply) {
+                                  bool *have_reply, client_t *caller) {
   seL4_MessageInfo_t reply_msg;
 
   /* get the first word of the message, which in the SOS protocol is the number
@@ -192,7 +192,7 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
       /* It's not a fault or an interrupt, it must be an IPC
        * message from console_test! */
       reply_msg = handle_syscall(
-          badge, seL4_MessageInfo_get_length(message) - 1, &have_reply);
+          badge, seL4_MessageInfo_get_length(message) - 1, &have_reply, caller);
     } else {
       /* some kind of fault */
       debug_print_fault(message, APP_NAME);
