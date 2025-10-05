@@ -44,9 +44,9 @@ client_t *client_create(seL4_CPtr vspace_root, seL4_Word *out_badge,
 
   if (out_badge)
     *out_badge = badge_make(
-        gen, id,
-        /* we're not using flags for now, but this might be
-                           handy to differentiate IPC messages later on */
+        id, gen,
+        /* we're not using flags for now, but this might be handy to
+           differentiate IPC messages later on */
         0);
   return c;
 }
