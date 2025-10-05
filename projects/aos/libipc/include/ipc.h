@@ -18,6 +18,13 @@ typedef enum {
 #define SOS_SYS_USLEEP SYSNO_USLEEP
 #define SOS_SYS_TIMESTAMP SYSNO_TIMESTAMP
 
+/*
+ * An IPC message.
+ *
+ * NOTE: We keep this to 4 words in order to allow our messages to remain on the
+ * fastpath. See https://docs.sel4.systems/Tutorials/ipc.html for more
+ * information.
+ */
 typedef struct {
   sos_sysno_t sysno; // syscall number
   seL4_Word arg;     // arguments to provide the syscall, e.g. a file descriptor
