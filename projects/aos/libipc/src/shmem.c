@@ -77,7 +77,8 @@ int sos_alloc_shared_page(cspace_t *sos_cspace, seL4_CPtr client_vspace_root,
                   seL4_ReadWrite, seL4_ARM_Default_VMAttributes);
   if (err) {
     ZF_LOGE(
-        "[ipc] failed to map the frame to the client's virtual address space!");
+        "[ipc] failed to map the frame to the client's virtual address space (err=%d)!",
+        err);
     seL4_ARM_Page_Unmap(k_cap);
     cspace_delete(sos_cspace, k_cap);
     cspace_free_slot(sos_cspace, k_cap);

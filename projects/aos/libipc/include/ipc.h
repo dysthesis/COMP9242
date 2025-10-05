@@ -1,6 +1,8 @@
 /*
  * An enum defining the system call numbers supported by SOS.
  */
+#pragma once
+
 #include "cspace/cspace.h"
 #include "frame_table.h"
 #include "sel4/simple_types.h"
@@ -76,9 +78,18 @@ int sos_deserialise_ipc_msg(const seL4_MessageInfo_t *msg_info,
 #define ID_BITS 10u // log(MAX_CLIENTS)
 #define GEN_BITS 8u
 #define ID_MASK ((1u << ID_BITS) - 1)
+#define GEN_MASK ((seL4_Word)((((seL4_Word)1u << GEN_BITS) - 1u)))
+#define GEN_SHIFT (ID_BITS)
 
-static inline seL4_Word badge_make(unsigned id, unsigned gen, unsigned flags) {
-  return (flags) | ((seL4_Word)gen << ID_BITS) | (seL4_Word)id;
+static inline seL4_Word badge_make(unsigned id, unsigned gen, seL4_Word flags) {
+  // flags don’t touch the low region
+  const seL4_Word LOW_MASK = (((seL4_Word)1u << (ID_BITS + GEN_BITS)) - 1u);
+  assert((flags & LOW_MASK) == 0);
+
+  // Pack with masking to prevent overflow
+  return ((seL4_Word)(id & ID_MASK)) |
+         ((seL4_Word)((gen & GEN_MASK) << GEN_SHIFT)) |
+         flags; // already confined to high bits
 }
 static inline unsigned badge_id(seL4_Word b) { return b & ID_MASK; }
 static inline unsigned badge_gen(seL4_Word b) {
@@ -110,3 +121,22 @@ int sos_alloc_shared_page(cspace_t *sos_cspace, seL4_CPtr client_vspace_root,
  * Deallocate and tear down a shared page.
  */
 void sos_free_shared_page(cspace_t *sos_cspace, shared_page_t *shared_page);
+
+typedef struct client {
+  unsigned id;         // slot ID
+  uint8_t gen;         // generation
+  seL4_CPtr vspace;    // client's VSpace root capability (in SOS's CSpace)
+  shared_page_t shbuf; // the shared page for IPC
+} client_t;
+
+extern client_t *clients[MAX_CLIENTS];
+extern uint8_t generations[MAX_CLIENTS];
+
+extern uint16_t free_ids[MAX_CLIENTS];
+extern size_t free_top;
+
+void client_table_init(void);
+client_t *client_create(seL4_CPtr vspace_root, seL4_Word *out_badge,
+                        cspace_t *sos_cspace);
+client_t *client_lookup(seL4_Word badge);
+void client_destroy(client_t *client, cspace_t *sos_cspace);

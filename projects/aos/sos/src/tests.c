@@ -74,12 +74,14 @@ static void test_cspace(cspace_t *cspace) {
   cspace_free_slot(cspace, cptr_new);
 
   /* test allocating and freeing a large amount of slots */
+  const int reserve_slots = WATERMARK_SLOTS + MAPPING_SLOTS + 2;
   int nslots = CNODE_SLOTS(CNODE_SIZE_BITS) / 2;
   if (cspace->two_level) {
-    nslots = MIN(CNODE_SLOTS(cspace->top_lvl_size_bits) *
-                         CNODE_SLOTS(CNODE_SIZE_BITS) -
-                     4,
-                 CNODE_SLOTS(CNODE_SIZE_BITS) * BOT_LVL_PER_NODE + 1);
+    int total_slots = CNODE_SLOTS(cspace->top_lvl_size_bits) *
+                      CNODE_SLOTS(CNODE_SIZE_BITS);
+    int usable = total_slots - reserve_slots;
+    usable = usable < 0 ? 0 : usable;
+    nslots = MIN(usable, CNODE_SLOTS(CNODE_SIZE_BITS) * BOT_LVL_PER_NODE + 1);
   }
   seL4_CPtr *slots = malloc(sizeof(seL4_CPtr) * nslots);
   assert(slots != NULL);
