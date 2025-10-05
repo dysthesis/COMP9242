@@ -1,7 +1,10 @@
 /*
  * An enum defining the system call numbers supported by SOS.
  */
+#include "cspace/cspace.h"
+#include "frame_table.h"
 #include "sel4/simple_types.h"
+#include <stdint.h>
 typedef enum {
   SYSNO_OPEN,
   SYSNO_CLOSE,
@@ -75,3 +78,29 @@ static inline unsigned badge_id(seL4_Word b) { return b & ID_MASK; }
 static inline unsigned badge_gen(seL4_Word b) {
   return (b >> ID_BITS) & ((1u << GEN_BITS) - 1);
 }
+
+/*
+ * A shared page between the client and the server
+ */
+typedef struct {
+  frame_ref_t frame; // handle to the frame table
+  seL4_CPtr k_cap;   // page capability held by SOS
+  seL4_CPtr u_cap;   // page capability mapped into the client
+  uintptr_t k_va;    // SOS' virtual address space where the page is mapped
+  uintptr_t u_va;    // client virtual address space where the page is mapped
+} shared_page_t;
+
+/*
+ * Allocates a shared page between SOS and the client.
+ *
+ * - Retunrs 0 and fills out `shared_page` upon success, or
+ * - returns 1 and zeroes out `shared_page` otherwise.
+ */
+int sos_alloc_shared_page(cspace_t *sos_cspace, seL4_CPtr client_vspace_root,
+                          uintptr_t u_va, uintptr_t k_va,
+                          shared_page_t *shared_page);
+
+/*
+ * Deallocate and tear down a shared page.
+ */
+void sos_free_shared_page(cspace_t *sos_cspace, shared_page_t *shared_page);

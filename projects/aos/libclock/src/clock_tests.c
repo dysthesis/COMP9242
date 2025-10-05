@@ -4,6 +4,7 @@
 #include <sel4runtime.h>
 #include <stdio.h>
 #include <utils/util.h>
+#define MAX_PERIODIC_TEST_ITERS 5
 
 /*
  * A nice pretty-printer for timestamps
@@ -27,18 +28,19 @@ void test_timeout_periodic(UNUSED uint32_t id, void *data) {
 
   timestamp_t now = get_time();
 
-  printf("[test_timeout_periodic]: itteration %d Timestamp: ", *(int *)data);
+  printf("[test_timeout_periodic]: iteration %d Timestamp: ", *(int *)data);
   print_timestamp(now);
 
   // increment the number of iterations
   int num_itr = *(int *)data;
-  num_itr++;
-  *(int *)data = num_itr;
+  if (num_itr < MAX_PERIODIC_TEST_ITERS) {
+    num_itr++;
 
-  // register next timeout
+    *(int *)data = num_itr;
 
-  // 100ms
-  register_timer(100000, test_timeout_periodic, data);
+    // register next timeout
+    register_timer(100000, test_timeout_periodic, data); // 100ms
+  }
 }
 
 void test_timeout_single(UNUSED uint32_t id, UNUSED void *data) {
@@ -49,25 +51,22 @@ void test_timeout_single(UNUSED uint32_t id, UNUSED void *data) {
 }
 
 void test_clock() {
-  // test timeouts recursively
-  // TODO: Figure out how to terminate this
-  // register_timer(10000000, test_timeout_periodic, &num_itr);
+  static int periodic_iterations = 0;
 
-  // register a few more concurrent timeouts
-  // a really long one
-  register_timer(100000000, test_timeout_single, NULL); // 100s
+  register_timer(100000, test_timeout_periodic, &periodic_iterations);
 
-  // a few out of order one
-  register_timer(15000000, test_timeout_single, NULL); // 15s
-  register_timer(13000000, test_timeout_single, NULL); // 13s
-  register_timer(20000000, test_timeout_single, NULL); // 20s
-  register_timer(18000000, test_timeout_single, NULL); // 18s
-  register_timer(14000000, test_timeout_single, NULL); // 14s
+  const uint64_t single_shot_delays[] = {
+      100000000, // 100s
+      30000000,  // 30s
+      31000000,  // 31s
+      35000000,  // 35s
+      32000000,  // 32s
+      34000000,  // 34s
+      33000000,  // 33s
+      70000000,  // 70s
+  };
 
-  // and a few precise ones to test 10ms precision
-  register_timer(15040000, test_timeout_single, NULL); // 15.04s
-  register_timer(15030000, test_timeout_single, NULL); // 15.03s
-  register_timer(15020000, test_timeout_single, NULL); // 15.02s
-  register_timer(15010000, test_timeout_single, NULL); // 15.01s
-  return;
+  for (size_t i = 0; i < ARRAY_SIZE(single_shot_delays); i++) {
+    register_timer(single_shot_delays[i], test_timeout_single, NULL);
+  }
 }
