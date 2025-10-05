@@ -11,6 +11,7 @@
  */
 #include <sel4/sel4.h>
 #include <sel4/sel4_arch/mapping.h>
+#include <utils/zf_log.h>
 
 #include "mapping.h"
 #include "ut.h"
@@ -123,6 +124,10 @@ static seL4_Error map_frame_impl(cspace_t *cspace, seL4_CPtr frame_cap, seL4_CPt
         }
     }
 
+    if (err != seL4_NoError) {
+        ZF_LOGD("map_frame_impl: failed to map frame cap %lx into vspace %lx at %p (err=%d)",
+                frame_cap, vspace, (void *)vaddr, err);
+    }
     return err;
 }
 

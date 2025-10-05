@@ -101,6 +101,8 @@ static struct {
   seL4_CPtr tcb;
   ut_t *vspace_ut;
   seL4_CPtr vspace;
+  client_t *client;
+  seL4_Word badge;
 
   ut_t *ipc_buffer_ut;
   seL4_CPtr ipc_buffer;
@@ -370,12 +372,17 @@ static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace,
  * user can force your OS to run out of memory by creating lots of failed
  * processes.
  */
-bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
+bool start_first_process(char *app_name, seL4_CPtr ep) {
+  bool success = false;
+  client_t *client = NULL;
+  seL4_Word client_badge = 0;
+  user_process.client = NULL;
+  user_process.badge = 0;
   /* Create a VSpace */
   user_process.vspace_ut = alloc_retype(
       &user_process.vspace, seL4_ARM_PageGlobalDirectoryObject, seL4_PGDBits);
   if (user_process.vspace_ut == NULL) {
-    return false;
+    goto out;
   }
 
   /* assign the vspace to an asid pool */
@@ -383,14 +390,22 @@ bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
       seL4_ARM_ASIDPool_Assign(seL4_CapInitThreadASIDPool, user_process.vspace);
   if (err != seL4_NoError) {
     ZF_LOGE("Failed to assign asid pool");
-    return false;
+    goto out;
   }
+
+  client = client_create(user_process.vspace, &client_badge, &cspace);
+  if (!client) {
+    ZF_LOGE("client_create failed");
+    goto out;
+  }
+  user_process.client = client;
+  user_process.badge = client_badge;
 
   /* Create a simple 1 level CSpace */
   err = cspace_create_one_level(&cspace, &user_process.cspace);
   if (err != CSPACE_NOERROR) {
     ZF_LOGE("Failed to create cspace");
-    return false;
+    goto out;
   }
 
   /* Create an IPC buffer */
@@ -398,7 +413,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
       &user_process.ipc_buffer, seL4_ARM_SmallPageObject, seL4_PageBits);
   if (user_process.ipc_buffer_ut == NULL) {
     ZF_LOGE("Failed to alloc ipc buffer ut");
-    return false;
+    goto out;
   }
 
   /* allocate a new slot in the target cspace which we will mint a badged
@@ -407,7 +422,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
   seL4_CPtr user_ep = cspace_alloc_slot(&user_process.cspace);
   if (user_ep == seL4_CapNull) {
     ZF_LOGE("Failed to alloc user ep slot");
-    return false;
+    goto out;
   }
 
   /* now mutate the cap, thereby setting the badge */
@@ -415,7 +430,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
                     client_badge);
   if (err) {
     ZF_LOGE("Failed to mint user ep");
-    return false;
+    goto out;
   }
 
   /* Create a new TCB object */
@@ -423,7 +438,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
       alloc_retype(&user_process.tcb, seL4_TCBObject, seL4_TCBBits);
   if (user_process.tcb_ut == NULL) {
     ZF_LOGE("Failed to alloc tcb ut");
-    return false;
+    goto out;
   }
 
   /* Configure the TCB */
@@ -432,7 +447,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
                            PROCESS_IPC_BUFFER, user_process.ipc_buffer);
   if (err != seL4_NoError) {
     ZF_LOGE("Unable to configure new TCB");
-    return false;
+    goto out;
   }
 
   /* Create scheduling context */
@@ -441,7 +456,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
                    seL4_MinSchedContextBits);
   if (user_process.sched_context_ut == NULL) {
     ZF_LOGE("Failed to alloc sched context ut");
-    return false;
+    goto out;
   }
 
   /* Configure the scheduling context to use the first core with budget equal to
@@ -450,7 +465,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
       sched_ctrl_start, user_process.sched_context, US_IN_MS, US_IN_MS, 0, 0);
   if (err != seL4_NoError) {
     ZF_LOGE("Unable to configure scheduling context");
-    return false;
+    goto out;
   }
 
   /* bind sched context, set fault endpoint and priority
@@ -463,7 +478,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
                                 user_process.sched_context, ep);
   if (err != seL4_NoError) {
     ZF_LOGE("Unable to set scheduling params");
-    return false;
+    goto out;
   }
 
   /* Provide a name for the thread -- Helpful for debugging */
@@ -478,12 +493,12 @@ bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
       cpio_get_file(_cpio_archive, cpio_len, app_name, &elf_size);
   if (elf_base == NULL) {
     ZF_LOGE("Unable to locate cpio header for %s", app_name);
-    return false;
+    goto out;
   }
   /* Ensure that the file is an elf file. */
   if (elf_newFile(elf_base, elf_size, &elf_file)) {
     ZF_LOGE("Invalid elf file");
-    return false;
+    goto out;
   }
 
   /* set up the stack */
@@ -494,7 +509,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
   err = elf_load(&cspace, user_process.vspace, &elf_file);
   if (err) {
     ZF_LOGE("Failed to load elf image");
-    return false;
+    goto out;
   }
 
   /* Map in the IPC buffer for the thread */
@@ -503,7 +518,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
                   seL4_ARM_Default_VMAttributes);
   if (err != 0) {
     ZF_LOGE("Unable to map IPC buffer for user app");
-    return false;
+    goto out;
   }
 
   /* Start the new process */
@@ -514,7 +529,15 @@ bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
   printf("Starting %s at %p\n", APP_NAME, (void *)context.pc);
   err = seL4_TCB_WriteRegisters(user_process.tcb, 1, 0, 2, &context);
   ZF_LOGE_IF(err, "Failed to write registers");
-  return err == seL4_NoError;
+  success = (err == seL4_NoError);
+
+out:
+  if (!success && client) {
+    client_destroy(client, &cspace);
+    user_process.client = NULL;
+    user_process.badge = 0;
+  }
+  return success;
 }
 
 /* Allocate an endpoint and a notification object for sos.
@@ -638,14 +661,9 @@ NORETURN void *main_continued(UNUSED void *arg) {
   ZF_LOGF_IF(init_irq_err != 0, "Failed to initialise timeout IRQ");
   seL4_IRQHandler_Ack(timeout_irq_handler);
 
-  // Allocate a badge for the new process
-  seL4_Word badge = 0;
-  client_t *c = client_create(user_process.vspace, &badge);
-  ZF_LOGF_IF(!c, "client_create failed");
-
   /* Start the user application */
   printf("Start first process\n");
-  bool success = start_first_process(APP_NAME, ipc_ep, badge);
+  bool success = start_first_process(APP_NAME, ipc_ep);
   ZF_LOGF_IF(!success, "Failed to start first process");
 
   printf("\nSOS entering syscall loop\n");

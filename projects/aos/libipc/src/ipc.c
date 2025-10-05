@@ -1,7 +1,9 @@
+#include "cspace/cspace.h"
 #include <ipc.h>
 #include <sel4/sel4.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <vmem_layout.h>
 
 _Static_assert(SOS_IPC_MSG_WORDS <= seL4_FastMessageRegisters,
                "Too many message registers for fast path");
@@ -59,7 +61,8 @@ void client_table_init(void) {
 
 /* Create and register a client. Returns badge to mint into the client's
  * endpoint cap. */
-client_t *client_create(seL4_CPtr vspace_root, seL4_Word *out_badge) {
+client_t *client_create(seL4_CPtr vspace_root, seL4_Word *out_badge,
+                        cspace_t *sos_cspace) {
   if (free_top == 0)
     return NULL; // out of slots
   unsigned id = free_ids[--free_top];
@@ -74,7 +77,15 @@ client_t *client_create(seL4_CPtr vspace_root, seL4_Word *out_badge) {
   c->id = id;
   c->gen = (uint8_t)gen;
   c->vspace = vspace_root;
-  c->shbuf.present = false;
+
+  uintptr_t kva = SOS_SHBUF_BASE + (uintptr_t)id * PAGE_SIZE_4K;
+  if (sos_alloc_shared_page(sos_cspace, vspace_root, PROCESS_SHBUF_UVA, kva,
+                            &c->shbuf) != 0) {
+    free_ids[free_top++] = id;
+    free(c);
+    return NULL;
+  }
+
   clients[id] = c;
 
   if (out_badge)
@@ -94,11 +105,15 @@ client_t *client_lookup(seL4_Word badge) {
 }
 
 /* Destroy client */
-void client_destroy(client_t *client) {
+
+void client_destroy(client_t *client, cspace_t *sos_cspace) {
   if (!client)
     return;
   unsigned id = client->id;
   clients[id] = NULL;
+
+  sos_free_shared_page(sos_cspace, &client->shbuf);
+
   free_ids[free_top++] = id;
   free(client);
 }

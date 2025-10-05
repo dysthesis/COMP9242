@@ -1,6 +1,8 @@
 /*
  * An enum defining the system call numbers supported by SOS.
  */
+#pragma once
+
 #include "cspace/cspace.h"
 #include "frame_table.h"
 #include "sel4/simple_types.h"
@@ -103,7 +105,6 @@ typedef struct {
   seL4_CPtr u_cap;   // page capability mapped into the client
   uintptr_t k_va;    // SOS' virtual address space where the page is mapped
   uintptr_t u_va;    // client virtual address space where the page is mapped
-  bool present;      // attached?
 } shared_page_t;
 
 /*
@@ -135,6 +136,7 @@ extern uint16_t free_ids[MAX_CLIENTS];
 extern size_t free_top;
 
 void client_table_init(void);
-client_t *client_create(seL4_CPtr vspace_root, seL4_Word *out_badge);
+client_t *client_create(seL4_CPtr vspace_root, seL4_Word *out_badge,
+                        cspace_t *sos_cspace);
 client_t *client_lookup(seL4_Word badge);
-void client_destroy(client_t *client);
+void client_destroy(client_t *client, cspace_t *sos_cspace);
