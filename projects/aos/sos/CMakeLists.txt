@@ -67,7 +67,7 @@ add_executable(
     src/threads.c
     src/debugger.c
 )
-target_include_directories(sos PRIVATE "include")
+target_include_directories(sos PRIVATE "include" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(
     sos
     sel4_autoconf
@@ -87,6 +87,7 @@ target_link_libraries(
     nfs
     ethernet
     sos_Config
+    ipc
 )
 
 if(SosGDBSupport)

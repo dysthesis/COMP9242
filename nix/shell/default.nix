@@ -86,6 +86,7 @@ in {
         cc
         cc.bintools
       ]);
+    CMAKE_EXPORT_COMPILE_COMMANDS = "ON";
     shellHook =
       /*
       sh
