@@ -5,6 +5,8 @@
 #include "frame_table.h"
 #include "sel4/simple_types.h"
 #include <stdint.h>
+
+#define SOS_IPC_MSG_WORDS 4u
 typedef enum {
   SYSNO_OPEN,
   SYSNO_CLOSE,
@@ -24,9 +26,9 @@ typedef enum {
 /*
  * An IPC message.
  *
- * NOTE: We keep this to 4 words in order to allow our messages to remain on the
- * fastpath. See https://docs.sel4.systems/Tutorials/ipc.html for more
- * information.
+ * NOTE: We keep this to SOS_IPC_MSG_WORDS words in order to allow our messages
+ * to remain on the fastpath. See https://docs.sel4.systems/Tutorials/ipc.html
+ * for more information.
  */
 typedef struct {
   sos_sysno_t sysno; // syscall number
@@ -35,8 +37,12 @@ typedef struct {
   seL4_Word buf_size; // size of the shared memory buffer
 } sos_ipc_msg_t;
 
-_Static_assert(seL4_FastMessageRegisters >= 4,
-               "This ABI expects >= 4 fast MRs");
+_Static_assert(SOS_IPC_MSG_WORDS <= seL4_FastMessageRegisters,
+               "Keep IPC on fast path");
+
+seL4_MessageInfo_t sos_serialise_ipc_msg(const sos_ipc_msg_t *msg);
+int sos_deserialise_ipc_msg(const seL4_MessageInfo_t *msg_info,
+                            sos_ipc_msg_t *out);
 
 #define MAX_CLIENTS                                                            \
   1024u // how many clients can perform a system call simultaneously
@@ -93,7 +99,7 @@ typedef struct {
 /*
  * Allocates a shared page between SOS and the client.
  *
- * - Retunrs 0 and fills out `shared_page` upon success, or
+ * - Returns 0 and fills out `shared_page` upon success, or
  * - returns 1 and zeroes out `shared_page` otherwise.
  */
 int sos_alloc_shared_page(cspace_t *sos_cspace, seL4_CPtr client_vspace_root,
