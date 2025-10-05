@@ -11,6 +11,7 @@
  */
 #include <assert.h>
 #include <autoconf.h>
+#include <ipc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,6 +87,13 @@ cspace_t cspace;
 
 static seL4_CPtr sched_ctrl_start;
 static seL4_CPtr sched_ctrl_end;
+
+client_t *clients[MAX_CLIENTS];   // client bookkeeping for IPC
+uint8_t generations[MAX_CLIENTS]; // keep track of the current generation
+                                  // number for each client ID to prevent
+                                  // UAF of old, deallocated badges
+uint16_t free_ids[MAX_CLIENTS];   // free IDs for new clients
+size_t free_top;
 
 /* the one process we start */
 static struct {
@@ -174,6 +182,12 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
        * object! */
       sos_handle_irq_notification(&badge, &have_reply);
     } else if (label == seL4_Fault_NullFault) {
+      client_t *caller = client_lookup(badge);
+      if (!caller) {
+        ZF_LOGE("Unknown/stale caller badge=0x%lx", (unsigned long)badge);
+        have_reply = false;
+        continue;
+      }
 
       /* It's not a fault or an interrupt, it must be an IPC
        * message from console_test! */
@@ -356,7 +370,7 @@ static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace,
  * user can force your OS to run out of memory by creating lots of failed
  * processes.
  */
-bool start_first_process(char *app_name, seL4_CPtr ep) {
+bool start_first_process(char *app_name, seL4_CPtr ep, seL4_Word client_badge) {
   /* Create a VSpace */
   user_process.vspace_ut = alloc_retype(
       &user_process.vspace, seL4_ARM_PageGlobalDirectoryObject, seL4_PGDBits);
@@ -398,7 +412,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
 
   /* now mutate the cap, thereby setting the badge */
   err = cspace_mint(&user_process.cspace, user_ep, &cspace, ep, seL4_AllRights,
-                    APP_EP_BADGE);
+                    client_badge);
   if (err) {
     ZF_LOGE("Failed to mint user ep");
     return false;
@@ -611,6 +625,8 @@ NORETURN void *main_continued(UNUSED void *arg) {
   /* run sos initialisation tests */
   run_tests(&cspace);
 
+  client_table_init();
+
   /* You will need to register an IRQ handler for the timer here.
    * See "irq.h". */
   seL4_IRQHandler timeout_irq_handler = 0;
@@ -622,9 +638,14 @@ NORETURN void *main_continued(UNUSED void *arg) {
   ZF_LOGF_IF(init_irq_err != 0, "Failed to initialise timeout IRQ");
   seL4_IRQHandler_Ack(timeout_irq_handler);
 
+  // Allocate a badge for the new process
+  seL4_Word badge = 0;
+  client_t *c = client_create(user_process.vspace, &badge);
+  ZF_LOGF_IF(!c, "client_create failed");
+
   /* Start the user application */
   printf("Start first process\n");
-  bool success = start_first_process(APP_NAME, ipc_ep);
+  bool success = start_first_process(APP_NAME, ipc_ep, badge);
   ZF_LOGF_IF(!success, "Failed to start first process");
 
   printf("\nSOS entering syscall loop\n");
