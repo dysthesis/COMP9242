@@ -9,6 +9,7 @@
  *
  * @TAG(DATA61_GPL)
  */
+#include "utils/page.h"
 #include "utils/zf_log.h"
 #include <assert.h>
 #include <errno.h>
@@ -105,8 +106,62 @@ int sos_close(int file) {
 }
 
 int sos_read(int file, char *buf, size_t nbyte) {
-  assert(!"You need to implement this");
-  return -1;
+  if (!buf) {
+    sos_errno = EINVAL;
+    return -1;
+  }
+  if (nbyte == 0) {
+    sos_errno = 0;
+    return 0;
+  }
+
+  size_t limit = nbyte;
+  if (limit > (size_t)INT_MAX) {
+    limit = (size_t)INT_MAX;
+  }
+
+  size_t total = 0;
+  while (total < limit) {
+    size_t req = limit - total;
+    if (req > MAX_IO_BUF) {
+      req = MAX_IO_BUF;
+    }
+    if (req == 0) {
+      break;
+    }
+
+    sos_ipc_msg_t msg = {
+        .sysno = SOS_SYS_READ,
+        .arg = (seL4_Word)file,
+        .buf_addr = PROCESS_SHBUF_UVA,
+        .buf_size = (seL4_Word)req,
+    };
+
+    seL4_MessageInfo_t rep =
+        seL4_Call(SOS_IPC_EP_CAP, sos_serialise_ipc_msg(&msg));
+    if (seL4_MessageInfo_get_length(rep) < 1) {
+      sos_errno = EINVAL;
+      return -1;
+    }
+
+    int res = (int)seL4_GetMR(0); // bytes read or -errno
+    if (res < 0) {
+      sos_errno = -res;
+      return -1;
+    }
+    if (res == 0) {
+      break; // nothing left to read
+    }
+
+    memcpy(buf + total, sos_shbuf_ptr(), (size_t)res);
+    total += (size_t)res;
+
+    if ((size_t)res < req) {
+      break; // short read, don't force another call
+    }
+  }
+  sos_errno = 0;
+  return (int)total;
 }
 
 int sos_write(int file, const char *buf, size_t nbyte) {
