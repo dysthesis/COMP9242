@@ -255,6 +255,52 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     break;
   }
   case SOS_SYS_CLOSE: {
+    reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+
+    if (!caller) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    unsigned client_id = caller->id;
+    if (client_id >= MAX_CLIENTS) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    sos_client_io_state_t *state = &client_io_state[client_id];
+    if (!state->initialised) {
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    int fd = (int)ipc_msg.arg;
+
+    // Validate range
+    if (fd < 0 || fd >= SOS_MAX_OPEN_FILES) {
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    // Make close(0/1/2) a no-op that reports success, while we keep them
+    // reserved
+    if (fd < 3) {
+      seL4_SetMR(0, 0);
+      break;
+    }
+
+    // Make sure that the FD we're trying to close is actually currently in use.
+    if (!state->fds[fd].used) {
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    // Clean up the slot
+    state->fds[fd].used = false;
+    state->fds[fd].readable = false;
+    state->fds[fd].writable = false;
+
+    seL4_SetMR(0, 0);
     break;
   }
   default:
