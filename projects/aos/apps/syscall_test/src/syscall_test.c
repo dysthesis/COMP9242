@@ -37,6 +37,9 @@ static void test_sos_open(void) {
           sos_errno);
   assert(fd_long == -1);
   assert(sos_errno == ENAMETOOLONG);
+  // Clean up
+  assert(sos_close(fd_wr) == 0);
+  assert(sos_close(fd_rd) == 0);
   ZF_LOGI("[syscall_test] sos_open() tests successful!\n");
 }
 
