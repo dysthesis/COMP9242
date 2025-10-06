@@ -66,7 +66,7 @@
 #define IRQ_EP_BADGE BIT(seL4_BadgeBits - 1ul)
 #define IRQ_IDENT_BADGE_BITS MASK(seL4_BadgeBits - 1ul)
 
-#define APP_NAME "syscall_test"
+#define APP_NAME "sosh"
 #define APP_PRIORITY (0)
 #define APP_EP_BADGE (101)
 
@@ -354,6 +354,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     break;
   }
   case SOS_SYS_READ: {
+    printf("[sos] read: called!\n");
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
 
     if (!caller) {
@@ -361,8 +362,10 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       break;
     }
     unsigned client_id = caller->id;
+    printf("[sos] read: called by caller with id %d\n", client_id);
     if (client_id >= MAX_CLIENTS) {
       // bogus client id
+      printf("[sos] read: there is no client found\n");
       seL4_SetMR(0, -EINVAL);
       break;
     }
@@ -376,13 +379,78 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     int fd = (int)ipc_msg.arg;
     if (fd < 0 || fd >= SOS_MAX_OPEN_FILES) {
       // fd is invalid
+      printf("[sos] read: there is no such file\n");
       seL4_SetMR(0, -EBADF);
       break;
     }
 
     sos_fd_entry_t *e = &state->fds[fd];
+    printf("[sos] read: requested a read of file %d\n", fd);
     if (!e->used || !e->readable) {
       // file is not open or readable
+      printf("[sos] read: there is no such file\n");
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    if (ipc_msg.buf_addr != PROCESS_SHBUF_UVA) {
+      printf("[sos] read: wrong shared buffer addr\n");
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    // HACK: kinda hacky, not what this is meant for, but this is what you get
+    // for using a language without tagged unions (rust ftw)
+    size_t req = (size_t)ipc_msg.buf_size;
+    printf("[sos] read: requested a read of size %d\n", req);
+    if (req == 0 || req > PAGE_SIZE_4K) {
+      printf("[sos] read: can't fit that much data in the shared page\n");
+      seL4_SetMR(0, -EMSGSIZE);
+      break;
+    }
+
+    char *dst = (char *)caller->shbuf.k_va;
+    if (!e->ops || !e->ops->read) {
+      printf("[sos] read: read handler for file not found\n");
+      seL4_SetMR(0, -ENOSYS);
+      break;
+    }
+
+    // read it to the client's shared page
+    ssize_t n = e->ops->read(e->dev_id, dst, req);
+    printf("[sos] read: read done, read %d chars\n", n);
+    printf("[sos] read: read string %.*s\n", n, dst);
+    seL4_SetMR(0, (seL4_Word)n);
+    break;
+  }
+  case SOS_SYS_WRITE: {
+    reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+
+    if (!caller) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    unsigned client_id = caller->id;
+    if (client_id >= MAX_CLIENTS) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    sos_client_io_state_t *state = &client_io_state[client_id];
+    if (!state->initialised) {
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    int fd = (int)ipc_msg.arg;
+    if (fd < 0 || fd >= SOS_MAX_OPEN_FILES) {
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    sos_fd_entry_t *e = &state->fds[fd];
+    if (!e->used || !e->writable) {
       seL4_SetMR(0, -EBADF);
       break;
     }
@@ -392,28 +460,23 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       break;
     }
 
-    // HACK: kinda hacky, not what this is meant for, but this is what you get
-    // for using a language without tagged unions (rust ftw)
     size_t req = (size_t)ipc_msg.buf_size;
     if (req == 0 || req > PAGE_SIZE_4K) {
       seL4_SetMR(0, -EMSGSIZE);
       break;
     }
 
-    char *dst = (char *)caller->shbuf.k_va;
-    if (!e->ops || !e->ops->read) {
+    const char *src = (const char *)caller->shbuf.k_va;
+    if (!e->ops || !e->ops->write) {
       seL4_SetMR(0, -ENOSYS);
       break;
     }
 
-    // read it to the client's shared page
-    ssize_t n = e->ops->read(e->dev_id, dst, req);
-    printf("[read] read %d chars\n", n);
+    ssize_t n = e->ops->write(e->dev_id, (void *)src, req);
 
     seL4_SetMR(0, (seL4_Word)n);
     break;
   }
-
   default:
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
     ZF_LOGE("Unknown syscall %lu\n", (unsigned long)syscall_number);

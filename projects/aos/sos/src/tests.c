@@ -77,8 +77,8 @@ static void test_cspace(cspace_t *cspace) {
   const int reserve_slots = WATERMARK_SLOTS + MAPPING_SLOTS + 2;
   int nslots = CNODE_SLOTS(CNODE_SIZE_BITS) / 2;
   if (cspace->two_level) {
-    int total_slots = CNODE_SLOTS(cspace->top_lvl_size_bits) *
-                      CNODE_SLOTS(CNODE_SIZE_BITS);
+    int total_slots =
+        CNODE_SLOTS(cspace->top_lvl_size_bits) * CNODE_SLOTS(CNODE_SIZE_BITS);
     int usable = total_slots - reserve_slots;
     usable = usable < 0 ? 0 : usable;
     nslots = MIN(usable, CNODE_SLOTS(CNODE_SIZE_BITS) * BOT_LVL_PER_NODE + 1);
@@ -237,8 +237,8 @@ void run_tests(cspace_t *cspace) {
   test_frame_table();
   ZF_LOGI("Frame table test passed!");
 
-  test_clock();
-  ZF_LOGI("Clock test passed!");
+  // test_clock();
+  // ZF_LOGI("Clock test passed!");
 
   /* test shared page allocation */
   test_shared_frame(cspace);

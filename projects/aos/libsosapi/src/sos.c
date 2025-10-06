@@ -165,11 +165,65 @@ int sos_read(int file, char *buf, size_t nbyte) {
 }
 
 int sos_write(int file, const char *buf, size_t nbyte) {
-  /* MILESTONE 0: implement this to use your syscall and
-   * writes to the network console!
-   * Writing to files will come in later milestones.
-   */
-  return sos_debug_print(buf, nbyte);
+  if (!buf) {
+    sos_errno = EINVAL;
+    return -1;
+  }
+  if (nbyte == 0) {
+    sos_errno = 0;
+    return 0;
+  }
+
+  size_t limit = nbyte;
+  if (limit > (size_t)INT_MAX) {
+    limit = (size_t)INT_MAX;
+  }
+
+  size_t total = 0;
+  char *shbuf = sos_shbuf_ptr();
+
+  while (total < limit) {
+    size_t req = limit - total;
+    if (req > MAX_IO_BUF) {
+      req = MAX_IO_BUF;
+    }
+    if (req == 0) {
+      break;
+    }
+
+    memcpy(shbuf, buf + total, req);
+
+    sos_ipc_msg_t msg = (sos_ipc_msg_t){
+        .sysno = SOS_SYS_WRITE,
+        .arg = (seL4_Word)file,
+        .buf_addr = PROCESS_SHBUF_UVA,
+        .buf_size = (seL4_Word)req,
+    };
+
+    seL4_MessageInfo_t rep =
+        seL4_Call(SOS_IPC_EP_CAP, sos_serialise_ipc_msg(&msg));
+    if (seL4_MessageInfo_get_length(rep) < 1) {
+      sos_errno = EINVAL;
+      return -1;
+    }
+
+    int res = (int)seL4_GetMR(0); // bytes written or -errno
+    if (res < 0) {
+      sos_errno = -res;
+      return -1;
+    }
+    if (res == 0) {
+      break; // nothing written
+    }
+
+    total += (size_t)res;
+    if ((size_t)res < req) {
+      break; // short write
+    }
+  }
+
+  sos_errno = 0;
+  return (int)total;
 }
 
 int sos_getdirent(int pos, char *name, size_t nbyte) {
