@@ -1,11 +1,17 @@
 #include "file.h"
-#include "utils/attribute.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <networkconsole/networkconsole.h>
 #include <stdbool.h>
 #include <string.h>
 
+static void nc_input_handler(struct network_console *UNUSED netcon, char c) {
+  conring_push(c);
+}
+
+static void console_input_init(void) {
+  network_console_register_handler(sos_nc, nc_input_handler);
+}
 static int console_open(const char *name, int mode, int *out_id) {
   // enforce single-reader
   int access = mode & O_ACCMODE;
@@ -26,24 +32,25 @@ static int console_open(const char *name, int mode, int *out_id) {
   *out_id = 0;
   return 0;
 }
+static ssize_t console_read(UNUSED int id, void *buf, size_t len) {
+  if (!buf || len == 0) {
+    return 0;
+  }
+  // line mode behavour toggle
+  bool stop_on_nl = false;
+  return (ssize_t)conring_pop_many((char *)buf, len, stop_on_nl);
+}
 
 static int console_close(UNUSED int id) { return 0; }
-
-static ssize_t console_write(int id, void *buf, size_t len) {
+static ssize_t console_write(UNUSED int id, void *buf, size_t len) {
   return (ssize_t)network_console_send(sos_nc, buf, len);
 }
-static ssize_t console_read(UNUSED int id, UNUSED void *buf,
-                            UNUSED size_t len) {
-  return -ENOSYS;
-}
-
 static const file_ops_t console_ops = {
     .open = console_open,
     .read = console_read,
     .write = console_write,
     .close = console_close,
 };
-
 const dev_reg_t devices[] = {
     {"console", &console_ops},
 };
