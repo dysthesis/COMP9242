@@ -276,7 +276,6 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       seL4_SetMR(0, -EINVAL);
       break;
     }
-
     unsigned client_id = caller->id;
     if (client_id >= MAX_CLIENTS) {
       seL4_SetMR(0, -EINVAL);
@@ -297,23 +296,31 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       break;
     }
 
-    // Make close(0/1/2) a no-op that reports success, while we keep them
-    // reserved
     if (fd < 3) {
       seL4_SetMR(0, 0);
       break;
     }
 
     // Make sure that the FD we're trying to close is actually currently in use.
-    if (!state->fds[fd].used) {
+    sos_fd_entry_t *e = &state->fds[fd];
+    if (!e->used) {
       seL4_SetMR(0, -EBADF);
       break;
     }
 
-    // Clean up the slot
-    state->fds[fd].used = false;
-    state->fds[fd].readable = false;
-    state->fds[fd].writable = false;
+    // Device cleanup if necessary
+    if (e->kind == FD_DEV_CONSOLE && e->obj == &global_console) {
+      if (e->readable && global_console.reader_in_use &&
+          global_console.reader_owner_id == client_id) {
+        global_console.reader_in_use = false;
+        global_console.reader_owner_id = 0;
+      }
+      if (e->writable && global_console.write_refcnt > 0) {
+        global_console.write_refcnt--;
+      }
+    }
+
+    memset(e, 0, sizeof(*e));
 
     seL4_SetMR(0, 0);
     break;
