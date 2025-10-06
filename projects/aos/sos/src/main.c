@@ -35,7 +35,9 @@
 #include "bootstrap.h"
 #include "drivers/uart.h"
 #include "elfload.h"
+#include "file.h"
 #include "frame_table.h"
+#include "ipc_common.h"
 #include "irq.h"
 #include "mapping.h"
 #include "network.h"
@@ -72,6 +74,9 @@
  * process */
 #define INITIAL_PROCESS_EXTRA_STACK_PAGES 4
 
+/* Network console handle for SOS console output */
+struct network_console *sos_nc;
+
 /*
  * A dummy starting syscall
  */
@@ -99,11 +104,6 @@ uint16_t free_ids[MAX_CLIENTS];   // free IDs for new clients
 size_t free_top;
 
 #define SOS_MAX_OPEN_FILES 32
-typedef struct {
-  bool used;
-  bool readable;
-  bool writable;
-} sos_fd_entry_t;
 
 typedef struct {
   bool initialised;
@@ -150,8 +150,6 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     return reply_msg;
   }
 
-  seL4_Word raw_syscall = seL4_GetMR(0);
-
   sos_ipc_msg_t ipc_msg;
   if (sos_deserialise_ipc_msg(message, &ipc_msg) != 0) {
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
@@ -167,14 +165,14 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
 
   /* Process system call */
   switch (syscall_number) {
-  case SYSNO_OPEN: {
+
+  case SOS_SYS_OPEN: {
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
 
     if (!caller) {
       seL4_SetMR(0, -EINVAL);
       break;
     }
-
     unsigned client_id = caller->id;
     if (client_id >= MAX_CLIENTS) {
       seL4_SetMR(0, -EINVAL);
@@ -185,7 +183,8 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     if (!state->initialised) {
       memset(state->fds, 0, sizeof(state->fds));
       for (int i = 0; i < MIN(3, SOS_MAX_OPEN_FILES); i++) {
-        state->fds[i].used = true; // reserve stdin/out/err
+        state->fds[i].used = true;
+        state->fds[i].kind = FD_NONE;
       }
       state->initialised = true;
     }
@@ -198,7 +197,6 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       seL4_SetMR(0, -EINVAL);
       break;
     }
-
     if (buf_len == 0 || buf_len > PAGE_SIZE_4K) {
       seL4_SetMR(0, -EMSGSIZE);
       break;
@@ -211,7 +209,6 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       seL4_SetMR(0, -ENAMETOOLONG);
       break;
     }
-
     if (name_len == 0) {
       seL4_SetMR(0, -EINVAL);
       break;
@@ -219,7 +216,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
 
     char filename[PAGE_SIZE_4K];
     memcpy(filename, shared_str, name_len + 1);
-    ZF_LOGD("sos_open '%s' mode=%d", filename, mode);
+    printf("sos_open '%s' mode=%d\n", filename, mode);
 
     if (strcmp(filename, "console") != 0) {
       seL4_SetMR(0, -ENODEV);
@@ -229,12 +226,21 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     int accmode = mode & O_ACCMODE;
     bool want_read = (accmode == O_RDONLY) || (accmode == O_RDWR);
     bool want_write = (accmode == O_WRONLY) || (accmode == O_RDWR);
-
     if (!want_read && !want_write) {
       seL4_SetMR(0, -EINVAL);
       break;
     }
 
+    // Enforce single reader, multi-writer
+    if (want_read) {
+      if (global_console.reader_in_use) {
+        // Reader already taken by someone (could be the same client)
+        seL4_SetMR(0, -EBUSY);
+        break;
+      }
+    }
+
+    // Find a free FD slot
     int fd = -1;
     for (int i = 0; i < SOS_MAX_OPEN_FILES; i++) {
       if (!state->fds[i].used) {
@@ -242,17 +248,91 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
         break;
       }
     }
-
     if (fd < 0) {
       seL4_SetMR(0, -EMFILE);
       break;
     }
 
+    // Commit device policy
+    if (want_read) {
+      global_console.reader_in_use = true;
+      global_console.reader_owner_id = client_id;
+    }
+    if (want_write) {
+      global_console.write_refcnt++;
+    }
+
+    // Install FD entry bound to the console device
     state->fds[fd].used = true;
     state->fds[fd].readable = want_read;
     state->fds[fd].writable = want_write;
+    state->fds[fd].kind = FD_DEV_CONSOLE;
+    state->fds[fd].obj = &global_console;
 
     seL4_SetMR(0, fd);
+    break;
+  }
+  case SOS_SYS_CLOSE: {
+    reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+
+    if (!caller) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+    unsigned client_id = caller->id;
+    if (client_id >= MAX_CLIENTS) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    sos_client_io_state_t *state = &client_io_state[client_id];
+    if (!state->initialised) {
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    int fd = (int)ipc_msg.arg;
+
+    // Validate range
+    if (fd < 0 || fd >= SOS_MAX_OPEN_FILES) {
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    if (fd < 3) {
+      seL4_SetMR(0, 0);
+      break;
+    }
+
+    // Make sure that the FD we're trying to close is actually currently in use.
+    sos_fd_entry_t *e = &state->fds[fd];
+    if (!e->used) {
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+    if (e->refcnt != 0) {
+      seL4_SetMR(0, -EBUSY);
+      break;
+    }
+
+    // Device cleanup if necessary
+    if (e->kind == FD_DEV_CONSOLE && e->obj == &global_console) {
+      if (e->readable && global_console.reader_in_use &&
+          global_console.reader_owner_id == client_id) {
+        global_console.reader_in_use = false;
+        global_console.reader_owner_id = 0;
+      }
+      if (e->writable && global_console.write_refcnt > 0) {
+        global_console.write_refcnt--;
+      }
+    }
+
+    if (e->ops && e->ops->close)
+      e->ops->close(e->dev_id);
+
+    memset(e, 0, sizeof(*e));
+
+    seL4_SetMR(0, 0);
     break;
   }
   default:
@@ -746,6 +826,7 @@ NORETURN void *main_continued(UNUSED void *arg) {
   /* Initialise the network hardware. */
   printf("Network init\n");
   network_init(&cspace, timer_vaddr, ntfn);
+  sos_nc = network_console_init();
 
 #ifdef CONFIG_SOS_GDB_ENABLED
   /* Initialize the debugger */

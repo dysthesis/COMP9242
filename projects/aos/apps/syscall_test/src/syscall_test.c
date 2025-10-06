@@ -24,7 +24,7 @@ static void test_sos_open(void) {
   assert(fd_wr >= 0);
 
   int fd_invalid = sos_open("not-a-device", O_RDONLY);
-  ZF_LOGI("[syscall_test] invalid open returned %d (errno=%d)\n", fd_invalid,
+  ZF_LOGD("[syscall_test] invalid open returned %d (errno=%d)\n", fd_invalid,
           sos_errno);
   assert(fd_invalid == -1);
   assert(sos_errno == ENODEV);
@@ -33,11 +33,72 @@ static void test_sos_open(void) {
   memset(long_name, 'a', sizeof long_name);
   long_name[MAX_IO_BUF] = '\0';
   int fd_long = sos_open(long_name, O_RDONLY);
-  ZF_LOGI("[syscall_test] long-name open returned %d (errno=%d)\n", fd_long,
+  ZF_LOGD("[syscall_test] long-name open returned %d (errno=%d)\n", fd_long,
           sos_errno);
   assert(fd_long == -1);
   assert(sos_errno == ENAMETOOLONG);
+  // Clean up
+  assert(sos_close(fd_wr) == 0);
+  assert(sos_close(fd_rd) == 0);
   ZF_LOGI("[syscall_test] sos_open() tests successful!\n");
+}
+
+static void test_sos_close(void) {
+  ZF_LOGI("[syscall_test] Testing sos_close()...\n");
+
+  int result;
+  result = sos_close(-1);
+  ZF_LOGD("[syscall_test] close(-1): %d (errno=%d)\n", result, sos_errno);
+  assert(result == -1 && sos_errno == EBADF);
+
+  result = sos_close(7);
+  ZF_LOGD("[syscall_test] close(7) (unopened): %d (errno=%d)\n", result,
+          sos_errno);
+  assert(result == -1 && sos_errno == EBADF);
+
+  result = sos_close(9999);
+  ZF_LOGD("[syscall_test] close(9999): %d (errno=%d)\n", result, sos_errno);
+  assert(result == -1 && sos_errno == EBADF);
+
+  // I/O devices
+  result = sos_close(0);
+  assert(result == 0);
+  result = sos_close(1);
+  assert(result == 0);
+  result = sos_close(2);
+  assert(result == 0);
+
+  // double closes
+  int fd_wr = sos_open("console", O_WRONLY);
+  assert(fd_wr >= 0);
+  result = sos_close(fd_wr);
+  ZF_LOGD("[syscall_test] close(writer): %d (errno=%d)\n", result, sos_errno);
+  assert(result == 0);
+  result = sos_close(fd_wr);
+  ZF_LOGD("[syscall_test] close(writer) again: %d (errno=%d)\n", result,
+          sos_errno);
+  assert(result == -1 && sos_errno == EBADF);
+
+  // reader exclusivity, only one should be allowed, the rest gets EBUSY
+  int fd_rd1 = sos_open("console", O_RDONLY);
+  assert(fd_rd1 >= 0);
+  int fd_rd2 = sos_open("console", O_RDONLY);
+  ZF_LOGD("[syscall_test] second reader open: %d (errno=%d)\n", fd_rd2,
+          sos_errno);
+  assert(fd_rd2 == -1 && sos_errno == EBUSY);
+
+  result = sos_close(fd_rd1);
+  ZF_LOGD("[syscall_test] close(reader) -> %d (errno=%d)\n", result, sos_errno);
+  assert(result == 0);
+
+  int fd_rd3 = sos_open("console", O_RDONLY);
+  ZF_LOGD("[syscall_test] reader open after close -> %d (errno=%d)\n", fd_rd3,
+          sos_errno);
+  assert(fd_rd3 >= 0);
+
+  (void)sos_close(fd_rd3);
+
+  ZF_LOGI("[syscall_test] sos_close() tests successful!\n");
 }
 
 int test_buffers(int console_fd) {
@@ -74,6 +135,7 @@ int test_buffers(int console_fd) {
 int main(void) {
   ZF_LOGV("[syscall_test] Entered syscall testing app!\n");
   test_sos_open();
+  test_sos_close();
   test_buffers(10);
 
   return 0;
