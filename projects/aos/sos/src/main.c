@@ -35,6 +35,7 @@
 #include "bootstrap.h"
 #include "drivers/uart.h"
 #include "elfload.h"
+#include "file.h"
 #include "frame_table.h"
 #include "ipc_common.h"
 #include "irq.h"
@@ -100,11 +101,6 @@ uint16_t free_ids[MAX_CLIENTS];   // free IDs for new clients
 size_t free_top;
 
 #define SOS_MAX_OPEN_FILES 32
-typedef struct {
-  bool used;
-  bool readable;
-  bool writable;
-} sos_fd_entry_t;
 
 typedef struct {
   bool initialised;
@@ -166,6 +162,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
 
   /* Process system call */
   switch (syscall_number) {
+
   case SOS_SYS_OPEN: {
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
 
@@ -173,7 +170,6 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       seL4_SetMR(0, -EINVAL);
       break;
     }
-
     unsigned client_id = caller->id;
     if (client_id >= MAX_CLIENTS) {
       seL4_SetMR(0, -EINVAL);
@@ -184,7 +180,8 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     if (!state->initialised) {
       memset(state->fds, 0, sizeof(state->fds));
       for (int i = 0; i < MIN(3, SOS_MAX_OPEN_FILES); i++) {
-        state->fds[i].used = true; // reserve stdin/out/err
+        state->fds[i].used = true;
+        state->fds[i].kind = FD_NONE;
       }
       state->initialised = true;
     }
@@ -197,7 +194,6 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       seL4_SetMR(0, -EINVAL);
       break;
     }
-
     if (buf_len == 0 || buf_len > PAGE_SIZE_4K) {
       seL4_SetMR(0, -EMSGSIZE);
       break;
@@ -210,7 +206,6 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       seL4_SetMR(0, -ENAMETOOLONG);
       break;
     }
-
     if (name_len == 0) {
       seL4_SetMR(0, -EINVAL);
       break;
@@ -228,7 +223,6 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     int accmode = mode & O_ACCMODE;
     bool want_read = (accmode == O_RDONLY) || (accmode == O_RDWR);
     bool want_write = (accmode == O_WRONLY) || (accmode == O_RDWR);
-
     if (!want_read && !want_write) {
       seL4_SetMR(0, -EINVAL);
       break;
@@ -250,6 +244,8 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     state->fds[fd].used = true;
     state->fds[fd].readable = want_read;
     state->fds[fd].writable = want_write;
+    state->fds[fd].kind = FD_DEV_CONSOLE;
+    state->fds[fd].obj = &global_console;
 
     seL4_SetMR(0, fd);
     break;

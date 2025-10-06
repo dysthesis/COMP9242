@@ -54,6 +54,7 @@ add_executable(
     src/network.c
     src/ut.c
     src/tests.c
+    src/file.c
     src/sys/backtrace.c
     src/sys/exit.c
     src/sys/morecore.c
