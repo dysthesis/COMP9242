@@ -43,6 +43,29 @@ static void test_sos_open(void) {
   ZF_LOGI("[syscall_test] sos_open() tests successful!\n");
 }
 
+static void test_sos_read(void) {
+  ZF_LOGI("[syscall_test] Testing sos_read()...\n");
+
+  int write = sos_open("console", O_WRONLY);
+  assert(write >= 0);
+
+  int read = sos_open("console", O_RDONLY);
+  assert(read >= 0);
+
+  char buf[16];
+  int n = sos_read(read, buf, sizeof buf);
+  assert(n >= 0);
+
+  char big[8192];
+  int m = sos_read(read, big, sizeof big);
+  assert(m >= 0 && m <= (int)sizeof big);
+
+  assert(sos_close(read) == 0);
+  assert(sos_close(write) == 0);
+
+  ZF_LOGI("[syscall_test] sos_read() tests successful!\n");
+}
+
 static void test_sos_close(void) {
   ZF_LOGI("[syscall_test] Testing sos_close()...\n");
 
@@ -136,6 +159,7 @@ int main(void) {
   ZF_LOGV("[syscall_test] Entered syscall testing app!\n");
   test_sos_open();
   test_sos_close();
+  test_sos_read();
   test_buffers(10);
 
   return 0;
