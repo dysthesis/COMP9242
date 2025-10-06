@@ -408,6 +408,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
 
     // read it to the client's shared page
     ssize_t n = e->ops->read(e->dev_id, dst, req);
+    printf("[read] read %d chars\n", n);
 
     seL4_SetMR(0, (seL4_Word)n);
     break;

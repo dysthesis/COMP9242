@@ -5,14 +5,21 @@
 #include <stdbool.h>
 #include <string.h>
 
+static bool input_handler_registered = false;
+
 static void nc_input_handler(struct network_console *UNUSED netcon, char c) {
   conring_push(c);
 }
 
 static void console_input_init(void) {
-  network_console_register_handler(sos_nc, nc_input_handler);
+  if (!input_handler_registered) {
+    network_console_register_handler(sos_nc, nc_input_handler);
+    input_handler_registered = true;
+  }
 }
+
 static int console_open(const char *name, int mode, int *out_id) {
+  console_input_init();
   // enforce single-reader
   int access = mode & O_ACCMODE;
   bool read = access == O_RDONLY || access == O_RDWR;
