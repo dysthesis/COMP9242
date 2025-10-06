@@ -228,6 +228,16 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       break;
     }
 
+    // Enforce single reader, multi-writer
+    if (want_read) {
+      if (global_console.reader_in_use) {
+        // Reader already taken by someone (could be the same client)
+        seL4_SetMR(0, -EBUSY);
+        break;
+      }
+    }
+
+    // Find a free FD slot
     int fd = -1;
     for (int i = 0; i < SOS_MAX_OPEN_FILES; i++) {
       if (!state->fds[i].used) {
@@ -235,12 +245,21 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
         break;
       }
     }
-
     if (fd < 0) {
       seL4_SetMR(0, -EMFILE);
       break;
     }
 
+    // Commit device policy
+    if (want_read) {
+      global_console.reader_in_use = true;
+      global_console.reader_owner_id = client_id;
+    }
+    if (want_write) {
+      global_console.write_refcnt++;
+    }
+
+    // Install FD entry bound to the console device
     state->fds[fd].used = true;
     state->fds[fd].readable = want_read;
     state->fds[fd].writable = want_write;
