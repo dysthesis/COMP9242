@@ -40,6 +40,64 @@ static void test_sos_open(void) {
   ZF_LOGI("[syscall_test] sos_open() tests successful!\n");
 }
 
+static void test_sos_close(void) {
+  ZF_LOGI("[syscall_test] Testing sos_close()...\n");
+
+  int result;
+  result = sos_close(-1);
+  ZF_LOGD("[syscall_test] close(-1): %d (errno=%d)\n", result, sos_errno);
+  assert(result == -1 && sos_errno == EBADF);
+
+  result = sos_close(7);
+  ZF_LOGD("[syscall_test] close(7) (unopened): %d (errno=%d)\n", result,
+          sos_errno);
+  assert(result == -1 && sos_errno == EBADF);
+
+  result = sos_close(9999);
+  ZF_LOGD("[syscall_test] close(9999): %d (errno=%d)\n", result, sos_errno);
+  assert(result == -1 && sos_errno == EBADF);
+
+  // I/O devices
+  result = sos_close(0);
+  assert(result == 0);
+  result = sos_close(1);
+  assert(result == 0);
+  result = sos_close(2);
+  assert(result == 0);
+
+  // double closes
+  int fd_wr = sos_open("console", O_WRONLY);
+  assert(fd_wr >= 0);
+  result = sos_close(fd_wr);
+  ZF_LOGD("[syscall_test] close(writer): %d (errno=%d)\n", result, sos_errno);
+  assert(result == 0);
+  result = sos_close(fd_wr);
+  ZF_LOGD("[syscall_test] close(writer) again: %d (errno=%d)\n", result,
+          sos_errno);
+  assert(result == -1 && sos_errno == EBADF);
+
+  // reader exclusivity, only one should be allowed, the rest gets EBUSY
+  int fd_rd1 = sos_open("console", O_RDONLY);
+  assert(fd_rd1 >= 0);
+  int fd_rd2 = sos_open("console", O_RDONLY);
+  ZF_LOGD("[syscall_test] second reader open: %d (errno=%d)\n", fd_rd2,
+          sos_errno);
+  assert(fd_rd2 == -1 && sos_errno == EBUSY);
+
+  result = sos_close(fd_rd1);
+  ZF_LOGD("[syscall_test] close(reader) -> %d (errno=%d)\n", result, sos_errno);
+  assert(result == 0);
+
+  int fd_rd3 = sos_open("console", O_RDONLY);
+  ZF_LOGD("[syscall_test] reader open after close -> %d (errno=%d)\n", fd_rd3,
+          sos_errno);
+  assert(fd_rd3 >= 0);
+
+  (void)sos_close(fd_rd3);
+
+  ZF_LOGI("[syscall_test] sos_close() tests successful!\n");
+}
+
 int test_buffers(int console_fd) {
   /* test a small string from the code segment */
   int result = sos_write(console_fd, test_str, strlen(test_str));
@@ -74,6 +132,7 @@ int test_buffers(int console_fd) {
 int main(void) {
   ZF_LOGV("[syscall_test] Entered syscall testing app!\n");
   test_sos_open();
+  test_sos_close();
   test_buffers(10);
 
   return 0;
