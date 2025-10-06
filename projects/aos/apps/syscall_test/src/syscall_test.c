@@ -52,12 +52,14 @@ static void test_sos_read(void) {
   int read = sos_open("console", O_RDONLY);
   assert(read >= 0);
 
-  char buf[16];
+  char buf[16] = {'a'};
   int n = sos_read(read, buf, sizeof buf);
+  ZF_LOGI("[syscall_test] read(buf): %s", buf);
   assert(n >= 0);
 
-  char big[8192];
+  char big[8192] = {'a'};
   int m = sos_read(read, big, sizeof big);
+  ZF_LOGI("[syscall_test] read(big): %s", big);
   assert(m >= 0 && m <= (int)sizeof big);
 
   assert(sos_close(read) == 0);
