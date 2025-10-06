@@ -142,13 +142,15 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
                                   bool *have_reply, client_t *caller) {
   seL4_MessageInfo_t reply_msg;
 
-  seL4_Word raw_syscall = seL4_GetMR(0);
-  if (raw_syscall == SOS_SYSCALL0) {
+  seL4_Word msg_length = seL4_MessageInfo_get_length(*message);
+  if (msg_length == 0) {
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
     seL4_SetMR(0, 0);
     *have_reply = true;
     return reply_msg;
   }
+
+  seL4_Word raw_syscall = seL4_GetMR(0);
 
   sos_ipc_msg_t ipc_msg;
   if (sos_deserialise_ipc_msg(message, &ipc_msg) != 0) {
@@ -210,8 +212,14 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       break;
     }
 
+    if (name_len == 0) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
     char filename[PAGE_SIZE_4K];
     memcpy(filename, shared_str, name_len + 1);
+    ZF_LOGD("sos_open '%s' mode=%d", filename, mode);
 
     if (strcmp(filename, "console") != 0) {
       seL4_SetMR(0, -ENODEV);

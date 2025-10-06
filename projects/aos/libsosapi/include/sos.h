@@ -131,6 +131,8 @@ void sos_usleep(int usec);
 /* Sleeps for the specified number of microseconds.
  */
 
+extern int sos_errno;
+
 /*************************************************************************/
 /*                                   */
 /* Optional (bonus) system calls                     */

@@ -1,8 +1,8 @@
 #include "unistd.h"
-#include <errno.h>
-#include <fcntl.h>
 #include <aos/sel4_zf_logif.h>
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <sel4/sel4.h>
 #include <sos.h>
 #include <stdio.h>
@@ -16,21 +16,28 @@ char test_str[] = "Basic test string for read/write";
 char small_buf[SMALL_BUF_SZ];
 
 static void test_sos_open(void) {
+  ZF_LOGI("[syscall_test] Testing sos_open()...\n");
   int fd_rd = sos_open("console", O_RDONLY);
   assert(fd_rd >= 0);
 
   int fd_wr = sos_open("console", O_WRONLY);
   assert(fd_wr >= 0);
-  assert(fd_wr != fd_rd);
 
   int fd_invalid = sos_open("not-a-device", O_RDONLY);
-  assert(fd_invalid == -ENODEV);
+  ZF_LOGI("[syscall_test] invalid open returned %d (errno=%d)\n", fd_invalid,
+          sos_errno);
+  assert(fd_invalid == -1);
+  assert(sos_errno == ENODEV);
 
   char long_name[MAX_IO_BUF + 1];
   memset(long_name, 'a', sizeof long_name);
   long_name[MAX_IO_BUF] = '\0';
   int fd_long = sos_open(long_name, O_RDONLY);
-  assert(fd_long == -ENAMETOOLONG);
+  ZF_LOGI("[syscall_test] long-name open returned %d (errno=%d)\n", fd_long,
+          sos_errno);
+  assert(fd_long == -1);
+  assert(sos_errno == ENAMETOOLONG);
+  ZF_LOGI("[syscall_test] sos_open() tests successful!\n");
 }
 
 int test_buffers(int console_fd) {

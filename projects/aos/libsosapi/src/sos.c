@@ -19,6 +19,8 @@
 #include <ipc_common.h>
 #include <sel4/sel4.h>
 
+int sos_errno = 0;
+
 static size_t sos_debug_print(const void *vData, size_t count)
 {
 #ifdef CONFIG_DEBUG_BUILD
@@ -34,12 +36,14 @@ static size_t sos_debug_print(const void *vData, size_t count)
 int sos_open(const char *path, fmode_t mode)
 {
     if (!path) {
-        return -EINVAL;
+        sos_errno = EINVAL;
+        return -1;
     }
 
     size_t len = strnlen(path, MAX_IO_BUF);
     if (len >= MAX_IO_BUF) {
-        return -ENAMETOOLONG;
+        sos_errno = ENAMETOOLONG;
+        return -1;
     }
 
     char *shbuf = sos_shbuf_ptr();
@@ -56,10 +60,18 @@ int sos_open(const char *path, fmode_t mode)
     seL4_MessageInfo_t reply = seL4_Call(SOS_IPC_EP_CAP, request);
 
     if (seL4_MessageInfo_get_length(reply) < 1) {
-        return -EINVAL;
+        sos_errno = EINVAL;
+        return -1;
     }
 
-    return (int)seL4_GetMR(0);
+    int res = (int)seL4_GetMR(0);
+    if (res < 0) {
+        sos_errno = -res;
+        return -1;
+    }
+
+    sos_errno = 0;
+    return res;
 }
 
 int sos_close(int file)
