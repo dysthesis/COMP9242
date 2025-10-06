@@ -9,143 +9,152 @@
  *
  * @TAG(DATA61_GPL)
  */
-#include <stdarg.h>
+#include "utils/zf_log.h"
 #include <assert.h>
+#include <errno.h>
+#include <ipc_common.h>
+#include <sos.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
-#include <sos.h>
 
 #include <ipc_common.h>
 #include <sel4/sel4.h>
 
 int sos_errno = 0;
 
-static size_t sos_debug_print(const void *vData, size_t count)
-{
+static size_t sos_debug_print(const void *vData, size_t count) {
 #ifdef CONFIG_DEBUG_BUILD
-    size_t i;
-    const char *realdata = vData;
-    for (i = 0; i < count; i++) {
-        seL4_DebugPutChar(realdata[i]);
-    }
+  size_t i;
+  const char *realdata = vData;
+  for (i = 0; i < count; i++) {
+    seL4_DebugPutChar(realdata[i]);
+  }
 #endif
-    return count;
+  return count;
 }
 
-int sos_open(const char *path, fmode_t mode)
-{
-    if (!path) {
-        sos_errno = EINVAL;
-        return -1;
-    }
-
-    size_t len = strnlen(path, MAX_IO_BUF);
-    if (len >= MAX_IO_BUF) {
-        sos_errno = ENAMETOOLONG;
-        return -1;
-    }
-
-    char *shbuf = sos_shbuf_ptr();
-    memcpy(shbuf, path, len + 1);
-
-    sos_ipc_msg_t msg = {
-        .sysno = SOS_SYS_OPEN,
-        .arg = (seL4_Word)mode,
-        .buf_addr = PROCESS_SHBUF_UVA,
-        .buf_size = (seL4_Word)(len + 1),
-    };
-
-    seL4_MessageInfo_t request = sos_serialise_ipc_msg(&msg);
-    seL4_MessageInfo_t reply = seL4_Call(SOS_IPC_EP_CAP, request);
-
-    if (seL4_MessageInfo_get_length(reply) < 1) {
-        sos_errno = EINVAL;
-        return -1;
-    }
-
-    int res = (int)seL4_GetMR(0);
-    if (res < 0) {
-        sos_errno = -res;
-        return -1;
-    }
-
-    sos_errno = 0;
-    return res;
-}
-
-int sos_close(int file)
-{
-    assert(!"You need to implement this");
+int sos_open(const char *path, fmode_t mode) {
+  if (!path) {
+    sos_errno = EINVAL;
     return -1;
-}
+  }
 
-int sos_read(int file, char *buf, size_t nbyte)
-{
-    assert(!"You need to implement this");
+  size_t len = strnlen(path, MAX_IO_BUF);
+  if (len >= MAX_IO_BUF) {
+    sos_errno = ENAMETOOLONG;
     return -1;
-}
+  }
 
-int sos_write(int file, const char *buf, size_t nbyte)
-{
-    /* MILESTONE 0: implement this to use your syscall and
-     * writes to the network console!
-     * Writing to files will come in later milestones.
-     */
-    return sos_debug_print(buf, nbyte);
-}
+  char *shbuf = sos_shbuf_ptr();
+  memcpy(shbuf, path, len + 1);
 
-int sos_getdirent(int pos, char *name, size_t nbyte)
-{
-    assert(!"You need to implement this");
+  sos_ipc_msg_t msg = {
+      .sysno = SOS_SYS_OPEN,
+      .arg = (seL4_Word)mode,
+      .buf_addr = PROCESS_SHBUF_UVA,
+      .buf_size = (seL4_Word)(len + 1),
+  };
+
+  seL4_MessageInfo_t request = sos_serialise_ipc_msg(&msg);
+  seL4_MessageInfo_t reply = seL4_Call(SOS_IPC_EP_CAP, request);
+
+  if (seL4_MessageInfo_get_length(reply) < 1) {
+    sos_errno = EINVAL;
     return -1;
-}
+  }
 
-int sos_stat(const char *path, sos_stat_t *buf)
-{
-    assert(!"You need to implement this");
+  int res = (int)seL4_GetMR(0);
+  if (res < 0) {
+    sos_errno = -res;
     return -1;
+  }
+
+  sos_errno = 0;
+  return res;
 }
 
-pid_t sos_process_create(const char *path)
-{
-    assert(!"You need to implement this");
+int sos_close(int file) {
+  sos_ipc_msg_t msg = {
+      .sysno = SOS_SYS_CLOSE,
+      .arg = (seL4_Word)file,
+      .buf_addr = 0,
+      .buf_size = 0,
+  };
+
+  // Serialise our request into a message...
+  seL4_MessageInfo_t req = sos_serialise_ipc_msg(&msg);
+  // ...and wait for a reply from SOS.
+  seL4_MessageInfo_t reply = seL4_Call(SOS_IPC_EP_CAP, req);
+
+  // There needs to be at least something in the reply.
+  if (seL4_MessageInfo_get_length(reply) < 1) {
+    ZF_LOGE("[libsosapi] received an empty reply from SOS!");
+    sos_errno = EINVAL;
     return -1;
-}
+  }
 
-int sos_process_delete(pid_t pid)
-{
-    assert(!"You need to implement this");
+  int res = (int)seL4_GetMR(0);
+  if (res < 0) {
+    sos_errno = -res;
     return -1;
+  }
+
+  sos_errno = 0;
+  return res;
 }
 
-pid_t sos_my_id(void)
-{
-    assert(!"You need to implement this");
-    return -1;
-
+int sos_read(int file, char *buf, size_t nbyte) {
+  assert(!"You need to implement this");
+  return -1;
 }
 
-int sos_process_status(sos_process_t *processes, unsigned max)
-{
-    assert(!"You need to implement this");
-    return -1;
+int sos_write(int file, const char *buf, size_t nbyte) {
+  /* MILESTONE 0: implement this to use your syscall and
+   * writes to the network console!
+   * Writing to files will come in later milestones.
+   */
+  return sos_debug_print(buf, nbyte);
 }
 
-pid_t sos_process_wait(pid_t pid)
-{
-    assert(!"You need to implement this");
-    return -1;
-
+int sos_getdirent(int pos, char *name, size_t nbyte) {
+  assert(!"You need to implement this");
+  return -1;
 }
 
-void sos_usleep(int msec)
-{
-    assert(!"You need to implement this");
+int sos_stat(const char *path, sos_stat_t *buf) {
+  assert(!"You need to implement this");
+  return -1;
 }
 
-int64_t sos_time_stamp(void)
-{
-    assert(!"You need to implement this");
-    return -1;
+pid_t sos_process_create(const char *path) {
+  assert(!"You need to implement this");
+  return -1;
+}
+
+int sos_process_delete(pid_t pid) {
+  assert(!"You need to implement this");
+  return -1;
+}
+
+pid_t sos_my_id(void) {
+  assert(!"You need to implement this");
+  return -1;
+}
+
+int sos_process_status(sos_process_t *processes, unsigned max) {
+  assert(!"You need to implement this");
+  return -1;
+}
+
+pid_t sos_process_wait(pid_t pid) {
+  assert(!"You need to implement this");
+  return -1;
+}
+
+void sos_usleep(int msec) { assert(!"You need to implement this"); }
+
+int64_t sos_time_stamp(void) {
+  assert(!"You need to implement this");
+  return -1;
 }
