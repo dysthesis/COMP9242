@@ -38,7 +38,7 @@
 #include <sel4/sel4.h>
 #include <stdint.h>
 
-#define SOS_SHBUF_END (SOS_SCRATCH)
+#define SOS_SHBUF_END (SOS_SCRATCH - (1ul << seL4_PageBits))
 
 #define SOS_SHBUF_PAGES ((uintptr_t)MAX_CLIENTS)
 #define SOS_SHBUF_PAGE_BYTES (1ul << seL4_PageBits)
