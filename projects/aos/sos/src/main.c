@@ -232,13 +232,13 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     }
 
     // Enforce single reader, multi-writer
-    if (want_read) {
-      if (global_console.reader_in_use) {
-        // Reader already taken by someone (could be the same client)
-        seL4_SetMR(0, -EBUSY);
-        break;
-      }
-    }
+    // if (want_read) {
+    //   if (global_console.reader_in_use) {
+    //     // Reader already taken by someone (could be the same client)
+    //     seL4_SetMR(0, -EBUSY);
+    //     break;
+    //   }
+    // }
 
     // Find a free FD slot
     int fd = -1;
@@ -253,14 +253,30 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       break;
     }
 
+    const file_ops_t *ops = vfs_lookup_ops(filename);
+    if (!ops) {
+      seL4_SetMR(0, -ENODEV);
+      break;
+    }
+
+    int dev_id = 0;
+    int rc = 0;
+    if (ops->open) {
+      rc = ops->open(filename, mode, &dev_id);
+      if (rc < 0) {
+        seL4_SetMR(0, rc);
+        break;
+      }
+    }
+
     // Commit device policy
-    if (want_read) {
-      global_console.reader_in_use = true;
-      global_console.reader_owner_id = client_id;
-    }
-    if (want_write) {
-      global_console.write_refcnt++;
-    }
+    // if (want_read) {
+    //   global_console.reader_in_use = true;
+    //   global_console.reader_owner_id = client_id;
+    // }
+    // if (want_write) {
+    //   global_console.write_refcnt++;
+    // }
 
     // Install FD entry bound to the console device
     state->fds[fd].used = true;
@@ -268,6 +284,8 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     state->fds[fd].writable = want_write;
     state->fds[fd].kind = FD_DEV_CONSOLE;
     state->fds[fd].obj = &global_console;
+    state->fds[fd].ops = ops;
+    state->fds[fd].dev_id = dev_id;
 
     seL4_SetMR(0, fd);
     break;
@@ -316,16 +334,16 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     }
 
     // Device cleanup if necessary
-    if (e->kind == FD_DEV_CONSOLE && e->obj == &global_console) {
-      if (e->readable && global_console.reader_in_use &&
-          global_console.reader_owner_id == client_id) {
-        global_console.reader_in_use = false;
-        global_console.reader_owner_id = 0;
-      }
-      if (e->writable && global_console.write_refcnt > 0) {
-        global_console.write_refcnt--;
-      }
-    }
+    // if (e->kind == FD_DEV_CONSOLE && e->obj == &global_console) {
+    //   if (e->readable && global_console.reader_in_use &&
+    //       global_console.reader_owner_id == client_id) {
+    //     global_console.reader_in_use = false;
+    //     global_console.reader_owner_id = 0;
+    //   }
+    //   if (e->writable && global_console.write_refcnt > 0) {
+    //     global_console.write_refcnt--;
+    //   }
+    // }
 
     if (e->ops && e->ops->close)
       e->ops->close(e->dev_id);
