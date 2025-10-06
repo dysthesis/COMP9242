@@ -1,2 +1,11 @@
 CompileFlags:
-  CompilationDatabase: ./build
+  # Where compile_commands.json lives:
+  CompilationDatabase: build
+
+Index:
+  Background: true
+
+Diagnostics:
+  ClangTidy:
+    Add: ["clang-analyzer-*", "bugprone-*", "misc-*", "performance-*", "portability-*", "readability-*"]
+    Remove: ["readability-magic-numbers"]

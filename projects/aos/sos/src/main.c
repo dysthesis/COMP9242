@@ -36,6 +36,7 @@
 #include "drivers/uart.h"
 #include "elfload.h"
 #include "frame_table.h"
+#include "ipc_common.h"
 #include "irq.h"
 #include "mapping.h"
 #include "network.h"
@@ -150,8 +151,6 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     return reply_msg;
   }
 
-  seL4_Word raw_syscall = seL4_GetMR(0);
-
   sos_ipc_msg_t ipc_msg;
   if (sos_deserialise_ipc_msg(message, &ipc_msg) != 0) {
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
@@ -167,7 +166,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
 
   /* Process system call */
   switch (syscall_number) {
-  case SYSNO_OPEN: {
+  case SOS_SYS_OPEN: {
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
 
     if (!caller) {
@@ -219,7 +218,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
 
     char filename[PAGE_SIZE_4K];
     memcpy(filename, shared_str, name_len + 1);
-    ZF_LOGD("sos_open '%s' mode=%d", filename, mode);
+    printf("sos_open '%s' mode=%d\n", filename, mode);
 
     if (strcmp(filename, "console") != 0) {
       seL4_SetMR(0, -ENODEV);
@@ -253,6 +252,9 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     state->fds[fd].writable = want_write;
 
     seL4_SetMR(0, fd);
+    break;
+  }
+  case SOS_SYS_CLOSE: {
     break;
   }
   default:

@@ -24,7 +24,7 @@ static void test_sos_open(void) {
   assert(fd_wr >= 0);
 
   int fd_invalid = sos_open("not-a-device", O_RDONLY);
-  ZF_LOGI("[syscall_test] invalid open returned %d (errno=%d)\n", fd_invalid,
+  ZF_LOGD("[syscall_test] invalid open returned %d (errno=%d)\n", fd_invalid,
           sos_errno);
   assert(fd_invalid == -1);
   assert(sos_errno == ENODEV);
@@ -33,7 +33,7 @@ static void test_sos_open(void) {
   memset(long_name, 'a', sizeof long_name);
   long_name[MAX_IO_BUF] = '\0';
   int fd_long = sos_open(long_name, O_RDONLY);
-  ZF_LOGI("[syscall_test] long-name open returned %d (errno=%d)\n", fd_long,
+  ZF_LOGD("[syscall_test] long-name open returned %d (errno=%d)\n", fd_long,
           sos_errno);
   assert(fd_long == -1);
   assert(sos_errno == ENAMETOOLONG);
