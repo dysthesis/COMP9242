@@ -335,6 +335,66 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     seL4_SetMR(0, 0);
     break;
   }
+  case SOS_SYS_READ: {
+    reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+
+    if (!caller) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+    unsigned client_id = caller->id;
+    if (client_id >= MAX_CLIENTS) {
+      // bogus client id
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    sos_client_io_state_t *state = &client_io_state[client_id];
+    if (!state->initialised) {
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    int fd = (int)ipc_msg.arg;
+    if (fd < 0 || fd >= SOS_MAX_OPEN_FILES) {
+      // fd is invalid
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    sos_fd_entry_t *e = &state->fds[fd];
+    if (!e->used || !e->readable) {
+      // file is not open or readable
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    if (ipc_msg.buf_addr != PROCESS_SHBUF_UVA) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    // HACK: kinda hacky, not what this is meant for, but this is what you get
+    // for using a language without tagged unions (rust ftw)
+    size_t req = (size_t)ipc_msg.buf_size;
+    if (req == 0 || req > PAGE_SIZE_4K) {
+      seL4_SetMR(0, -EMSGSIZE);
+      break;
+    }
+
+    char *dst = (char *)caller->shbuf.k_va;
+    if (!e->ops || !e->ops->read) {
+      seL4_SetMR(0, -ENOSYS);
+      break;
+    }
+
+    // read it to the client's shared page
+    ssize_t n = e->ops->read(e->dev_id, dst, req);
+
+    seL4_SetMR(0, (seL4_Word)n);
+    break;
+  }
+
   default:
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
     ZF_LOGE("Unknown syscall %lu\n", (unsigned long)syscall_number);
