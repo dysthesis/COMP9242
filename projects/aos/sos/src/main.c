@@ -74,6 +74,9 @@
  * process */
 #define INITIAL_PROCESS_EXTRA_STACK_PAGES 4
 
+/* Network console handle for SOS console output */
+struct network_console *sos_nc;
+
 /*
  * A dummy starting syscall
  */
@@ -307,6 +310,10 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       seL4_SetMR(0, -EBADF);
       break;
     }
+    if (e->refcnt != 0) {
+      seL4_SetMR(0, -EBUSY);
+      break;
+    }
 
     // Device cleanup if necessary
     if (e->kind == FD_DEV_CONSOLE && e->obj == &global_console) {
@@ -319,6 +326,9 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
         global_console.write_refcnt--;
       }
     }
+
+    if (e->ops && e->ops->close)
+      e->ops->close(e->dev_id);
 
     memset(e, 0, sizeof(*e));
 
@@ -816,6 +826,7 @@ NORETURN void *main_continued(UNUSED void *arg) {
   /* Initialise the network hardware. */
   printf("Network init\n");
   network_init(&cspace, timer_vaddr, ntfn);
+  sos_nc = network_console_init();
 
 #ifdef CONFIG_SOS_GDB_ENABLED
   /* Initialize the debugger */

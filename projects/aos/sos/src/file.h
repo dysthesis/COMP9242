@@ -1,7 +1,19 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+
 typedef enum { FD_NONE = 0, FD_DEV_CONSOLE } fd_kind_t;
+
+typedef ssize_t (*file_rw_fn)(int id, void *buf, size_t len);
+typedef int (*file_open_fn)(const char *name, int mode, int *out_id);
+typedef int (*file_close_fn)(int id);
+typedef struct {
+  file_open_fn open;
+  file_rw_fn read;
+  file_rw_fn write;
+  file_close_fn close;
+} file_ops_t;
 
 typedef struct {
   bool used;
@@ -9,6 +21,9 @@ typedef struct {
   bool writable;
   fd_kind_t kind;
   void *obj;
+  const file_ops_t *ops;
+  int dev_id;
+  uint16_t refcnt;
 } sos_fd_entry_t;
 
 typedef struct {
@@ -18,3 +33,15 @@ typedef struct {
 } console_dev_t;
 
 static console_dev_t global_console = {0};
+
+typedef struct {
+  const char *name;
+  const file_ops_t *ops;
+} dev_reg_t;
+
+extern const dev_reg_t devices[];
+extern const size_t dev_table_len;
+
+const file_ops_t *vfs_lookup_ops(const char *name);
+
+extern struct network_console *sos_nc;
