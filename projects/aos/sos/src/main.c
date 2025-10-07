@@ -535,14 +535,12 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
       sos_ipc_msg_t ipc_msg;
       if (sos_deserialise_ipc_msg(&message, &ipc_msg) == 0) {
         // inspect the IPC message received if we can
+        printf("[sos] syscall_loop(fault): badge -> %d\n", badge);
         printf("[sos] syscall_loop(fault): sysno -> %d\n",
                (sos_sysno_t)ipc_msg.sysno);
-        printf("[sos] syscall_loop(fault): arg -> %d\n",
-               (sos_sysno_t)ipc_msg.arg);
-        printf("[sos] syscall_loop(fault): buf_addr -> %x\n",
-               (sos_sysno_t)ipc_msg.buf_addr);
-        printf("[sos] syscall_loop(fault): buf_size -> %d\n",
-               (sos_sysno_t)ipc_msg.buf_size);
+        printf("[sos] syscall_loop(fault): arg -> %d\n", ipc_msg.arg);
+        printf("[sos] syscall_loop(fault): buf_addr -> %x\n", ipc_msg.buf_addr);
+        printf("[sos] syscall_loop(fault): buf_size -> %d\n", ipc_msg.buf_size);
         printf("[sos] syscall_loop(fault): shbuf-> %.*s\n", 10,
                PROCESS_SHBUF_UVA);
       }
