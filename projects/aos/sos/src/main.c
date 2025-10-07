@@ -425,6 +425,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     break;
   }
   case SOS_SYS_WRITE: {
+    printf("[sos] write: called!\n");
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
 
     if (!caller) {
@@ -434,48 +435,61 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
 
     unsigned client_id = caller->id;
     if (client_id >= MAX_CLIENTS) {
+      printf("[sos] write: there is no client found\n");
       seL4_SetMR(0, -EINVAL);
       break;
     }
+    printf("[sos] write: called by caller with id %d\n", client_id);
 
     sos_client_io_state_t *state = &client_io_state[client_id];
     if (!state->initialised) {
+      printf("[sos] write: there is no such file\n");
       seL4_SetMR(0, -EBADF);
       break;
     }
 
     int fd = (int)ipc_msg.arg;
+    printf("[sos] write: requested a write of file %d\n", fd);
     if (fd < 0 || fd >= SOS_MAX_OPEN_FILES) {
+      printf("[sos] write: there is no such file\n");
       seL4_SetMR(0, -EBADF);
       break;
     }
 
     sos_fd_entry_t *e = &state->fds[fd];
     if (!e->used || !e->writable) {
+      printf("[sos] write: invalid file!\n");
       seL4_SetMR(0, -EBADF);
       break;
     }
 
     if (ipc_msg.buf_addr != PROCESS_SHBUF_UVA) {
+      printf("[sos] write: wrong shared buffer addr\n");
       seL4_SetMR(0, -EINVAL);
       break;
     }
 
     size_t req = (size_t)ipc_msg.buf_size;
+    printf("[sos] write: requested a write of size %d\n", req);
     if (req == 0 || req > PAGE_SIZE_4K) {
+      printf("[sos] write: can't fit that much data in the shared page\n");
       seL4_SetMR(0, -EMSGSIZE);
       break;
     }
 
     const char *src = (const char *)caller->shbuf.k_va;
     if (!e->ops || !e->ops->write) {
+      printf("[sos] write: write handler for file not found\n");
       seL4_SetMR(0, -ENOSYS);
       break;
     }
 
     ssize_t n = e->ops->write(e->dev_id, (void *)src, req);
-
+    printf("[sos] write: write done, to fd of kind\n", e->kind);
+    printf("[sos] write: write done, wrote %d chars\n", n);
+    printf("[sos] write: wrote string %.*s\n", n, src);
     seL4_SetMR(0, (seL4_Word)n);
+    printf("[sos] write: set MR 0 to %d\n", n);
     break;
   }
   default:
