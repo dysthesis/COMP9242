@@ -66,7 +66,7 @@
 #define IRQ_EP_BADGE BIT(seL4_BadgeBits - 1ul)
 #define IRQ_IDENT_BADGE_BITS MASK(seL4_BadgeBits - 1ul)
 
-#define APP_NAME "syscall_test"
+#define APP_NAME "sosh"
 #define APP_PRIORITY (0)
 #define APP_EP_BADGE (101)
 
@@ -133,6 +133,47 @@ static struct {
   seL4_CPtr stack;
 } user_process;
 
+static void init_stdio(sos_client_io_state_t *state) {
+  memset(state->fds, 0, sizeof(state->fds));
+
+  const file_ops_t *ops = vfs_lookup_ops("console");
+  assert(ops && ops->open && ops->read && ops->write);
+
+  int id;
+
+  ZF_LOGF_IF(ops->open("console", O_RDONLY, &id) < 0,
+             "console stdin open failed");
+  state->fds[0].used = true;
+  state->fds[0].readable = true;
+  state->fds[0].writable = false;
+  state->fds[0].kind = FD_DEV_CONSOLE;
+  state->fds[0].obj = &global_console;
+  state->fds[0].ops = ops;
+  state->fds[0].dev_id = id;
+
+  ZF_LOGF_IF(ops->open("console", O_WRONLY, &id) < 0,
+             "console stdout open failed");
+  state->fds[1].used = true;
+  state->fds[1].readable = false;
+  state->fds[1].writable = true;
+  state->fds[1].kind = FD_DEV_CONSOLE;
+  state->fds[1].obj = &global_console;
+  state->fds[1].ops = ops;
+  state->fds[1].dev_id = id;
+
+  ZF_LOGF_IF(ops->open("console", O_WRONLY, &id) < 0,
+             "console stderr open failed");
+  state->fds[2].used = true;
+  state->fds[2].readable = false;
+  state->fds[2].writable = true;
+  state->fds[2].kind = FD_DEV_CONSOLE;
+  state->fds[2].obj = &global_console;
+  state->fds[2].ops = ops;
+  state->fds[2].dev_id = id;
+
+  state->initialised = true;
+}
+
 /**
  * Deals with a syscall and sets the message registers before returning the
  * message info to be passed through to seL4_ReplyRecv()
@@ -181,12 +222,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
 
     sos_client_io_state_t *state = &client_io_state[client_id];
     if (!state->initialised) {
-      memset(state->fds, 0, sizeof(state->fds));
-      for (int i = 0; i < MIN(3, SOS_MAX_OPEN_FILES); i++) {
-        state->fds[i].used = true;
-        state->fds[i].kind = FD_NONE;
-      }
-      state->initialised = true;
+      init_stdio(state);
     }
 
     int mode = (int)ipc_msg.arg;
@@ -354,6 +390,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     break;
   }
   case SOS_SYS_READ: {
+    printf("[sos] read: called!\n");
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
 
     if (!caller) {
@@ -361,8 +398,10 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       break;
     }
     unsigned client_id = caller->id;
+    printf("[sos] read: called by caller with id %d\n", client_id);
     if (client_id >= MAX_CLIENTS) {
       // bogus client id
+      printf("[sos] read: there is no client found\n");
       seL4_SetMR(0, -EINVAL);
       break;
     }
@@ -376,18 +415,22 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     int fd = (int)ipc_msg.arg;
     if (fd < 0 || fd >= SOS_MAX_OPEN_FILES) {
       // fd is invalid
+      printf("[sos] read: there is no such file\n");
       seL4_SetMR(0, -EBADF);
       break;
     }
 
     sos_fd_entry_t *e = &state->fds[fd];
+    printf("[sos] read: requested a read of file %d\n", fd);
     if (!e->used || !e->readable) {
       // file is not open or readable
+      printf("[sos] read: there is no such file\n");
       seL4_SetMR(0, -EBADF);
       break;
     }
 
     if (ipc_msg.buf_addr != PROCESS_SHBUF_UVA) {
+      printf("[sos] read: wrong shared buffer addr\n");
       seL4_SetMR(0, -EINVAL);
       break;
     }
@@ -395,25 +438,102 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     // HACK: kinda hacky, not what this is meant for, but this is what you get
     // for using a language without tagged unions (rust ftw)
     size_t req = (size_t)ipc_msg.buf_size;
+    printf("[sos] read: requested a read of size %d\n", req);
     if (req == 0 || req > PAGE_SIZE_4K) {
+      printf("[sos] read: can't fit that much data in the shared page\n");
       seL4_SetMR(0, -EMSGSIZE);
       break;
     }
 
     char *dst = (char *)caller->shbuf.k_va;
     if (!e->ops || !e->ops->read) {
+      printf("[sos] read: read handler for file not found\n");
       seL4_SetMR(0, -ENOSYS);
       break;
     }
 
     // read it to the client's shared page
     ssize_t n = e->ops->read(e->dev_id, dst, req);
-    printf("[read] read %d chars\n", n);
-
+    printf("[sos] read: read done, read %d chars\n", n);
+    printf("[sos] read: read string %.*s\n", n, dst);
     seL4_SetMR(0, (seL4_Word)n);
+    printf("[sos] read: set MR 0 to %d\n", n);
     break;
   }
+  case SOS_SYS_WRITE: {
+    printf("[sos] write: called!\n");
+    reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
 
+    if (!caller) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    unsigned client_id = caller->id;
+    if (client_id >= MAX_CLIENTS) {
+      printf("[sos] write: there is no client found\n");
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+    printf("[sos] write: called by caller with id %d\n", client_id);
+
+    sos_client_io_state_t *state = &client_io_state[client_id];
+    if (!state->initialised) {
+      printf("[sos] write: there is no such file\n");
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    int fd = (int)ipc_msg.arg;
+    printf("[sos] write: requested a write of file %d\n", fd);
+    if (fd < 0 || fd >= SOS_MAX_OPEN_FILES) {
+      printf("[sos] write: there is no such file\n");
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    sos_fd_entry_t *e = &state->fds[fd];
+    if (!e->used || !e->writable) {
+      printf("[sos] write: invalid file!\n");
+      printf("[sos] write: writable -> %d\n", e->writable);
+      printf("[sos] write: used -> %d\n", e->used);
+      printf("[sos] write: readable -> %d\n", e->readable);
+      printf("[sos] write: kind -> %d\n", e->kind);
+      printf("[sos] write: dev_id -> %d\n", e->dev_id);
+      printf("[sos] write: refcnt -> %d\n", e->refcnt);
+      seL4_SetMR(0, -EBADF);
+      break;
+    }
+
+    if (ipc_msg.buf_addr != PROCESS_SHBUF_UVA) {
+      printf("[sos] write: wrong shared buffer addr\n");
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    size_t req = (size_t)ipc_msg.buf_size;
+    printf("[sos] write: requested a write of size %d\n", req);
+    if (req == 0 || req > PAGE_SIZE_4K) {
+      printf("[sos] write: can't fit that much data in the shared page\n");
+      seL4_SetMR(0, -EMSGSIZE);
+      break;
+    }
+
+    const char *src = (const char *)caller->shbuf.k_va;
+    if (!e->ops || !e->ops->write) {
+      printf("[sos] write: write handler for file not found\n");
+      seL4_SetMR(0, -ENOSYS);
+      break;
+    }
+
+    ssize_t n = e->ops->write(e->dev_id, (void *)src, req);
+    printf("[sos] write: write done, to fd of kind\n", e->kind);
+    printf("[sos] write: write done, wrote %d chars\n", n);
+    printf("[sos] write: wrote string %.*s\n", n, src);
+    seL4_SetMR(0, (seL4_Word)n);
+    printf("[sos] write: set MR 0 to %d\n", n);
+    break;
+  }
   default:
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
     ZF_LOGE("Unknown syscall %lu\n", (unsigned long)syscall_number);
@@ -421,6 +541,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     *have_reply = false;
   }
 
+  printf("[sos] handle_syscall: done! returning reply message...\n");
   return reply_msg;
 }
 
@@ -468,6 +589,19 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
        * message from console_test! */
       reply_msg = handle_syscall(badge, &message, &have_reply, caller);
     } else {
+
+      sos_ipc_msg_t ipc_msg;
+      if (sos_deserialise_ipc_msg(&message, &ipc_msg) == 0) {
+        // inspect the IPC message received if we can
+        printf("[sos] syscall_loop(fault): badge -> %d\n", badge);
+        printf("[sos] syscall_loop(fault): sysno -> %d\n",
+               (sos_sysno_t)ipc_msg.sysno);
+        printf("[sos] syscall_loop(fault): arg -> %d\n", ipc_msg.arg);
+        printf("[sos] syscall_loop(fault): buf_addr -> %x\n", ipc_msg.buf_addr);
+        printf("[sos] syscall_loop(fault): buf_size -> %d\n", ipc_msg.buf_size);
+        printf("[sos] syscall_loop(fault): shbuf-> %.*s\n", 10,
+               PROCESS_SHBUF_UVA);
+      }
       /* some kind of fault */
       debug_print_fault(message, APP_NAME);
       /* dump registers too */
