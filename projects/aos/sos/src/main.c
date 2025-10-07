@@ -459,6 +459,12 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     sos_fd_entry_t *e = &state->fds[fd];
     if (!e->used || !e->writable) {
       printf("[sos] write: invalid file!\n");
+      printf("[sos] write: writable -> %d\n", e->writable);
+      printf("[sos] write: used -> %d\n", e->used);
+      printf("[sos] write: readable -> %d\n", e->readable);
+      printf("[sos] write: kind -> %d\n", e->kind);
+      printf("[sos] write: dev_id -> %d\n", e->dev_id);
+      printf("[sos] write: refcnt -> %d\n", e->refcnt);
       seL4_SetMR(0, -EBADF);
       break;
     }
