@@ -133,6 +133,47 @@ static struct {
   seL4_CPtr stack;
 } user_process;
 
+static void init_stdio(sos_client_io_state_t *state) {
+  memset(state->fds, 0, sizeof(state->fds));
+
+  const file_ops_t *ops = vfs_lookup_ops("console");
+  assert(ops && ops->open && ops->read && ops->write);
+
+  int id;
+
+  ZF_LOGF_IF(ops->open("console", O_RDONLY, &id) < 0,
+             "console stdin open failed");
+  state->fds[0].used = true;
+  state->fds[0].readable = true;
+  state->fds[0].writable = false;
+  state->fds[0].kind = FD_DEV_CONSOLE;
+  state->fds[0].obj = &global_console;
+  state->fds[0].ops = ops;
+  state->fds[0].dev_id = id;
+
+  ZF_LOGF_IF(ops->open("console", O_WRONLY, &id) < 0,
+             "console stdout open failed");
+  state->fds[1].used = true;
+  state->fds[1].readable = false;
+  state->fds[1].writable = true;
+  state->fds[1].kind = FD_DEV_CONSOLE;
+  state->fds[1].obj = &global_console;
+  state->fds[1].ops = ops;
+  state->fds[1].dev_id = id;
+
+  ZF_LOGF_IF(ops->open("console", O_WRONLY, &id) < 0,
+             "console stderr open failed");
+  state->fds[2].used = true;
+  state->fds[2].readable = false;
+  state->fds[2].writable = true;
+  state->fds[2].kind = FD_DEV_CONSOLE;
+  state->fds[2].obj = &global_console;
+  state->fds[2].ops = ops;
+  state->fds[2].dev_id = id;
+
+  state->initialised = true;
+}
+
 /**
  * Deals with a syscall and sets the message registers before returning the
  * message info to be passed through to seL4_ReplyRecv()
@@ -181,12 +222,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
 
     sos_client_io_state_t *state = &client_io_state[client_id];
     if (!state->initialised) {
-      memset(state->fds, 0, sizeof(state->fds));
-      for (int i = 0; i < MIN(3, SOS_MAX_OPEN_FILES); i++) {
-        state->fds[i].used = true;
-        state->fds[i].kind = FD_NONE;
-      }
-      state->initialised = true;
+      init_stdio(state);
     }
 
     int mode = (int)ipc_msg.arg;
