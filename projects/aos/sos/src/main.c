@@ -531,6 +531,21 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
        * message from console_test! */
       reply_msg = handle_syscall(badge, &message, &have_reply, caller);
     } else {
+
+      sos_ipc_msg_t ipc_msg;
+      if (sos_deserialise_ipc_msg(&message, &ipc_msg) == 0) {
+        // inspect the IPC message received if we can
+        printf("[sos] syscall_loop(fault): sysno -> %d\n",
+               (sos_sysno_t)ipc_msg.sysno);
+        printf("[sos] syscall_loop(fault): arg -> %d\n",
+               (sos_sysno_t)ipc_msg.arg);
+        printf("[sos] syscall_loop(fault): buf_addr -> %x\n",
+               (sos_sysno_t)ipc_msg.buf_addr);
+        printf("[sos] syscall_loop(fault): buf_size -> %d\n",
+               (sos_sysno_t)ipc_msg.buf_size);
+        printf("[sos] syscall_loop(fault): shbuf-> %.*s\n", 10,
+               PROCESS_SHBUF_UVA);
+      }
       /* some kind of fault */
       debug_print_fault(message, APP_NAME);
       /* dump registers too */
