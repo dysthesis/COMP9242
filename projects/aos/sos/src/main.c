@@ -421,6 +421,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     printf("[sos] read: read done, read %d chars\n", n);
     printf("[sos] read: read string %.*s\n", n, dst);
     seL4_SetMR(0, (seL4_Word)n);
+    printf("[sos] read: set MR 0 to %d\n", n);
     break;
   }
   case SOS_SYS_WRITE: {
@@ -484,6 +485,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     *have_reply = false;
   }
 
+  printf("[sos] handle_syscall: done! returning reply message...\n");
   return reply_msg;
 }
 
