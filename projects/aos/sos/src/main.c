@@ -317,23 +317,24 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     int rc = 0;
     if (ops->open) {
       printf("[sos] open: opening file...\n");
-
       rc = ops->open(filename, mode, &dev_id);
       if (rc < 0) {
-        printf("[sos] open: failed with error code %d\n", rc);
+        printf(
+            "[sos] open: failed with error code %d (it's file.c's fault now)\n",
+            rc);
         seL4_SetMR(0, rc);
         break;
       }
     }
 
     // Commit device policy
-    // if (want_read) {
-    //   global_console.reader_in_use = true;
-    //   global_console.reader_owner_id = client_id;
-    // }
-    // if (want_write) {
-    //   global_console.write_refcnt++;
-    // }
+    if (want_read) {
+      global_console.reader_in_use = true;
+      global_console.reader_owner_id = client_id;
+    }
+    if (want_write) {
+      global_console.write_refcnt++;
+    }
 
     // Install FD entry bound to the console device
     printf("[sos] fd -> %d\n", fd);
