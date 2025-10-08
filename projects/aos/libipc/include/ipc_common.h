@@ -12,6 +12,7 @@ typedef enum {
   SOS_SYS_WRITE,
   SOS_SYS_USLEEP,
   SOS_SYS_TIMESTAMP,
+  SOS_SYS_MY_ID,
 } sos_sysno_t;
 
 typedef struct {

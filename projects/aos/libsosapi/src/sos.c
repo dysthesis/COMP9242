@@ -9,6 +9,7 @@
  *
  * @TAG(DATA61_GPL)
  */
+#include "sel4/simple_types.h"
 #include "utils/page.h"
 #include "utils/zf_log.h"
 #include <assert.h>
@@ -247,8 +248,21 @@ int sos_process_delete(pid_t pid) {
 }
 
 pid_t sos_my_id(void) {
-  assert(!"You need to implement this");
-  return -1;
+  sos_ipc_msg_t msg = {
+      .sysno = SOS_SYS_MY_ID,
+      .arg = (seL4_Word)0,
+      .buf_addr = (seL4_Word)0,
+      .buf_size = (seL4_Word)0,
+  };
+
+  seL4_MessageInfo_t req = sos_serialise_ipc_msg(&msg);
+  seL4_MessageInfo_t reply = seL4_Call(SOS_IPC_EP_CAP, req);
+  if (seL4_MessageInfo_get_length(reply) < 1) {
+    ZF_LOGE("[libsosapi] received an empty reply from SOS!");
+    sos_errno = EINVAL;
+    return -1;
+  }
+  return seL4_GetMR(0);
 }
 
 int sos_process_status(sos_process_t *processes, unsigned max) {

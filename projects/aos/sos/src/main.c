@@ -584,6 +584,11 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     }
     break;
   }
+  case SOS_SYS_MY_ID: {
+    reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+    seL4_SetMR(0, (seL4_Word)badge);
+    break;
+  }
   default:
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
     ZF_LOGE("Unknown syscall %lu\n", (unsigned long)syscall_number);
