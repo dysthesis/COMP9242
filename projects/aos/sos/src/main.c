@@ -209,20 +209,24 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
   switch (syscall_number) {
 
   case SOS_SYS_OPEN: {
+    printf("[sos] open: called!\n");
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
 
     if (!caller) {
+      printf("[sos] open: caller not found!\n");
       seL4_SetMR(0, -EINVAL);
       break;
     }
     unsigned client_id = caller->id;
     if (client_id >= MAX_CLIENTS) {
+      printf("[sos] open: invalid client -> %d!\n", client_id);
       seL4_SetMR(0, -EINVAL);
       break;
     }
 
     sos_client_io_state_t *state = &client_io_state[client_id];
     if (!state->initialised) {
+      printf("[sos] open: initialising stdio!\n");
       init_stdio(state);
     }
 
@@ -231,10 +235,12 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     seL4_Word buf_len = ipc_msg.buf_size;
 
     if (user_buf != PROCESS_SHBUF_UVA) {
+      printf("[sos] open: invalid shared buffer address!\n");
       seL4_SetMR(0, -EINVAL);
       break;
     }
     if (buf_len == 0 || buf_len > PAGE_SIZE_4K) {
+      printf("[sos] open: file name too long!\n");
       seL4_SetMR(0, -EMSGSIZE);
       break;
     }
@@ -243,19 +249,24 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     size_t max_copy = MIN((size_t)buf_len, (size_t)PAGE_SIZE_4K);
     size_t name_len = strnlen(shared_str, max_copy);
     if (name_len == max_copy) {
+      printf("[sos] open: file name too long!\n");
       seL4_SetMR(0, -ENAMETOOLONG);
       break;
     }
+
     if (name_len == 0) {
+      printf("[sos] open: file name too short!\n");
       seL4_SetMR(0, -EINVAL);
       break;
     }
 
     char filename[PAGE_SIZE_4K];
     memcpy(filename, shared_str, name_len + 1);
-    printf("sos_open '%s' mode=%d\n", filename, mode);
+    printf("[sos] open: opening '%s' with mode %d\n", filename, mode);
 
     if (strcmp(filename, "console") != 0) {
+      printf(
+          "[sos] open: we can't open anything other than console for now!\n");
       seL4_SetMR(0, -ENODEV);
       break;
     }
@@ -264,6 +275,7 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     bool want_read = (accmode == O_RDONLY) || (accmode == O_RDWR);
     bool want_write = (accmode == O_WRONLY) || (accmode == O_RDWR);
     if (!want_read && !want_write) {
+      printf("[sos] open: need to be either read or write or both!\n");
       seL4_SetMR(0, -EINVAL);
       break;
     }
@@ -286,21 +298,29 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       }
     }
     if (fd < 0) {
+      printf("[sos] open: can't find empty fd!\n");
       seL4_SetMR(0, -EMFILE);
       break;
     }
+    printf("[sos] open: found empty fd %d\n", fd);
 
     const file_ops_t *ops = vfs_lookup_ops(filename);
     if (!ops) {
+      printf("[sos] open: can't find relevant device operation!\n");
       seL4_SetMR(0, -ENODEV);
       break;
     }
 
+    printf("[sos] open: found file ops table\n");
+
     int dev_id = 0;
     int rc = 0;
     if (ops->open) {
+      printf("[sos] open: opening file...\n");
+
       rc = ops->open(filename, mode, &dev_id);
       if (rc < 0) {
+        printf("[sos] open: failed with error code %d\n", rc);
         seL4_SetMR(0, rc);
         break;
       }
@@ -316,15 +336,22 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     // }
 
     // Install FD entry bound to the console device
+    printf("[sos] fd -> %d\n", fd);
     state->fds[fd].used = true;
     state->fds[fd].readable = want_read;
+    printf("[sos] fds[fd].readable -> %d\n", want_read);
     state->fds[fd].writable = want_write;
+    printf("[sos] fds[fd].writable -> %d\n", want_write);
     state->fds[fd].kind = FD_DEV_CONSOLE;
+    printf("[sos] fds[fd].kind -> %d\n", FD_DEV_CONSOLE);
     state->fds[fd].obj = &global_console;
     state->fds[fd].ops = ops;
     state->fds[fd].dev_id = dev_id;
+    printf("[sos] fds[fd].dev_id -> %d\n", dev_id);
 
     seL4_SetMR(0, fd);
+
+    printf("[sos] open: done!\n");
     break;
   }
   case SOS_SYS_CLOSE: {
