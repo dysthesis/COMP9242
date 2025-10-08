@@ -1,4 +1,5 @@
 #include "unistd.h"
+#include "utils/zf_log.h"
 #include <aos/sel4_zf_logif.h>
 #include <assert.h>
 #include <errno.h>
@@ -12,7 +13,7 @@
 #define SMALL_BUF_SZ 2
 #define MEDIUM_BUF_SZ 256
 
-char test_str[] = "Basic test string for read/write";
+char test_str[] = "Basic test string for read/write\n";
 char small_buf[SMALL_BUF_SZ];
 
 static void test_sos_open(void) {
@@ -131,9 +132,12 @@ static void test_sos_close(void) {
   ZF_LOGI("[syscall_test] sos_close() tests successful!\n");
 }
 
-int test_buffers(int console_fd) {
+int test_buffers(void) {
   /* test a small string from the code segment */
+  int console_fd = sos_open("console", O_RDWR);
   int result = sos_write(console_fd, test_str, strlen(test_str));
+  ZF_LOGD("[syscall_test] test_buffers: got -> %d, actual string length -> %d",
+          result, strlen(test_str));
   assert(result == strlen(test_str));
 
   /* test reading to a small buffer */
@@ -167,7 +171,7 @@ int main(void) {
   test_sos_open();
   test_sos_close();
   test_sos_read();
-  test_buffers(10);
+  test_buffers();
 
   return 0;
 }
