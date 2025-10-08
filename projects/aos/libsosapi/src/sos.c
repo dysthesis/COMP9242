@@ -264,6 +264,31 @@ pid_t sos_process_wait(pid_t pid) {
 void sos_usleep(int msec) { assert(!"You need to implement this"); }
 
 int64_t sos_time_stamp(void) {
-  assert(!"You need to implement this");
-  return -1;
+  // no inputs, so no input validation needed!
+  sos_ipc_msg_t msg = {
+      .sysno = SOS_SYS_TIMESTAMP,
+      .arg = (seL4_Word)0,
+      .buf_addr = PROCESS_SHBUF_UVA,
+      .buf_size = sizeof(int64_t),
+  };
+  seL4_MessageInfo_t req = sos_serialise_ipc_msg(&msg);
+  seL4_MessageInfo_t reply = seL4_Call(SOS_IPC_EP_CAP, req);
+
+  if (seL4_MessageInfo_get_length(reply) < 1) {
+    ZF_LOGE("[libsosapi] received an empty reply from SOS!");
+    sos_errno = EINVAL;
+    return -1;
+  }
+
+  int64_t res;
+  int err = (int)seL4_GetMR(0);
+  if (err < 0) {
+    sos_errno = -err;
+    return -1;
+  }
+
+  memcpy(&res, sos_shbuf_ptr(), sizeof(int64_t));
+
+  sos_errno = 0;
+  return res;
 }
