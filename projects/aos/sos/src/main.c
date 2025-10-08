@@ -67,7 +67,7 @@
 #define IRQ_EP_BADGE BIT(seL4_BadgeBits - 1ul)
 #define IRQ_IDENT_BADGE_BITS MASK(seL4_BadgeBits - 1ul)
 
-#define APP_NAME "sosh"
+#define APP_NAME "syscall_test"
 #define APP_PRIORITY (0)
 #define APP_EP_BADGE (101)
 
@@ -281,13 +281,13 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     }
 
     // Enforce single reader, multi-writer
-    // if (want_read) {
-    //   if (global_console.reader_in_use) {
-    //     // Reader already taken by someone (could be the same client)
-    //     seL4_SetMR(0, -EBUSY);
-    //     break;
-    //   }
-    // }
+    if (want_read) {
+      if (global_console.reader_in_use) {
+        // Reader already taken by someone (could be the same client)
+        seL4_SetMR(0, -EBUSY);
+        break;
+      }
+    }
 
     // Find a free FD slot
     int fd = -1;
@@ -399,16 +399,16 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     }
 
     // Device cleanup if necessary
-    // if (e->kind == FD_DEV_CONSOLE && e->obj == &global_console) {
-    //   if (e->readable && global_console.reader_in_use &&
-    //       global_console.reader_owner_id == client_id) {
-    //     global_console.reader_in_use = false;
-    //     global_console.reader_owner_id = 0;
-    //   }
-    //   if (e->writable && global_console.write_refcnt > 0) {
-    //     global_console.write_refcnt--;
-    //   }
-    // }
+    if (e->kind == FD_DEV_CONSOLE && e->obj == &global_console) {
+      if (e->readable && global_console.reader_in_use &&
+          global_console.reader_owner_id == client_id) {
+        global_console.reader_in_use = false;
+        global_console.reader_owner_id = 0;
+      }
+      if (e->writable && global_console.write_refcnt > 0) {
+        global_console.write_refcnt--;
+      }
+    }
 
     if (e->ops && e->ops->close)
       e->ops->close(e->dev_id);
