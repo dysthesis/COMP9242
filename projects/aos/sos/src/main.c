@@ -41,6 +41,7 @@
 #include "irq.h"
 #include "mapping.h"
 #include "network.h"
+#include "sel4/functions.h"
 #include "syscalls.h"
 #include "tests.h"
 #include "threads.h"
@@ -532,6 +533,27 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     printf("[sos] write: wrote string %.*s\n", n, src);
     seL4_SetMR(0, (seL4_Word)n);
     printf("[sos] write: set MR 0 to %d\n", n);
+    break;
+  }
+  case SOS_SYS_TIMESTAMP: {
+    reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+    if (!caller) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+    unsigned client_id = caller->id;
+    if (client_id >= MAX_CLIENTS) {
+      seL4_SetMR(0, -EINVAL);
+      break;
+    }
+
+    timestamp_t time = get_time();
+    if (time < INT64_MAX) {
+      seL4_SetMR(0, 0);
+      memcpy(caller->shbuf.k_va, time, sizeof(timestamp_t));
+    } else {
+      seL4_SetMR(0, -1);
+    }
     break;
   }
   default:
