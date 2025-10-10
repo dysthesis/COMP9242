@@ -584,8 +584,8 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
 
     timestamp_t time = get_time();
     if (time < INT64_MAX) {
+      *(timestamp_t *)caller->shbuf.k_va = time;
       seL4_SetMR(0, 0);
-      memcpy(caller->shbuf.k_va, time, sizeof(timestamp_t));
     } else {
       seL4_SetMR(0, -1);
     }

@@ -166,18 +166,25 @@ int test_buffers(void) {
   }
 }
 
-int main(void) {
-  ZF_LOGV("[syscall_test] Entered syscall testing app!\n");
+void test_usleep_and_timestamp(void) {
+  ZF_LOGI("[syscall_test] Testing sos_timestamp and sos_usleep...\n");
   for (int i = 0; i < 5; i++) {
     time_t prev_seconds = time(NULL);
     sleep(1);
     time_t next_seconds = time(NULL);
     assert(next_seconds > prev_seconds);
-    printf("Tick\n");
+    printf("[syscall_test] tick: %lu -> %lu\n", prev_seconds, next_seconds);
   }
+  ZF_LOGI("[syscall_test] sos_timestamp and sos_usleep tests successful\n");
+}
+
+int main(void) {
+  ZF_LOGV("[syscall_test] Entered syscall testing app!\n");
+
   test_sos_open();
   test_sos_close();
   test_sos_read();
+  test_usleep_and_timestamp();
   test_buffers();
 
   return 0;
