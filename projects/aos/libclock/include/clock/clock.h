@@ -71,3 +71,5 @@ int stop_timer(void);
  * Signal to the timer than an IRQ was received.
  */
 int timer_irq(void *data, seL4_Word irq, seL4_IRQHandler irq_handler);
+
+bool is_timer_running();

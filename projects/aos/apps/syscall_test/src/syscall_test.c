@@ -172,8 +172,8 @@ void test_usleep_and_timestamp(void) {
     time_t prev_seconds = time(NULL);
     sleep(1);
     time_t next_seconds = time(NULL);
-    assert(next_seconds > prev_seconds);
     printf("[syscall_test] tick: %lu -> %lu\n", prev_seconds, next_seconds);
+    assert(next_seconds > prev_seconds);
   }
   ZF_LOGI("[syscall_test] sos_timestamp and sos_usleep tests successful\n");
 }

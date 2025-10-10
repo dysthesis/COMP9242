@@ -7,3 +7,5 @@
 seL4_Word ts_get_timestamp();
 
 int32_t ts_usleep(ssize_t duration, seL4_CPtr reply, ut_t *reply_ut);
+
+seL4_Word ts_get_timestamp();

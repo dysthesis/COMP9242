@@ -9,6 +9,7 @@
  *
  * @TAG(DATA61_GPL)
  */
+#include "sel4/functions.h"
 #include "sel4/simple_types.h"
 #include "utils/page.h"
 #include "utils/zf_log.h"
@@ -314,8 +315,8 @@ int64_t sos_time_stamp(void) {
   sos_ipc_msg_t msg = {
       .sysno = SOS_SYS_TIMESTAMP,
       .arg = (seL4_Word)0,
-      .buf_addr = PROCESS_SHBUF_UVA,
-      .buf_size = sizeof(int64_t),
+      .buf_addr = (seL4_Word)0,
+      .buf_size = (seL4_Word)0,
   };
   seL4_MessageInfo_t req = sos_serialise_ipc_msg(&msg);
   seL4_MessageInfo_t reply = seL4_Call(SOS_IPC_EP_CAP, req);
@@ -326,15 +327,6 @@ int64_t sos_time_stamp(void) {
     return -1;
   }
 
-  int64_t res;
-  int err = (int)seL4_GetMR(0);
-  if (err < 0) {
-    sos_errno = -err;
-    return -1;
-  }
-
-  memcpy(&res, sos_shbuf_ptr(), sizeof(int64_t));
-
   sos_errno = 0;
-  return res;
+  return seL4_GetMR(0);
 }

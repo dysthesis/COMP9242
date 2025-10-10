@@ -69,14 +69,11 @@ typedef struct sleep_ctx {
   ut_t *reply_ut;
 } sleep_ctx_t;
 
-static void sleep_callback(UNUSED uint32_t dummy_id, void *data) {
+static void sleep_callback(UNUSED uint32_t id, void *data) {
   sleep_ctx_t *ctx = data;
-  // reply the msgs
-  seL4_MessageInfo_t reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
-
-  seL4_SetMR(0, 1);
-  seL4_Send(ctx->reply, reply_msg);
-
+  seL4_MessageInfo_t mi = seL4_MessageInfo_new(0, 0, 0, 1);
+  seL4_SetMR(0, 0);
+  seL4_Send(ctx->reply, mi);
   cspace_delete(&cspace, ctx->reply);
   cspace_free_slot(&cspace, ctx->reply);
   ut_free(ctx->reply_ut);
@@ -99,11 +96,18 @@ int32_t ts_usleep(ssize_t duration, seL4_CPtr reply, ut_t *reply_ut) {
   ctx->reply_ut = reply_ut;
 
   id = register_timer(MSEC_TO_USEC(duration), sleep_callback, ctx);
-  if (!id) {
+  if (id == CLOCK_R_UINT) {
     ZF_LOGE("Register timer failed.");
     free(ctx);
     return -1;
   }
 
   return 0;
+}
+seL4_Word ts_get_timestamp() {
+  seL4_Word timestamp = get_time() % INT64_MAX;
+  if (timestamp) {
+    return timestamp;
+  }
+  return 1;
 }

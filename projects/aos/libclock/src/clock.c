@@ -130,6 +130,8 @@ int start_timer(unsigned char *timer_vaddr) {
   return CLOCK_R_OK;
 }
 
+bool is_timer_running() { return clock.timer_running; }
+
 uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
   if (!clock.timer_running) {
     printf("[register_timer]: timer not running\n");
@@ -150,7 +152,7 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
   // check for overflow
   if (timeout_timestamp < current_timestamp) {
     printf("[register_timer]: overflow\n");
-    return 0; // too large to handle
+    return CLOCK_R_UINT; // too large to handle
   }
 
   // set the timer to trigger an interrupt after the delay
@@ -162,7 +164,7 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
   timeout_t *new_timeout = malloc(sizeof(*new_timeout));
   if (new_timeout == NULL) {
     printf("[register_timer]: failed to allocate memory for new timeout");
-    return 0;
+    return CLOCK_R_UINT;
   }
   new_timeout->deadline = timeout_timestamp;
   new_timeout->callback = callback;
@@ -186,7 +188,7 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
     clock.timeouts = realloc(clock.timeouts, new_size * sizeof(timeout_t *));
     if (clock.timeouts == NULL) {
       printf("[register_timer]: failed to reallocate memory for timeouts\n");
-      return 0;
+      return CLOCK_R_UINT;
     }
     clock.num_timeouts = new_size;
     slot_index = clock.num_timeouts - 1;
@@ -200,7 +202,7 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
     printf("[register_timer]: failed to insert\n");
 
     free(new_timeout);
-    return 0; // failed to insert
+    return CLOCK_R_UINT; // failed to insert
   }
   // now insert
   clock.timeouts[slot_index] = new_timeout;

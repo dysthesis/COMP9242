@@ -212,7 +212,20 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
 
   case SOS_SYS_USLEEP: {
     ssize_t duration = seL4_GetMR(1);
-    ts_usleep(duration, reply, reply_ut);
+    int res = ts_usleep(duration, reply, reply_ut);
+    if (res < 0) {
+      reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+      seL4_SetMR(0, -EINVAL);
+      *have_reply = true;
+    } else if (res == 1) {
+      reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+      seL4_SetMR(0, 0);
+      *have_reply = true;
+    } else {
+      *have_reply = false;
+      reply_ut = alloc_retype(&reply, seL4_ReplyObject, seL4_ReplyBits);
+      ZF_LOGF_IF(reply_ut == NULL, "Failed to alloc new reply object");
+    }
     break;
   }
   case SOS_SYS_OPEN: {
@@ -571,26 +584,13 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     break;
   }
   case SOS_SYS_TIMESTAMP: {
+    seL4_Word timestamp = ts_get_timestamp();
+    printf("[sos] timestamp: got time %lu\n", timestamp);
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
-    if (!caller) {
-      seL4_SetMR(0, -EINVAL);
-      break;
-    }
-    unsigned client_id = caller->id;
-    if (client_id >= MAX_CLIENTS) {
-      seL4_SetMR(0, -EINVAL);
-      break;
-    }
-
-    timestamp_t time = get_time();
-    if (time < INT64_MAX) {
-      *(timestamp_t *)caller->shbuf.k_va = time;
-      seL4_SetMR(0, 0);
-    } else {
-      seL4_SetMR(0, -1);
-    }
+    seL4_SetMR(0, timestamp);
     break;
   }
+
   case SOS_SYS_MY_ID: {
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
     seL4_SetMR(0, (seL4_Word)badge);
