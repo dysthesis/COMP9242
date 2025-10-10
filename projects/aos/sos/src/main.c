@@ -29,6 +29,7 @@
 #include <elf/elf.h>
 #include <networkconsole/networkconsole.h>
 
+#include "sys/time.h"
 #include <sel4runtime.h>
 #include <sel4runtime/auxv.h>
 
@@ -181,7 +182,8 @@ static void init_stdio(sos_client_io_state_t *state) {
  */
 seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
                                   const seL4_MessageInfo_t *message,
-                                  bool *have_reply, client_t *caller) {
+                                  bool *have_reply, client_t *caller,
+                                  seL4_CPtr reply, ut_t *reply_ut) {
   seL4_MessageInfo_t reply_msg;
 
   seL4_Word msg_length = seL4_MessageInfo_get_length(*message);
@@ -208,6 +210,11 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
   /* Process system call */
   switch (syscall_number) {
 
+  case SOS_SYS_USLEEP: {
+    ssize_t duration = seL4_GetMR(1);
+    ts_usleep(duration, reply, reply_ut);
+    break;
+  }
   case SOS_SYS_OPEN: {
     printf("[sos] open: called!\n");
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
@@ -642,7 +649,8 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
 
       /* It's not a fault or an interrupt, it must be an IPC
        * message from console_test! */
-      reply_msg = handle_syscall(badge, &message, &have_reply, caller);
+      reply_msg =
+          handle_syscall(badge, &message, &have_reply, caller, reply, reply_ut);
     } else {
 
       sos_ipc_msg_t ipc_msg;

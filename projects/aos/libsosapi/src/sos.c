@@ -13,7 +13,6 @@
 #include "utils/page.h"
 #include "utils/zf_log.h"
 #include <assert.h>
-#include <cerrno>
 #include <errno.h>
 #include <ipc_common.h>
 #include <sos.h>
