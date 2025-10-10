@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <sel4/sel4.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -95,7 +96,7 @@ int32_t ts_usleep(ssize_t duration, seL4_CPtr reply, ut_t *reply_ut) {
   ctx->reply = reply;
   ctx->reply_ut = reply_ut;
 
-  id = register_timer(MSEC_TO_USEC(duration), sleep_callback, ctx);
+  id = register_timer((uint64_t)duration, sleep_callback, ctx);
   if (id == CLOCK_R_UINT) {
     ZF_LOGE("Register timer failed.");
     free(ctx);

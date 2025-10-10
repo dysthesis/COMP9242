@@ -228,6 +228,12 @@ uint32_t register_timer(uint64_t delay, timer_callback_t callback, void *data) {
 
     configure_timeout(clock.regs, MESON_TIMER_A, true, false,
                       delay_data.timer_base, delay_data.start_count);
+
+    printf(
+        "[register_timer] now=%llu us, deadline=%llu us, base=%d, start=%u\n",
+        (unsigned long long)current_timestamp,
+        (unsigned long long)new_timeout->deadline, (int)delay_data.timer_base,
+        (unsigned)delay_data.start_count);
   } else {
     // not the earliest timeout, do nothing
   }

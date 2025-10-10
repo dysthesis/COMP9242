@@ -183,7 +183,7 @@ static void init_stdio(sos_client_io_state_t *state) {
 seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
                                   const seL4_MessageInfo_t *message,
                                   bool *have_reply, client_t *caller,
-                                  seL4_CPtr reply, ut_t *reply_ut) {
+                                  seL4_CPtr *reply, ut_t **reply_ut) {
   seL4_MessageInfo_t reply_msg;
 
   seL4_Word msg_length = seL4_MessageInfo_get_length(*message);
@@ -211,8 +211,8 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
   switch (syscall_number) {
 
   case SOS_SYS_USLEEP: {
-    ssize_t duration = seL4_GetMR(1);
-    int res = ts_usleep(duration, reply, reply_ut);
+    ssize_t duration = (ssize_t)seL4_GetMR(1);
+    int res = ts_usleep(duration, *reply, *reply_ut);
     if (res < 0) {
       reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
       seL4_SetMR(0, -EINVAL);
@@ -222,9 +222,12 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       seL4_SetMR(0, 0);
       *have_reply = true;
     } else {
+
       *have_reply = false;
-      reply_ut = alloc_retype(&reply, seL4_ReplyObject, seL4_ReplyBits);
-      ZF_LOGF_IF(reply_ut == NULL, "Failed to alloc new reply object");
+      ut_t *new_reply_ut =
+          alloc_retype(reply, seL4_ReplyObject, seL4_ReplyBits);
+      ZF_LOGF_IF(new_reply_ut == NULL, "Failed to alloc new reply object");
+      *reply_ut = new_reply_ut;
     }
     break;
   }
@@ -649,8 +652,8 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
 
       /* It's not a fault or an interrupt, it must be an IPC
        * message from console_test! */
-      reply_msg =
-          handle_syscall(badge, &message, &have_reply, caller, reply, reply_ut);
+      reply_msg = handle_syscall(badge, &message, &have_reply, caller, &reply,
+                                 &reply_ut);
     } else {
 
       sos_ipc_msg_t ipc_msg;
