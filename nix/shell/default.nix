@@ -63,6 +63,7 @@ in {
         unstable.statix
         unstable.deadnix
         unstable.clang-tools
+        # Typst for docs
         (unstable.typst.withPackages (ps:
           with ps; [
             algo
@@ -70,6 +71,11 @@ in {
             cetz
           ]))
         unstable.tinymist
+
+        # Zig toolchain
+        unstable.zig
+        unstable.zls
+        unstable.zlint
       ]
       ++ (with pkgs'.gcc11Stdenv; [
         gcc11
