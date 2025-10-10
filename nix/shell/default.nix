@@ -42,40 +42,48 @@ in {
   default = pkgs.unstable.mkShellNoCC {
     name = "COMP9242 SOS";
     inputsFrom = [self.packages.${pkgs.system}.default];
-    packages = with pkgs; [
-      cmake
-      ninja
-      qemu_full
-      ccache
-      dtc
-      libxml2.bin
-      unstable.just
+    packages = with pkgs;
+      [
+        cmake
+        ninja
+        qemu_full
+        ccache
+        dtc
+        libxml2.bin
+        unstable.just
 
-      (python3.withPackages (_: [self'.packages.sel4Deps]))
+        (python3.withPackages (_: [self'.packages.sel4Deps]))
 
-      # odroid
-      unstable.websocat
+        # odroid
+        unstable.websocat
 
-      # nix stuff
-      unstable.nixd
-      unstable.alejandra
-      unstable.statix
-      unstable.deadnix
-      unstable.clang-tools
-      (unstable.typst.withPackages (ps:
-        with ps; [
-          algo
-          algorithmic
-          cetz
-        ]))
-      unstable.tinymist
-    ]
-    ++ (with pkgs'.gcc11Stdenv; [
-      gcc11
-      cc
-      cc.bintools
-    ]);
+        # nix stuff
+        unstable.nixd
+        unstable.alejandra
+        unstable.statix
+        unstable.deadnix
+        unstable.clang-tools
+        (unstable.typst.withPackages (ps:
+          with ps; [
+            algo
+            algorithmic
+            cetz
+          ]))
+        unstable.tinymist
+      ]
+      ++ (with pkgs'.gcc11Stdenv; [
+        gcc11
+        cc
+        binutils
+      ]);
     CMAKE_EXPORT_COMPILE_COMMANDS = "ON";
+    CROSS_COMPILER_PREFIX = "${pkgs'.stdenv.cc.targetPrefix}";
+    CROSS_COMPILE = "$CROSS_COMPILER_PREFIX";
+    CFLAGS = [
+      "-fPIC"
+      "-fno-stack-protector"
+    ];
+
     shellHook =
       /*
       sh
