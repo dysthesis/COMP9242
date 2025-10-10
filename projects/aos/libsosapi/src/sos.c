@@ -13,6 +13,7 @@
 #include "utils/page.h"
 #include "utils/zf_log.h"
 #include <assert.h>
+#include <cerrno>
 #include <errno.h>
 #include <ipc_common.h>
 #include <sos.h>
@@ -275,7 +276,39 @@ pid_t sos_process_wait(pid_t pid) {
   return -1;
 }
 
-void sos_usleep(int msec) { assert(!"You need to implement this"); }
+void sos_usleep(int msec) {
+  if (msec < 0) {
+    // there is no such thing as a negative timeout
+    sos_errno = EINVAL;
+    return;
+  }
+
+  sos_ipc_msg_t msg = {
+      .sysno = SOS_SYS_USLEEP,
+      // we can fit the time in the message register, so do that instead of
+      // having to memcpy it to shbuf
+      .arg = msec,
+      .buf_addr = (seL4_Word)0,
+      .buf_size = sizeof(int64_t),
+  };
+
+  seL4_MessageInfo_t req = sos_serialise_ipc_msg(&msg);
+  seL4_MessageInfo_t reply = seL4_Call(SOS_IPC_EP_CAP, req);
+  if (seL4_MessageInfo_get_length(reply) < 1) {
+    ZF_LOGE("[libsosapi] received an empty reply from SOS!");
+    sos_errno = EINVAL;
+    return;
+  }
+
+  int64_t res;
+  int err = (int)seL4_GetMR(0);
+  if (err < 0) {
+    sos_errno = -err;
+    return;
+  }
+
+  sos_errno = 0;
+}
 
 int64_t sos_time_stamp(void) {
   // no inputs, so no input validation needed!
