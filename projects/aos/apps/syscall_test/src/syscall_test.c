@@ -168,6 +168,13 @@ int test_buffers(void) {
 
 int main(void) {
   ZF_LOGV("[syscall_test] Entered syscall testing app!\n");
+  for (int i = 0; i < 5; i++) {
+    time_t prev_seconds = time(NULL);
+    sleep(1);
+    time_t next_seconds = time(NULL);
+    assert(next_seconds > prev_seconds);
+    printf("Tick\n");
+  }
   test_sos_open();
   test_sos_close();
   test_sos_read();
