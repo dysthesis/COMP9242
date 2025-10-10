@@ -91,6 +91,7 @@ in {
       ''
         ln -sf ${justFile} Justfile
         export GEF_RC="$PWD/.gef.rc"
+        ninja -C build -t compdb > build/compile_commands.json
       '';
   };
 }
