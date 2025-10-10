@@ -27,15 +27,16 @@ static int console_open(const char *name, int mode, int *out_id) {
   if (!read && !write) {
     return -EINVAL;
   }
-  if (read) {
-    if (global_console.reader_in_use) {
-      return -EBUSY;
-    }
-    global_console.reader_in_use = true;
-  }
-  if (write) {
-    global_console.write_refcnt++;
-  }
+
+  // if (read) {
+  //   if (global_console.reader_in_use) {
+  //     return -EBUSY;
+  //   }
+  //   global_console.reader_in_use = true;
+  // }
+  // if (write) {
+  //   global_console.write_refcnt++;
+  // }
 
   *out_id = (read ? 1 : 0) | (write ? 2 : 0);
   return 0;

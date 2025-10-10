@@ -29,6 +29,7 @@
 #include <elf/elf.h>
 #include <networkconsole/networkconsole.h>
 
+#include "sys/time.h"
 #include <sel4runtime.h>
 #include <sel4runtime/auxv.h>
 
@@ -41,6 +42,7 @@
 #include "irq.h"
 #include "mapping.h"
 #include "network.h"
+#include "sel4/functions.h"
 #include "syscalls.h"
 #include "tests.h"
 #include "threads.h"
@@ -66,7 +68,7 @@
 #define IRQ_EP_BADGE BIT(seL4_BadgeBits - 1ul)
 #define IRQ_IDENT_BADGE_BITS MASK(seL4_BadgeBits - 1ul)
 
-#define APP_NAME "sosh"
+#define APP_NAME "syscall_test"
 #define APP_PRIORITY (0)
 #define APP_EP_BADGE (101)
 
@@ -180,7 +182,8 @@ static void init_stdio(sos_client_io_state_t *state) {
  */
 seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
                                   const seL4_MessageInfo_t *message,
-                                  bool *have_reply, client_t *caller) {
+                                  bool *have_reply, client_t *caller,
+                                  seL4_CPtr *reply, ut_t **reply_ut) {
   seL4_MessageInfo_t reply_msg;
 
   seL4_Word msg_length = seL4_MessageInfo_get_length(*message);
@@ -207,21 +210,46 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
   /* Process system call */
   switch (syscall_number) {
 
+  case SOS_SYS_USLEEP: {
+    ssize_t duration = (ssize_t)seL4_GetMR(1);
+    int res = ts_usleep(duration, *reply, *reply_ut);
+    if (res < 0) {
+      reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+      seL4_SetMR(0, -EINVAL);
+      *have_reply = true;
+    } else if (res == 1) {
+      reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+      seL4_SetMR(0, 0);
+      *have_reply = true;
+    } else {
+
+      *have_reply = false;
+      ut_t *new_reply_ut =
+          alloc_retype(reply, seL4_ReplyObject, seL4_ReplyBits);
+      ZF_LOGF_IF(new_reply_ut == NULL, "Failed to alloc new reply object");
+      *reply_ut = new_reply_ut;
+    }
+    break;
+  }
   case SOS_SYS_OPEN: {
+    printf("[sos] open: called!\n");
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
 
     if (!caller) {
+      printf("[sos] open: caller not found!\n");
       seL4_SetMR(0, -EINVAL);
       break;
     }
     unsigned client_id = caller->id;
     if (client_id >= MAX_CLIENTS) {
+      printf("[sos] open: invalid client -> %d!\n", client_id);
       seL4_SetMR(0, -EINVAL);
       break;
     }
 
     sos_client_io_state_t *state = &client_io_state[client_id];
     if (!state->initialised) {
+      printf("[sos] open: initialising stdio!\n");
       init_stdio(state);
     }
 
@@ -230,10 +258,12 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     seL4_Word buf_len = ipc_msg.buf_size;
 
     if (user_buf != PROCESS_SHBUF_UVA) {
+      printf("[sos] open: invalid shared buffer address!\n");
       seL4_SetMR(0, -EINVAL);
       break;
     }
     if (buf_len == 0 || buf_len > PAGE_SIZE_4K) {
+      printf("[sos] open: file name too long!\n");
       seL4_SetMR(0, -EMSGSIZE);
       break;
     }
@@ -242,19 +272,24 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     size_t max_copy = MIN((size_t)buf_len, (size_t)PAGE_SIZE_4K);
     size_t name_len = strnlen(shared_str, max_copy);
     if (name_len == max_copy) {
+      printf("[sos] open: file name too long!\n");
       seL4_SetMR(0, -ENAMETOOLONG);
       break;
     }
+
     if (name_len == 0) {
+      printf("[sos] open: file name too short!\n");
       seL4_SetMR(0, -EINVAL);
       break;
     }
 
     char filename[PAGE_SIZE_4K];
     memcpy(filename, shared_str, name_len + 1);
-    printf("sos_open '%s' mode=%d\n", filename, mode);
+    printf("[sos] open: opening '%s' with mode %d\n", filename, mode);
 
     if (strcmp(filename, "console") != 0) {
+      printf(
+          "[sos] open: we can't open anything other than console for now!\n");
       seL4_SetMR(0, -ENODEV);
       break;
     }
@@ -263,18 +298,19 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     bool want_read = (accmode == O_RDONLY) || (accmode == O_RDWR);
     bool want_write = (accmode == O_WRONLY) || (accmode == O_RDWR);
     if (!want_read && !want_write) {
+      printf("[sos] open: need to be either read or write or both!\n");
       seL4_SetMR(0, -EINVAL);
       break;
     }
 
     // Enforce single reader, multi-writer
-    // if (want_read) {
-    //   if (global_console.reader_in_use) {
-    //     // Reader already taken by someone (could be the same client)
-    //     seL4_SetMR(0, -EBUSY);
-    //     break;
-    //   }
-    // }
+    if (want_read) {
+      if (global_console.reader_in_use) {
+        // Reader already taken by someone (could be the same client)
+        seL4_SetMR(0, -EBUSY);
+        break;
+      }
+    }
 
     // Find a free FD slot
     int fd = -1;
@@ -285,45 +321,61 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
       }
     }
     if (fd < 0) {
+      printf("[sos] open: can't find empty fd!\n");
       seL4_SetMR(0, -EMFILE);
       break;
     }
+    printf("[sos] open: found empty fd %d\n", fd);
 
     const file_ops_t *ops = vfs_lookup_ops(filename);
     if (!ops) {
+      printf("[sos] open: can't find relevant device operation!\n");
       seL4_SetMR(0, -ENODEV);
       break;
     }
 
+    printf("[sos] open: found file ops table\n");
+
     int dev_id = 0;
     int rc = 0;
     if (ops->open) {
+      printf("[sos] open: opening file...\n");
       rc = ops->open(filename, mode, &dev_id);
       if (rc < 0) {
+        printf(
+            "[sos] open: failed with error code %d (it's file.c's fault now)\n",
+            rc);
         seL4_SetMR(0, rc);
         break;
       }
     }
 
     // Commit device policy
-    // if (want_read) {
-    //   global_console.reader_in_use = true;
-    //   global_console.reader_owner_id = client_id;
-    // }
-    // if (want_write) {
-    //   global_console.write_refcnt++;
-    // }
+    if (want_read) {
+      global_console.reader_in_use = true;
+      global_console.reader_owner_id = client_id;
+    }
+    if (want_write) {
+      global_console.write_refcnt++;
+    }
 
     // Install FD entry bound to the console device
+    printf("[sos] fd -> %d\n", fd);
     state->fds[fd].used = true;
     state->fds[fd].readable = want_read;
+    printf("[sos] fds[fd].readable -> %d\n", want_read);
     state->fds[fd].writable = want_write;
+    printf("[sos] fds[fd].writable -> %d\n", want_write);
     state->fds[fd].kind = FD_DEV_CONSOLE;
+    printf("[sos] fds[fd].kind -> %d\n", FD_DEV_CONSOLE);
     state->fds[fd].obj = &global_console;
     state->fds[fd].ops = ops;
     state->fds[fd].dev_id = dev_id;
+    printf("[sos] fds[fd].dev_id -> %d\n", dev_id);
 
     seL4_SetMR(0, fd);
+
+    printf("[sos] open: done!\n");
     break;
   }
   case SOS_SYS_CLOSE: {
@@ -370,16 +422,16 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     }
 
     // Device cleanup if necessary
-    // if (e->kind == FD_DEV_CONSOLE && e->obj == &global_console) {
-    //   if (e->readable && global_console.reader_in_use &&
-    //       global_console.reader_owner_id == client_id) {
-    //     global_console.reader_in_use = false;
-    //     global_console.reader_owner_id = 0;
-    //   }
-    //   if (e->writable && global_console.write_refcnt > 0) {
-    //     global_console.write_refcnt--;
-    //   }
-    // }
+    if (e->kind == FD_DEV_CONSOLE && e->obj == &global_console) {
+      if (e->readable && global_console.reader_in_use &&
+          global_console.reader_owner_id == client_id) {
+        global_console.reader_in_use = false;
+        global_console.reader_owner_id = 0;
+      }
+      if (e->writable && global_console.write_refcnt > 0) {
+        global_console.write_refcnt--;
+      }
+    }
 
     if (e->ops && e->ops->close)
       e->ops->close(e->dev_id);
@@ -534,6 +586,19 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge,
     printf("[sos] write: set MR 0 to %d\n", n);
     break;
   }
+  case SOS_SYS_TIMESTAMP: {
+    seL4_Word timestamp = ts_get_timestamp();
+    printf("[sos] timestamp: got time %lu\n", timestamp);
+    reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+    seL4_SetMR(0, timestamp);
+    break;
+  }
+
+  case SOS_SYS_MY_ID: {
+    reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+    seL4_SetMR(0, (seL4_Word)badge);
+    break;
+  }
   default:
     reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
     ZF_LOGE("Unknown syscall %lu\n", (unsigned long)syscall_number);
@@ -587,7 +652,8 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
 
       /* It's not a fault or an interrupt, it must be an IPC
        * message from console_test! */
-      reply_msg = handle_syscall(badge, &message, &have_reply, caller);
+      reply_msg = handle_syscall(badge, &message, &have_reply, caller, &reply,
+                                 &reply_ut);
     } else {
 
       sos_ipc_msg_t ipc_msg;
