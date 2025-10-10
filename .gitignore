@@ -118,3 +118,4 @@ cscope.out
 result
 Justfile
 .cache/
+.zig-cache
