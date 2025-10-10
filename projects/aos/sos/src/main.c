@@ -135,6 +135,12 @@ static struct {
   seL4_CPtr stack;
 } user_process;
 
+// ZIG FUNCTION STUBS
+
+void hiFromZig(void);
+
+// END OF ZIG FUNCTION STUBS
+
 static void init_stdio(sos_client_io_state_t *state) {
   memset(state->fds, 0, sizeof(state->fds));
 
@@ -1138,6 +1144,8 @@ NORETURN void *main_continued(UNUSED void *arg) {
   printf("Start first process\n");
   bool success = start_first_process(APP_NAME, ipc_ep);
   ZF_LOGF_IF(!success, "Failed to start first process");
+
+  hiFromZig();
 
   printf("\nSOS entering syscall loop\n");
   syscall_loop(ipc_ep);

@@ -71,6 +71,7 @@ add_executable(
 target_include_directories(sos PRIVATE "include" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(
     sos
+    ziglib_sos
     sel4_autoconf
     sel4runtime
     muslc
