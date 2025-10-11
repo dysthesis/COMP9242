@@ -17,5 +17,4 @@ const std = @import("std");
 export fn hiFromZig() callconv(.c) void {
     // you can access c functions like this
     _ = c.printf("hi from zig!\n");
-    libipc.hiFromLibIpc();
 }

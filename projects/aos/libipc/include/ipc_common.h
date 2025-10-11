@@ -47,8 +47,9 @@ sos_serialise_ipc_msg(const sos_ipc_msg_t *msg) {
 
 static inline int sos_deserialise_ipc_msg(const seL4_MessageInfo_t *msg_info,
                                           sos_ipc_msg_t *out) {
-  if (!msg_info || !out)
+  if (!msg_info || !out) {
     return -1;
+  }
 
   const seL4_Word len = seL4_MessageInfo_get_length(*msg_info);
   const seL4_Word xcaps = seL4_MessageInfo_get_extraCaps(*msg_info);
