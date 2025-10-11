@@ -1,30 +1,3 @@
-const std = @import("std");
-const libipc = @import("libipc");
-const sel4 = libipc.sel4;
-const Syscall = libipc.Syscall;
-const SyscallResponse = libipc.SyscallResponse;
-
-const c_std = @cImport({
-    @cInclude("stdio.h");
-    @cInclude("errno.h");
-    @cInclude("fcntl.h");
-    @cInclude("string.h");
-});
-
-const c_sel4 = @cImport({
-    @cInclude("sel4/sel4.h");
-});
-
-const c_sos = @cImport({
-    @cInclude("ipc.h");
-    @cInclude("file.h");
-    @cInclude("sos_time.h");
-    @cInclude("vmem_layout.h");
-    @cInclude("utils/page.h");
-    @cInclude("ut.h");
-    @cInclude("utils.h");
-});
-
 const MAX_CLIENTS: usize = c_sos.MAX_CLIENTS;
 const SOS_MAX_OPEN_FILES: usize = 32;
 const PROCESS_SHBUF_UVA = c_sos.PROCESS_SHBUF_UVA;
@@ -52,68 +25,67 @@ const ServerContext = struct {
     reply_ut: [*c]*c_sos.ut_t,
 };
 
-fn encodeI64(value: i64) sel4.seL4_Word {
-    return switch (@bitSizeOf(sel4.seL4_Word)) {
-        64 => blk: {
-            const unsigned: u64 = @bitCast(value);
-            break :blk @as(sel4.seL4_Word, @bitCast(unsigned));
-        },
-        32 => blk: {
-            const trunc: i32 = @truncate(value);
-            const unsigned: u32 = @bitCast(trunc);
-            break :blk @as(sel4.seL4_Word, @bitCast(unsigned));
-        },
-        else => @compileError("Unsupported seL4_Word size"),
+/// Handle a singular syscall
+pub export fn handle_syscall(
+    /// The caller's badge
+    badge: sel4.seL4_Word,
+    /// The system call message
+    message: [*c]const sel4.seL4_MessageInfo_t,
+    /// Indicator to tell the syscall_loop that we have a reply to send back
+    have_reply: [*c]bool,
+    /// Identifier for who is calling
+    caller: ?*c_sos.client_t,
+    /// Pointer to the reply capability
+    reply: [*c]sel4.seL4_CPtr,
+    /// Untyped descriptor backing the reply capability
+    reply_ut: [*c]*c_sos.ut_t,
+) callconv(.c) sel4.seL4_MessageInfo_t {
+    const msg = message.*;
+
+    // Return empty reply on empty message
+    if (sel4.seL4_MessageInfo_get_length(msg) == 0) {
+        sel4.seL4_SetMR(0, 0);
+        have_reply.* = true;
+        return sel4.seL4_MessageInfo_new(0, 0, 0, 1);
+    }
+
+    // Otherwise, it's probably a proper syscall, so we deserialise it to figure out what it is.
+    const syscall = libipc.Syscall.deserialise(msg) catch {
+        have_reply.* = true;
+        sel4.seL4_SetMR(0, encodeCInt(-c_std.EINVAL));
+        return sel4.seL4_MessageInfo_new(0, 0, 0, 1);
     };
-}
 
-fn encodeCInt(value: c_int) sel4.seL4_Word {
-    return encodeI64(@as(i64, value));
-}
-
-fn sharedBufPtr(comptime T: type, caller: *c_sos.client_t) [*]T {
-    const addr: usize = @intCast(caller.shbuf.k_va);
-    return @ptrFromInt(addr);
-}
-
-fn setupConsoleFd(fd: *c_sos.sos_fd_entry_t, ops: *const c_sos.file_ops_t, readable: bool, writable: bool, dev_id: c_int) void {
-    fd.* = empty_fd;
-    fd.used = true;
-    fd.readable = readable;
-    fd.writable = writable;
-    fd.kind = c_sos.FD_DEV_CONSOLE;
-    fd.obj = console_object_ptr;
-    fd.ops = ops;
-    fd.dev_id = dev_id;
-}
-
-fn initStdio(state: *SosClientIoState) void {
-    state.* = SosClientIoState{};
-    const ops = c_sos.vfs_lookup_ops(console_name_ptr) orelse {
-        std.debug.panic("console device not registered", .{});
+    var ctx = ServerContext{
+        .badge = badge,
+        .have_reply = have_reply,
+        .caller = caller,
+        .reply = reply,
+        .reply_ut = reply_ut,
     };
-    if (ops.*.open == null or ops.*.read == null or ops.*.write == null) {
-        std.debug.panic("console device missing required operations", .{});
+
+    have_reply.* = true;
+    // If it's a proper syscall....
+    if (handleDecodedSyscall(&ctx, syscall)) |resp| {
+        // ...then return its result.
+        return resp.serialise();
     }
 
-    var id: c_int = 0;
+    // usleep's thing
+    return sel4.seL4_MessageInfo_new(0, 0, 0, 0);
+}
 
-    if (ops.*.open.?(console_name_ptr, c_std.O_RDONLY, &id) < 0) {
-        std.debug.panic("console stdin open failed", .{});
-    }
-    setupConsoleFd(&state.fds[0], ops, true, false, id);
-
-    if (ops.*.open.?(console_name_ptr, c_std.O_WRONLY, &id) < 0) {
-        std.debug.panic("console stdout open failed", .{});
-    }
-    setupConsoleFd(&state.fds[1], ops, false, true, id);
-
-    if (ops.*.open.?(console_name_ptr, c_std.O_WRONLY, &id) < 0) {
-        std.debug.panic("console stderr open failed", .{});
-    }
-    setupConsoleFd(&state.fds[2], ops, false, true, id);
-
-    state.initialised = true;
+/// Switch on system call type to route to the correct handler
+fn handleDecodedSyscall(ctx: *ServerContext, syscall: Syscall) ?SyscallResponse {
+    return switch (syscall) {
+        .Open => |args| handleOpen(ctx, args),
+        .Close => |args| handleClose(ctx, args),
+        .Read => |args| handleRead(ctx, args),
+        .Write => |args| handleWrite(ctx, args),
+        .Usleep => |args| handleUsleep(ctx, args),
+        .Timestamp => handleTimestamp(ctx),
+        .MyId => handleMyId(ctx),
+    };
 }
 
 fn handleOpen(ctx: *ServerContext, args: anytype) SyscallResponse {
@@ -194,9 +166,9 @@ fn handleOpen(ctx: *ServerContext, args: anytype) SyscallResponse {
 
     var dev_id: c_int = 0;
     if (ops.*.open) |open_fn| {
-        const rc = open_fn(filename_ptr, mode, &dev_id);
-        if (rc < 0) {
-            return SyscallResponse{ .Open = .{ .result = @as(c_int, (rc)) } };
+        const ret = open_fn(filename_ptr, mode, &dev_id);
+        if (ret < 0) {
+            return SyscallResponse{ .Open = .{ .result = @as(c_int, (ret)) } };
         }
     }
 
@@ -392,65 +364,93 @@ fn handleUsleep(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     return null;
 }
 
-/// Switch on system call type to route to the correct handler
-fn handleDecodedSyscall(ctx: *ServerContext, syscall: Syscall) ?SyscallResponse {
-    return switch (syscall) {
-        .Open => |args| handleOpen(ctx, args),
-        .Close => |args| handleClose(ctx, args),
-        .Read => |args| handleRead(ctx, args),
-        .Write => |args| handleWrite(ctx, args),
-        .Usleep => |args| handleUsleep(ctx, args),
-        .Timestamp => handleTimestamp(ctx),
-        .MyId => handleMyId(ctx),
+fn encodeI64(value: i64) sel4.seL4_Word {
+    return switch (@bitSizeOf(sel4.seL4_Word)) {
+        64 => blk: {
+            const unsigned: u64 = @bitCast(value);
+            break :blk @as(sel4.seL4_Word, @bitCast(unsigned));
+        },
+        32 => blk: {
+            const trunc: i32 = @truncate(value);
+            const unsigned: u32 = @bitCast(trunc);
+            break :blk @as(sel4.seL4_Word, @bitCast(unsigned));
+        },
+        else => @compileError("Unsupported seL4_Word size"),
     };
 }
 
-/// Handle a singular syscall
-pub export fn handle_syscall(
-    /// The caller's badge
-    badge: sel4.seL4_Word,
-    /// The system call message
-    message: [*c]const sel4.seL4_MessageInfo_t,
-    /// Indicator to tell the syscall_loop that we have a reply to send back
-    have_reply: [*c]bool,
-    /// Identifier for who is calling
-    caller: ?*c_sos.client_t,
-    /// Pointer to the reply capability
-    reply: [*c]sel4.seL4_CPtr,
-    /// Untyped descriptor backing the reply capability
-    reply_ut: [*c]*c_sos.ut_t,
-) callconv(.c) sel4.seL4_MessageInfo_t {
-    const msg = message.*;
-
-    // Return empty reply on empty message
-    if (sel4.seL4_MessageInfo_get_length(msg) == 0) {
-        sel4.seL4_SetMR(0, 0);
-        have_reply.* = true;
-        return sel4.seL4_MessageInfo_new(0, 0, 0, 1);
-    }
-
-    // Otherwise, it's probably a proper syscall, so we deserialise it to figure out what it is.
-    const syscall = libipc.Syscall.deserialise(msg) catch {
-        have_reply.* = true;
-        sel4.seL4_SetMR(0, encodeCInt(-c_std.EINVAL));
-        return sel4.seL4_MessageInfo_new(0, 0, 0, 1);
-    };
-
-    var ctx = ServerContext{
-        .badge = badge,
-        .have_reply = have_reply,
-        .caller = caller,
-        .reply = reply,
-        .reply_ut = reply_ut,
-    };
-
-    have_reply.* = true;
-    // If it's a proper syscall....
-    if (handleDecodedSyscall(&ctx, syscall)) |resp| {
-        // ...then return its result.
-        return resp.serialise();
-    }
-
-    // usleep's thing
-    return sel4.seL4_MessageInfo_new(0, 0, 0, 0);
+fn encodeCInt(value: c_int) sel4.seL4_Word {
+    return encodeI64(@as(i64, value));
 }
+
+fn sharedBufPtr(comptime T: type, caller: *c_sos.client_t) [*]T {
+    const addr: usize = @intCast(caller.shbuf.k_va);
+    return @ptrFromInt(addr);
+}
+
+fn setupConsoleFd(fd: *c_sos.sos_fd_entry_t, ops: *const c_sos.file_ops_t, readable: bool, writable: bool, dev_id: c_int) void {
+    fd.* = empty_fd;
+    fd.used = true;
+    fd.readable = readable;
+    fd.writable = writable;
+    fd.kind = c_sos.FD_DEV_CONSOLE;
+    fd.obj = console_object_ptr;
+    fd.ops = ops;
+    fd.dev_id = dev_id;
+}
+
+fn initStdio(state: *SosClientIoState) void {
+    state.* = SosClientIoState{};
+    const ops = c_sos.vfs_lookup_ops(console_name_ptr) orelse {
+        std.debug.panic("console device not registered", .{});
+    };
+    if (ops.*.open == null or ops.*.read == null or ops.*.write == null) {
+        std.debug.panic("console device missing required operations", .{});
+    }
+
+    var id: c_int = 0;
+
+    if (ops.*.open.?(console_name_ptr, c_std.O_RDONLY, &id) < 0) {
+        std.debug.panic("console stdin open failed", .{});
+    }
+    setupConsoleFd(&state.fds[0], ops, true, false, id);
+
+    if (ops.*.open.?(console_name_ptr, c_std.O_WRONLY, &id) < 0) {
+        std.debug.panic("console stdout open failed", .{});
+    }
+    setupConsoleFd(&state.fds[1], ops, false, true, id);
+
+    if (ops.*.open.?(console_name_ptr, c_std.O_WRONLY, &id) < 0) {
+        std.debug.panic("console stderr open failed", .{});
+    }
+    setupConsoleFd(&state.fds[2], ops, false, true, id);
+
+    state.initialised = true;
+}
+
+const std = @import("std");
+const libipc = @import("libipc");
+const sel4 = libipc.sel4;
+const Syscall = libipc.Syscall;
+const SyscallResponse = libipc.SyscallResponse;
+
+const c_std = @cImport({
+    @cInclude("stdio.h");
+    @cInclude("errno.h");
+    @cInclude("fcntl.h");
+    @cInclude("string.h");
+});
+
+const c_sel4 = @cImport({
+    @cInclude("sel4/sel4.h");
+});
+
+const c_sos = @cImport({
+    @cInclude("ipc.h");
+    @cInclude("file.h");
+    @cInclude("sos_time.h");
+    @cInclude("vmem_layout.h");
+    @cInclude("utils/page.h");
+    @cInclude("ut.h");
+    @cInclude("utils.h");
+});
