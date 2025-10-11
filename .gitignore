@@ -119,3 +119,4 @@ result
 Justfile
 .cache/
 .zig-cache
+zls.json

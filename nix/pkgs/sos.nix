@@ -25,6 +25,7 @@ in
       protobuf
       (python3.withPackages (_: [self'.packages.sel4Deps]))
       libxml2
+      unstable.zig
     ];
 
     buildInputs = with pkgs; [ubootTools websocat];
@@ -51,6 +52,9 @@ in
     '';
 
     buildPhase = ''
+      export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
+      export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-local-cache"
+      mkdir -p "$ZIG_GLOBAL_CACHE_DIR" "$ZIG_LOCAL_CACHE_DIR"
       ninja -C build
     '';
 

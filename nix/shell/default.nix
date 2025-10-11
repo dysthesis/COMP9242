@@ -38,6 +38,43 @@
         reload: build run reset debug
       '';
   };
+  realZig = pkgs.unstable.zig;
+  zigWrapper = pkgs.writeShellScriptBin "zig" ''
+    #!${pkgs.unstable.dash}/bin/dash
+    set -eu
+    zig_bin="${lib.getExe realZig}"
+    if [ "$#" -gt 0 ] && [ "$1" = "translate-c" ]; then
+      shift
+      exec "$zig_bin" translate-c -target aarch64-freestanding-gnu "$@"
+    fi
+    exec "$zig_bin" "$@"
+  '';
+  zlsWrapper = pkgs.writeShellScriptBin "zls" ''
+    #!${pkgs.unstable.dash}/bin/dash
+    set -eu
+    if [ -n "''${ZLS_CONFIG_PATH-}" ]; then
+      config_path="''${ZLS_CONFIG_PATH}"
+    else
+      config_path="${zlsConfig}"
+    fi
+    for arg in "$@"; do
+      case "$arg" in
+        --config-path|--config-path=*)
+          exec ${lib.getExe pkgs.unstable.zls} "$@"
+          ;;
+      esac
+    done
+    exec ${lib.getExe pkgs.unstable.zls} "$@" --config-path "$config_path"
+  '';
+  zlsConfig = pkgs.writeTextFile {
+    name = "zls.json";
+    text =
+      builtins.toJSON {
+        zig_exe_path = lib.getExe zigWrapper;
+        enable_build_on_save = false;
+        prefer_ast_check_as_child_process = false;
+      };
+  };
 in {
   default = pkgs.unstable.mkShellNoCC {
     name = "COMP9242 SOS";
@@ -73,8 +110,8 @@ in {
         unstable.tinymist
 
         # Zig toolchain
-        unstable.zig
-        unstable.zls
+        zigWrapper
+        zlsWrapper
         unstable.zlint
       ]
       ++ (with pkgs'.gcc11Stdenv; [
@@ -96,8 +133,14 @@ in {
       */
       ''
         ln -sf ${justFile} Justfile
+        ln -sf ${zlsConfig} zls.json
+        export ZLS_CONFIG_PATH="$PWD/zls.json"
         export GEF_RC="$PWD/.gef.rc"
-        ninja -C build -t compdb > build/compile_commands.json
+        if [ -d build ]; then
+          ninja -C build -t compdb > build/compile_commands.json
+        else
+          echo "zls note: run ../init-build.sh in a build directory to populate generated headers" >&2
+        fi
       '';
   };
 }
