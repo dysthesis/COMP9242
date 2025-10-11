@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     _ = cmake_aos;
 
     const libipc_module = b.addModule("libipc", .{
-        .root_source_file = b.path("projects/aos/libipc/zig/lib.zig"),
+        .root_source_file = b.path("projects/aos/libipc/src/lib.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_c = sanitize_c,
@@ -44,6 +44,42 @@ pub fn build(b: *std.Build) void {
     });
     libipc.link_gc_sections = false;
     b.installArtifact(libipc);
+
+    const libsosapi_module = b.addModule("libsosapi", .{
+        .root_source_file = b.path("projects/aos/libsosapi/src/sos.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    addCommonIncludePaths(b, libsosapi_module);
+    libsosapi_module.addImport("libipc", libipc_module);
+    libsosapi_module.addIncludePath(b.path("projects/aos/libsosapi/include"));
+
+    const libsosapi = b.addLibrary(.{
+        .linkage = .static,
+        .name = "ziglib_sosapi",
+        .root_module = libsosapi_module,
+    });
+    libsosapi.link_gc_sections = false;
+    b.installArtifact(libsosapi);
+
+    const libipc_check = b: {
+        const m = b.createModule(.{
+            .root_source_file = b.path("projects/aos/libipc/src/lib.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_c = sanitize_c,
+        });
+        addCommonIncludePaths(b, m);
+        m.addIncludePath(b.path("projects/aos/libipc/include"));
+        const l = b.addLibrary(.{
+            .linkage = .static,
+            .name = "ziglib_ipc_check",
+            .root_module = m,
+        });
+        l.link_gc_sections = false;
+        break :b l;
+    };
 
     const sos = b: {
         const src = b.path("projects/aos/sos/src");
@@ -87,6 +123,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const check = b.step("check", "Check if sos compiles");
+    check.dependOn(&libipc_check.step);
     check.dependOn(&sos_check.step);
     check.dependOn(&libipc.step);
 }

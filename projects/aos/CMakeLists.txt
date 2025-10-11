@@ -27,6 +27,7 @@ set(ZIG_LIBS
     # this is the list of libraries zig will produce for cmake
     # be sure to keep this list updated!
     ziglib_sos
+    ziglib_sosapi
     ziglib_ipc
 )
 set(ZIG_APPS
