@@ -68,12 +68,11 @@
   '';
   zlsConfig = pkgs.writeTextFile {
     name = "zls.json";
-    text =
-      builtins.toJSON {
-        zig_exe_path = lib.getExe zigWrapper;
-        enable_build_on_save = false;
-        prefer_ast_check_as_child_process = false;
-      };
+    text = builtins.toJSON {
+      zig_exe_path = lib.getExe zigWrapper;
+      # enable_build_on_save = false;
+      prefer_ast_check_as_child_process = false;
+    };
   };
 in {
   default = pkgs.unstable.mkShellNoCC {
