@@ -47,6 +47,28 @@ pub fn build(b: *std.Build) void {
         break :b l;
     };
     b.installArtifact(sos);
+
+    const sos_check = b: {
+        const src = b.path("projects/aos/sos/src");
+        const m = b.createModule(.{
+            .root_source_file = src.path(b, "main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_c = sanitize_c,
+        });
+        addCommonIncludePaths(b, m);
+        m.addIncludePath(src);
+        const l = b.addLibrary(.{
+            .linkage = .static,
+            .name = "ziglib_sos",
+            .root_module = m,
+        });
+        l.link_gc_sections = false;
+        break :b l;
+    };
+
+    const check = b.step("check", "Check if sos compiles");
+    check.dependOn(&sos_check.step);
 }
 
 fn addCommonIncludePaths(b: *std.Build, m: *std.Build.Module) void {

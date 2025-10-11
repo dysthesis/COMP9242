@@ -2,6 +2,10 @@ const c = @cImport({
     @cInclude("stdio.h");
 });
 
+const sel4 = @cImport({
+    @cInclude("sel4/sel4.h");
+});
+
 // import zig's standard library
 // OS dependent features won't be functional (without extra work)
 // but there are still useful items like `std.debug.assert` and `std.math.maxInt`
