@@ -5,6 +5,7 @@ const c = @cImport({
 const sel4 = @cImport({
     @cInclude("sel4/sel4.h");
 });
+const libipc = @import("libipc");
 
 // import zig's standard library
 // OS dependent features won't be functional (without extra work)
@@ -16,4 +17,5 @@ const std = @import("std");
 export fn hiFromZig() callconv(.c) void {
     // you can access c functions like this
     _ = c.printf("hi from zig!\n");
+    libipc.hiFromLibIpc();
 }

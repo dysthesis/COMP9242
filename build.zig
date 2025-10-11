@@ -28,6 +28,23 @@ pub fn build(b: *std.Build) void {
         b.path("build/projects/aos/libaos/libaos.a");
     _ = cmake_aos;
 
+    const libipc_module = b.addModule("libipc", .{
+        .root_source_file = b.path("projects/aos/libipc/zig/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    addCommonIncludePaths(b, libipc_module);
+    libipc_module.addIncludePath(b.path("projects/aos/libipc/include"));
+
+    const libipc = b.addLibrary(.{
+        .linkage = .static,
+        .name = "ziglib_ipc",
+        .root_module = libipc_module,
+    });
+    libipc.link_gc_sections = false;
+    b.installArtifact(libipc);
+
     const sos = b: {
         const src = b.path("projects/aos/sos/src");
         const m = b.createModule(.{
@@ -37,6 +54,7 @@ pub fn build(b: *std.Build) void {
             .sanitize_c = sanitize_c,
         });
         addCommonIncludePaths(b, m);
+        m.addImport("libipc", libipc_module);
         m.addIncludePath(src);
         const l = b.addLibrary(.{
             .linkage = .static,
@@ -57,6 +75,7 @@ pub fn build(b: *std.Build) void {
             .sanitize_c = sanitize_c,
         });
         addCommonIncludePaths(b, m);
+        m.addImport("libipc", libipc_module);
         m.addIncludePath(src);
         const l = b.addLibrary(.{
             .linkage = .static,
@@ -69,6 +88,7 @@ pub fn build(b: *std.Build) void {
 
     const check = b.step("check", "Check if sos compiles");
     check.dependOn(&sos_check.step);
+    check.dependOn(&libipc.step);
 }
 
 fn addCommonIncludePaths(b: *std.Build, m: *std.Build.Module) void {
@@ -110,6 +130,7 @@ fn addCommonIncludePaths(b: *std.Build, m: *std.Build.Module) void {
         "libnfs/nlm",
         "libnfs/nfs4",
         "libnfs/nfs",
+        "projects/aos/libipc/include",
         "libnfs/mount",
         "projects/aos/libethernet/include",
         "projects/libgdb/include",
