@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) void {
     });
     addCommonIncludePaths(b, libipc_module);
     libipc_module.addIncludePath(b.path("projects/aos/libipc/include"));
+    addExePatch(b, libipc_module, .{ .lto = false });
 
     const libipc = b.addLibrary(.{
         .linkage = .static,
@@ -54,6 +55,7 @@ pub fn build(b: *std.Build) void {
     addCommonIncludePaths(b, libsosapi_module);
     libsosapi_module.addImport("libipc", libipc_module);
     libsosapi_module.addIncludePath(b.path("projects/aos/libsosapi/include"));
+    addExePatch(b, libsosapi_module, .{ .lto = false });
 
     const libsosapi = b.addLibrary(.{
         .linkage = .static,
@@ -90,6 +92,7 @@ pub fn build(b: *std.Build) void {
             .sanitize_c = sanitize_c,
         });
         addCommonIncludePaths(b, m);
+        addExePatch(b, m, .{ .lto = true });
         m.addImport("libipc", libipc_module);
         m.addIncludePath(src);
         const l = b.addLibrary(.{
@@ -175,4 +178,11 @@ fn addCommonIncludePaths(b: *std.Build, m: *std.Build.Module) void {
         ".vscode/preinclude.h",
     };
     for (paths) |path| m.addIncludePath(b.path(path));
+}
+
+fn addExePatch(b: *std.Build, m: *std.Build.Module, flags: struct { lto: bool }) void {
+    m.addCSourceFile(.{
+        .file = b.path("zig_patch/aarch64_syscalls.c"),
+        .flags = if (flags.lto) &.{"-flto"} else &.{},
+    });
 }
