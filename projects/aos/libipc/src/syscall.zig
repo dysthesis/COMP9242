@@ -93,7 +93,7 @@ pub const Syscall = union(lib.SyscallNum) {
         }
 
         const raw_syscall = sel4.seL4_GetMR(0);
-        const syscall_num = std.meta.intToEnum(lib.SyscallNum, raw_syscall) orelse {
+        const syscall_num = std.meta.intToEnum(lib.SyscallNum, raw_syscall) catch {
             return lib.SyscallDeserialisationError.InvalidSyscallNumber;
         };
 

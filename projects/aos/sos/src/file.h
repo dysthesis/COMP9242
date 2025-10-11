@@ -33,7 +33,7 @@ typedef struct {
   size_t write_refcnt;
 } console_dev_t;
 
-static console_dev_t global_console = {0};
+extern console_dev_t global_console;
 
 typedef struct {
   const char *name;

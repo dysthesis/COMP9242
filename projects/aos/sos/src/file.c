@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <string.h>
 
+console_dev_t global_console = {0};
+
 static bool input_handler_registered = false;
 
 static void nc_input_handler(struct network_console *UNUSED netcon, char c) {
