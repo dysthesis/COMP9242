@@ -29,7 +29,7 @@
 #include <elf/elf.h>
 #include <networkconsole/networkconsole.h>
 
-#include "sys/time.h"
+#include "sos_time.h"
 #include <sel4runtime.h>
 #include <sel4runtime/auxv.h>
 

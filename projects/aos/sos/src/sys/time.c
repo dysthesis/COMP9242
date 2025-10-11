@@ -9,6 +9,7 @@
  *
  * @TAG(DATA61_GPL)
  */
+#include "sos_time.h"
 #include "ut.h"
 #include <clock/clock.h>
 #include <clock/timestamp.h>
