@@ -31,6 +31,7 @@ set(ZIG_LIBS
     ziglib_clock
     ziglib_ipc
     ziglib_ipc_server
+    ziglib_file
 )
 set(ZIG_APPS
     # this is the list of executable apps zig will produce

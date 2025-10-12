@@ -17,6 +17,19 @@ const SosClientIoState = struct {
 
 var client_io_state: [MAX_CLIENTS]SosClientIoState = [_]SosClientIoState{SosClientIoState{}} ** MAX_CLIENTS;
 
+const PendingConsoleRead = struct {
+    client: *c_sos.client_t,
+    client_id: usize,
+    fd_index: usize,
+    requested: usize,
+    ops: *const c_sos.file_ops_t,
+    dev_id: c_int,
+    reply: sel4.seL4_CPtr,
+    reply_ut: *c_sos.ut_t,
+};
+
+var pending_console_read: ?PendingConsoleRead = null;
+
 const ServerContext = struct {
     badge: sel4.seL4_Word,
     have_reply: [*c]bool,
@@ -221,6 +234,11 @@ fn handleClose(ctx: *ServerContext, args: anytype) SyscallResponse {
     }
 
     if (entry.kind == c_sos.FD_DEV_CONSOLE and entry.obj == console_object_ptr) {
+        if (pending_console_read) |pending| {
+            if (pending.client_id == client_id and pending.fd_index == fd_index) {
+                cancelPendingConsoleRead(-c_std.ECANCELED);
+            }
+        }
         if (entry.readable and c_sos.global_console.reader_in_use and c_sos.global_console.reader_owner_id == client_id_u16) {
             c_sos.global_console.reader_in_use = false;
             c_sos.global_console.reader_owner_id = 0;
@@ -239,7 +257,7 @@ fn handleClose(ctx: *ServerContext, args: anytype) SyscallResponse {
     return SyscallResponse{ .Close = .{ .result = @as(c_int, (0)) } };
 }
 
-fn handleRead(ctx: *ServerContext, args: anytype) SyscallResponse {
+fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     const caller = ctx.caller orelse {
         return SyscallResponse{ .Read = .{ .result = @as(c_int, (-c_std.EINVAL)) } };
     };
@@ -282,8 +300,40 @@ fn handleRead(ctx: *ServerContext, args: anytype) SyscallResponse {
     }
     const read_fn = ops_ptr.*.read.?;
     const result = read_fn(entry.dev_id, dst_any, req);
-    const n: c_int = @intCast(result);
-    return SyscallResponse{ .Read = .{ .result = @as(c_int, (n)) } };
+    if (result == -c_std.EWOULDBLOCK) {
+        if (pending_console_read != null) {
+            return SyscallResponse{ .Read = .{ .result = @as(c_int, (-c_std.EBUSY)) } };
+        }
+
+        const old_reply_cap = ctx.reply.*;
+        const old_reply_ut = ctx.reply_ut.*;
+
+        const new_reply_ut = c_sos.alloc_retype(ctx.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
+        if (new_reply_ut == null) {
+            ctx.reply.* = old_reply_cap;
+            ctx.reply_ut.* = old_reply_ut;
+            return SyscallResponse{ .Read = .{ .result = @as(c_int, (-c_std.ENOMEM)) } };
+        }
+
+        pending_console_read = PendingConsoleRead{
+            .client = caller,
+            .client_id = client_id,
+            .fd_index = fd_index,
+            .requested = req,
+            .ops = ops_ptr,
+            .dev_id = entry.dev_id,
+            .reply = old_reply_cap,
+            .reply_ut = old_reply_ut,
+        };
+
+        ctx.have_reply.* = false;
+        ctx.reply_ut.* = new_reply_ut.?;
+        tryCompletePendingConsoleRead();
+        return null;
+    }
+
+    const n = resultToCInt(result);
+    return SyscallResponse{ .Read = .{ .result = n } };
 }
 
 fn handleWrite(ctx: *ServerContext, args: anytype) SyscallResponse {
@@ -435,6 +485,72 @@ fn initStdio(state: *SosClientIoState) void {
     state.initialised = true;
 }
 
+fn resultToCInt(value: isize) c_int {
+    return std.math.cast(c_int, value) orelse {
+        return if (value < 0) @as(c_int, (-c_std.EIO)) else std.math.maxInt(c_int);
+    };
+}
+
+fn tryCompletePendingConsoleRead() void {
+    const pending = pending_console_read orelse return;
+
+    if (pending.client_id >= client_io_state.len) {
+        pending_console_read = null;
+        completePendingConsoleRead(pending, @as(isize, -c_std.EINVAL));
+        return;
+    }
+
+    var state = &client_io_state[pending.client_id];
+    if (!state.initialised) {
+        pending_console_read = null;
+        completePendingConsoleRead(pending, @as(isize, -c_std.EBADF));
+        return;
+    }
+
+    const entry = &state.fds[pending.fd_index];
+    if (!entry.used or !entry.readable or entry.ops != pending.ops) {
+        pending_console_read = null;
+        completePendingConsoleRead(pending, @as(isize, -c_std.EBADF));
+        return;
+    }
+
+    const read_fn = pending.ops.*.read orelse {
+        pending_console_read = null;
+        completePendingConsoleRead(pending, @as(isize, -c_std.ENOSYS));
+        return;
+    };
+
+    const dst_ptr = sharedBufPtr(u8, pending.client);
+    const dst_any: *anyopaque = @ptrCast(dst_ptr);
+    const result = read_fn(pending.dev_id, dst_any, pending.requested);
+    if (result == -c_std.EWOULDBLOCK) {
+        return;
+    }
+
+    pending_console_read = null;
+    completePendingConsoleRead(pending, result);
+}
+
+fn completePendingConsoleRead(pending: PendingConsoleRead, result: isize) void {
+    const resp = SyscallResponse{ .Read = .{ .result = resultToCInt(result) } };
+    const msg = resp.serialise();
+    sel4.seL4_Send(pending.reply, msg);
+    _ = c_sos.cspace_delete(&cspace, pending.reply);
+    c_sos.cspace_free_slot(&cspace, pending.reply);
+    c_sos.ut_free(pending.reply_ut);
+}
+
+fn cancelPendingConsoleRead(err: c_int) void {
+    if (pending_console_read) |pending| {
+        pending_console_read = null;
+        completePendingConsoleRead(pending, @as(isize, err));
+    }
+}
+
+pub export fn sos_console_data_ready() callconv(.c) void {
+    tryCompletePendingConsoleRead();
+}
+
 const std = @import("std");
 const libipc = @import("libipc");
 const sel4 = libipc.sel4;
@@ -461,3 +577,5 @@ const c_sos = @cImport({
     @cInclude("ut.h");
     @cInclude("utils.h");
 });
+
+extern var cspace: c_sos.cspace_t;

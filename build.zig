@@ -104,6 +104,24 @@ pub fn build(b: *std.Build) void {
     libclock.link_gc_sections = false;
     b.installArtifact(libclock);
 
+    const libfile_module = b.addModule("libfile", .{
+        .root_source_file = b.path("projects/aos/sos/src/file.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    addCommonIncludePaths(b, libfile_module);
+    libfile_module.addIncludePath(b.path("projects/aos/sos/src"));
+    addExePatch(b, libfile_module, .{ .lto = false });
+
+    const libfile = b.addLibrary(.{
+        .linkage = .static,
+        .name = "ziglib_file",
+        .root_module = libfile_module,
+    });
+    libfile.link_gc_sections = false;
+    b.installArtifact(libfile);
+
     const libipc_check = b: {
         const m = b.createModule(.{
             .root_source_file = b.path("projects/aos/libipc/src/lib.zig"),
@@ -131,7 +149,7 @@ pub fn build(b: *std.Build) void {
             .sanitize_c = sanitize_c,
         });
         addCommonIncludePaths(b, m);
-        addExePatch(b, m, .{ .lto = true });
+        addExePatch(b, m, .{ .lto = false });
         m.addImport("libipc", libipc_module);
         m.addIncludePath(src);
         const l = b.addLibrary(.{
