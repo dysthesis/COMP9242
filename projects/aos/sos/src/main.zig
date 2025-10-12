@@ -384,7 +384,14 @@ fn encodeCInt(value: c_int) sel4.seL4_Word {
 }
 
 fn sharedBufPtr(comptime T: type, caller: *c_sos.client_t) [*]T {
-    const addr: usize = @intCast(caller.shbuf.k_va);
+    const shbuf = caller.shbuf orelse {
+        std.debug.panic("caller missing shared buffer", .{});
+    };
+    const addr_value = c_sos.sos_shared_page_kernel_va(shbuf);
+    if (addr_value == 0) {
+        std.debug.panic("shared buffer has no kernel mapping", .{});
+    }
+    const addr: usize = @intCast(addr_value);
     return @ptrFromInt(addr);
 }
 

@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) void {
     });
     addCommonIncludePaths(b, libipc_module);
     libipc_module.addIncludePath(b.path("projects/aos/libipc/include"));
+    libipc_module.addIncludePath(b.path("projects/aos/sos/src"));
     addExePatch(b, libipc_module, .{ .lto = false });
 
     const libipc = b.addLibrary(.{
@@ -45,6 +46,25 @@ pub fn build(b: *std.Build) void {
     });
     libipc.link_gc_sections = false;
     b.installArtifact(libipc);
+
+    const libipc_server_module = b.addModule("libipc_server", .{
+        .root_source_file = b.path("projects/aos/libipc/src/server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    addCommonIncludePaths(b, libipc_server_module);
+    libipc_server_module.addIncludePath(b.path("projects/aos/libipc/include"));
+    libipc_server_module.addIncludePath(b.path("projects/aos/sos/src"));
+    addExePatch(b, libipc_server_module, .{ .lto = false });
+
+    const libipc_server = b.addLibrary(.{
+        .linkage = .static,
+        .name = "ziglib_ipc_server",
+        .root_module = libipc_server_module,
+    });
+    libipc_server.link_gc_sections = false;
+    b.installArtifact(libipc_server);
 
     const libsosapi_module = b.addModule("libsosapi", .{
         .root_source_file = b.path("projects/aos/libsosapi/src/sos.zig"),
