@@ -275,7 +275,11 @@ const Clock = struct {
             .active = false,
         };
 
-        const now = self.currentTime();
+        const now = self.currentTime() orelse {
+            logError("register_timer: current time unavailable", .{});
+            destroyTimeout(new_timeout);
+            return 0;
+        };
         const deadline = math.add(u64, now, delay) catch {
             logError("register_timer: deadline overflow", .{});
             destroyTimeout(new_timeout);
@@ -346,7 +350,13 @@ const Clock = struct {
             return c.CLOCK_R_UINT;
         }
 
-        var now = self.currentTime();
+        var now_opt = self.currentTime();
+        if (now_opt == null) {
+            self.scheduleEarliest(null);
+            _ = c.seL4_IRQHandler_Ack(irq_handler);
+            return c.CLOCK_R_UINT;
+        }
+        var now = now_opt.?;
 
         while (true) {
             const maybe_head = self.queue.peek();
@@ -374,10 +384,13 @@ const Clock = struct {
             }
 
             destroyTimeout(head);
-            now = self.currentTime();
+            now_opt = self.currentTime();
+            if (now_opt) |value| {
+                now = value;
+            }
         }
 
-        self.scheduleEarliest(now);
+        self.scheduleEarliest(now_opt);
         _ = c.seL4_IRQHandler_Ack(irq_handler);
         return c.CLOCK_R_OK;
     }
