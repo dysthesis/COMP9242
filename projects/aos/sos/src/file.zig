@@ -1,12 +1,3 @@
-const std = @import("std");
-
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("fcntl.h");
-    @cInclude("file.h");
-    @cInclude("networkconsole/networkconsole.h");
-});
-
 const ring_capacity: usize = @intCast(c.CONSOLE_RING_SIZE);
 
 extern fn sos_console_data_ready() callconv(.c) void;
@@ -20,9 +11,13 @@ pub export var global_console: c.console_dev_t = .{
     .write_refcnt = 0,
 };
 
+/// Circular buffer to store the contents of the network console until it is read.
 const ConsoleRing = struct {
+    /// The buffer storing the actual data
     buf: [ring_capacity]u8 = [_]u8{0} ** ring_capacity,
+    /// Index of the head in `buf`
     head: usize = 0,
+    /// Index of the tail in `buf`
     tail: usize = 0,
 
     fn isEmpty(self: *const ConsoleRing) bool {
@@ -64,10 +59,14 @@ const ConsoleRing = struct {
     const Self = @This();
 };
 
+/// A driver for the network console.
 const ConsoleDevice = struct {
+    /// Ring buffer storing the contents of the console until it is read from
     ring: ConsoleRing = .{},
+    /// Has it been registered to by the network console?
     input_handler_registered: bool = false,
 
+    /// Lazy registration of the input handler to the network console
     fn ensureInputHandler(self: *ConsoleDevice) void {
         if (self.input_handler_registered) {
             return;
@@ -90,11 +89,13 @@ const ConsoleDevice = struct {
             (if (allow_write) @as(u8, 2) else 0);
     }
 
+    /// Push input to ring buffer.
     fn handleInput(self: *ConsoleDevice, ch: u8) void {
         self.ring.push(ch);
         sos_console_data_ready();
     }
 
+    /// Open handler for the console
     fn open(self: *ConsoleDevice, name: [*c]const u8, mode: c_int, out_id: ?*c_int) c_int {
         if (name == null or out_id == null) {
             return -c.EINVAL;
@@ -118,6 +119,7 @@ const ConsoleDevice = struct {
         return 0;
     }
 
+    /// Read data from the ring buffer.
     fn read(self: *ConsoleDevice, buf: ?*anyopaque, len: usize) isize {
         if (buf == null or len == 0) {
             return 0;
@@ -133,6 +135,7 @@ const ConsoleDevice = struct {
         return @as(isize, @intCast(copied));
     }
 
+    /// Write data to the network console.
     fn write(self: *ConsoleDevice, buf: ?*anyopaque, len: usize) isize {
         if (buf == null or len == 0) {
             return 0;
@@ -152,6 +155,7 @@ const ConsoleDevice = struct {
         return @as(isize, @intCast(sent));
     }
 
+    /// Close semantics for the console
     fn close(self: *ConsoleDevice, id: c_int) c_int {
         _ = self;
         if ((id & 1) != 0) {
@@ -229,3 +233,12 @@ pub export fn vfs_lookup_ops(name: [*c]const u8) ?*const c.file_ops_t {
     }
     return devices[0].ops;
 }
+
+const std = @import("std");
+
+const c = @cImport({
+    @cInclude("errno.h");
+    @cInclude("fcntl.h");
+    @cInclude("file.h");
+    @cInclude("networkconsole/networkconsole.h");
+});
