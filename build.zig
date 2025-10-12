@@ -65,6 +65,25 @@ pub fn build(b: *std.Build) void {
     libsosapi.link_gc_sections = false;
     b.installArtifact(libsosapi);
 
+    const libclock_module = b.addModule("libclock", .{
+        .root_source_file = b.path("projects/aos/libclock/src/clock.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    addCommonIncludePaths(b, libclock_module);
+    libclock_module.addIncludePath(b.path("projects/aos/libclock/include"));
+    libclock_module.addIncludePath(b.path("projects/aos/libclock/src"));
+    addExePatch(b, libclock_module, .{ .lto = false });
+
+    const libclock = b.addLibrary(.{
+        .linkage = .static,
+        .name = "ziglib_clock",
+        .root_module = libclock_module,
+    });
+    libclock.link_gc_sections = false;
+    b.installArtifact(libclock);
+
     const libipc_check = b: {
         const m = b.createModule(.{
             .root_source_file = b.path("projects/aos/libipc/src/lib.zig"),

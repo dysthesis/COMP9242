@@ -15,7 +15,6 @@ project(libclock C)
 add_library(
   clock 
   EXCLUDE_FROM_ALL
-  src/clock.c
   src/device.c
   src/clock_tests.c
 )
@@ -24,7 +23,7 @@ target_include_directories(clock PUBLIC include)
 
 target_link_libraries(
   clock
-  pqueue
+  ziglib_clock
   sel4runtime
   muslc
   sel4

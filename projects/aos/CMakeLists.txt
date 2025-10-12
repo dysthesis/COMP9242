@@ -28,6 +28,7 @@ set(ZIG_LIBS
     # be sure to keep this list updated!
     ziglib_sos
     ziglib_sosapi
+    ziglib_clock
     ziglib_ipc
 )
 set(ZIG_APPS
