@@ -1,10 +1,16 @@
 const INITIAL_TIMEOUTS: usize = 10;
 
+/// A timer timeout
 const Timeout = struct {
+    /// A unique identifier for the timer
     id: u32,
+    /// The absolute time when this timeout will be triggered
     deadline: u64,
+    /// The function to call back to when the timeout expires
     callback: c.timer_callback_t,
+    /// Data to feed in to the callback
     data: ?*anyopaque,
+    /// Is this timeout active
     active: bool,
 };
 
@@ -12,12 +18,48 @@ fn compareTimeout(_: void, a: *Timeout, b: *Timeout) math.Order {
     return math.order(a.deadline, b.deadline);
 }
 
+/// Priority queue of timeouts to sort by earliest due timeouts.
 const TimeoutQueue = std.PriorityQueue(*Timeout, void, compareTimeout);
+/// Global list of timeouts to keep track of free timeout IDs.
 const TimeoutSlots = std.ArrayList(?*Timeout);
 
+/// A counter-timebase pair representing a delay
 const Delay = struct {
     count: u16,
     base: c.timeout_timebase_t,
+
+    /// Construct a new delay from raw microseconds.
+    fn from(us: u64) Delay {
+        const max16: u64 = math.maxInt(u16);
+        if (us <= max16) {
+            return .{
+                .count = @intCast(us),
+                .base = c.TIMEOUT_TIMEBASE_1_US,
+            };
+        }
+        if (us <= max16 * 10) {
+            return .{
+                .count = @intCast(us / 10),
+                .base = c.TIMEOUT_TIMEBASE_10_US,
+            };
+        }
+        if (us <= max16 * 100) {
+            return .{
+                .count = @intCast(us / 100),
+                .base = c.TIMEOUT_TIMEBASE_100_US,
+            };
+        }
+        if (us <= max16 * 1000) {
+            return .{
+                .count = @intCast(us / 1000),
+                .base = c.TIMEOUT_TIMEBASE_1_MS,
+            };
+        }
+        return .{
+            .count = math.maxInt(u16),
+            .base = c.TIMEOUT_TIMEBASE_1_MS,
+        };
+    }
 };
 
 inline fn logError(comptime fmt: []const u8, args: anytype) void {
@@ -29,43 +71,17 @@ fn destroyTimeout(timeout: *Timeout) void {
     free(@as(?*anyopaque, @ptrCast(timeout)));
 }
 
-fn computeDelay(us: u64) Delay {
-    const max16: u64 = math.maxInt(u16);
-    if (us <= max16) {
-        return .{
-            .count = @intCast(us),
-            .base = c.TIMEOUT_TIMEBASE_1_US,
-        };
-    }
-    if (us <= max16 * 10) {
-        return .{
-            .count = @intCast(us / 10),
-            .base = c.TIMEOUT_TIMEBASE_10_US,
-        };
-    }
-    if (us <= max16 * 100) {
-        return .{
-            .count = @intCast(us / 100),
-            .base = c.TIMEOUT_TIMEBASE_100_US,
-        };
-    }
-    if (us <= max16 * 1000) {
-        return .{
-            .count = @intCast(us / 1000),
-            .base = c.TIMEOUT_TIMEBASE_1_MS,
-        };
-    }
-    return .{
-        .count = math.maxInt(u16),
-        .base = c.TIMEOUT_TIMEBASE_1_MS,
-    };
-}
-
+/// Global clock
 const Clock = struct {
+    /// Hardware clock registers
     regs: ?*volatile c.meson_timer_reg_t,
+    /// Is the clock running?
     running: bool,
+    /// Queue of timeouts sorted by earliest due
     queue: TimeoutQueue,
+    /// List of timeouts by ID
     slots: TimeoutSlots,
+    /// How many timeouts are active
     active_count: usize,
 
     fn init() Clock {
@@ -78,10 +94,7 @@ const Clock = struct {
         };
     }
 
-    fn isRunning(self: *const Clock) bool {
-        return self.running;
-    }
-
+    /// Disable the clock hardware
     fn disableHardware(self: *Clock) void {
         if (self.regs) |regs| {
             c.configure_timeout(
@@ -95,14 +108,16 @@ const Clock = struct {
         }
     }
 
-    fn currentTime(self: *const Clock) u64 {
+    /// Get the current time if the clock is running
+    fn currentTime(self: *const Clock) ?u64 {
         if (!self.running or self.regs == null) {
-            return 0;
+            return null;
         }
         return c.read_timestamp(self.regs.?);
     }
 
-    fn pruneInactiveTop(self: *Clock) void {
+    /// Get rid of the head if it is inactive.
+    fn pruneInactiveHead(self: *Clock) void {
         while (true) {
             const maybe_head = self.queue.peek();
             if (maybe_head) |head| {
@@ -117,12 +132,13 @@ const Clock = struct {
         }
     }
 
+    /// Configure the hardware timer to trigger an interrupt for the earliest due timeout.
     fn scheduleEarliest(self: *Clock, now_hint: ?u64) void {
         if (!self.running or self.regs == null) {
             return;
         }
 
-        self.pruneInactiveTop();
+        self.pruneInactiveHead();
 
         if (self.active_count == 0) {
             self.disableHardware();
@@ -135,9 +151,9 @@ const Clock = struct {
         };
         if (!head.active) unreachable;
 
-        const now = now_hint orelse self.currentTime();
+        const now = now_hint orelse self.currentTime() orelse 0;
         const diff: u64 = if (head.deadline > now) head.deadline - now else 0;
-        const delay = computeDelay(diff);
+        const delay = Delay.from(diff);
 
         c.configure_timeout(
             self.regs.?,
@@ -149,7 +165,8 @@ const Clock = struct {
         );
     }
 
-    fn resetStructures(self: *Clock) void {
+    /// Reset the clock state
+    fn resetState(self: *Clock) void {
         while (self.queue.removeOrNull()) |timeout| {
             destroyTimeout(timeout);
         }
@@ -192,6 +209,7 @@ const Clock = struct {
         return self.slots.items[index];
     }
 
+    /// Start the clock
     fn start(self: *Clock, timer_vaddr: [*c]u8) c_int {
         if (timer_vaddr == null) {
             return c.CLOCK_R_FAIL;
@@ -203,7 +221,7 @@ const Clock = struct {
                 return stopped;
             }
         } else {
-            self.resetStructures();
+            self.resetState();
         }
 
         const base_addr = @intFromPtr(timer_vaddr) + c.TIMER_REG_START;
@@ -229,10 +247,12 @@ const Clock = struct {
         return c.CLOCK_R_OK;
     }
 
+    /// Get the current time as a `timestamp_t`
     fn getTime(self: *Clock) c.timestamp_t {
-        return self.currentTime();
+        return self.currentTime() orelse 0;
     }
 
+    /// Register a new timeout, returning the resulting ID for that timeout
     fn registerTimer(self: *Clock, delay: u64, callback: c.timer_callback_t, data: ?*anyopaque) u32 {
         if (!self.running) {
             logError("register_timer: driver not initialised", .{});
@@ -281,7 +301,7 @@ const Clock = struct {
 
         self.active_count += 1;
 
-        self.pruneInactiveTop();
+        self.pruneInactiveHead();
         if (self.queue.peek()) |head| {
             if (head == new_timeout) {
                 self.scheduleEarliest(null);
@@ -291,6 +311,7 @@ const Clock = struct {
         return id;
     }
 
+    /// Remove a timoeut by ID.
     fn removeTimer(self: *Clock, id: u32) c_int {
         if (!self.running) {
             return c.CLOCK_R_UINT;
@@ -368,7 +389,7 @@ const Clock = struct {
 
         self.disableHardware();
 
-        self.resetStructures();
+        self.resetState();
 
         self.regs = null;
         self.running = false;
@@ -379,8 +400,9 @@ const Clock = struct {
 
 var default_clock = Clock.init();
 
+// NOTE: This exports functions for C as required by `clock.h`
 pub export fn is_timer_running() callconv(.c) bool {
-    return default_clock.isRunning();
+    return default_clock.running;
 }
 
 pub export fn start_timer(timer_vaddr: [*c]u8) callconv(.c) c_int {
@@ -407,12 +429,15 @@ pub export fn stop_timer() callconv(.c) c_int {
     return default_clock.stop();
 }
 
+// NOTE: this imports functions from C
 extern fn malloc(size: usize) ?*anyopaque;
 extern fn realloc(ptr: ?*anyopaque, size: usize) ?*anyopaque;
 extern fn free(ptr: ?*anyopaque) void;
 
 const max_supported_alignment: usize = 16;
 
+/// Rely on musl's malloc to use the preallocated memory since we haven't implemented virtual memory
+/// and proper allocation yet.
 const MallocAllocator = struct {
     const vtable = Allocator.VTable{
         .alloc = alloc,
