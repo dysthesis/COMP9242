@@ -254,7 +254,7 @@ pub export fn sos_getdirent(pos: c_int, name: [*c]u8, nbyte: usize) callconv(.c)
 pub export fn sos_stat(path: [*c]const u8, buf: ?*sos_types.sos_stat_t) callconv(.c) c_int {
     _ = path;
     _ = buf;
-    std.debug.panic("You need to implement this", .{});
+    return setErrno(c.ENOSYS);
 }
 
 pub export fn sos_process_create(path: [*c]const u8) callconv(.c) sos_types.pid_t {
