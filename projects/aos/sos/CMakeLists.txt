@@ -54,7 +54,6 @@ add_executable(
     src/network.c
     src/ut.c
     src/tests.c
-    src/file.c
     src/sys/backtrace.c
     src/sys/exit.c
     src/sys/morecore.c
@@ -71,6 +70,8 @@ add_executable(
 target_include_directories(sos PRIVATE "include" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(
     sos
+    ziglib_sos
+    ziglib_file
     sel4_autoconf
     sel4runtime
     muslc

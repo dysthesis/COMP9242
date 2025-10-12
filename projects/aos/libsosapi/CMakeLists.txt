@@ -16,7 +16,7 @@ project(libsosapi C)
 add_library(
     sosapi
     EXCLUDE_FROM_ALL
-    src/sos.c
+    # src/sos.c
     src/sys_exit.c
     src/sys_morecore.c
     src/sys_stdio.c
@@ -27,7 +27,7 @@ add_library(
 target_link_options(sosapi BEFORE INTERFACE "-Wl,-usosapi_init_syscall_table")
 target_include_directories(sosapi PUBLIC include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../libipc/include)
-target_link_libraries(sosapi sel4runtime muslc sel4 utils aos)
+target_link_libraries(sosapi sel4runtime muslc sel4 utils aos ziglib_sosapi)
 
 # warn about everything
 add_compile_options(-Wall -Werror -W -Wextra)
