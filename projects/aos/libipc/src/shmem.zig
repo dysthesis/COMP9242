@@ -1,14 +1,7 @@
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("sel4/sel4.h");
-    @cInclude("sel4/shared_types.h");
-    @cInclude("mapping.h");
-    @cInclude("cspace/cspace.h");
-    @cInclude("frame_table.h");
-    @cInclude("ipc.h");
-    @cInclude("utils/zf_log.h");
-});
+const cimports = @import("cimports");
+const c = cimports.c;
 
 pub const C = c;
 

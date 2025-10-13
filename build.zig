@@ -28,15 +28,26 @@ pub fn build(b: *std.Build) void {
         b.path("build/projects/aos/libaos/libaos.a");
     _ = cmake_aos;
 
+    const cimports = b.addModule("table-helper", .{
+        .root_source_file = b.path("projects/aos/cimports.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    addCommonIncludePaths(b, cimports);
+    addExePatch(b, cimports, .{ .lto = false });
+
     const libipc_module = b.addModule("libipc", .{
         .root_source_file = b.path("projects/aos/libipc/src/lib.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_c = sanitize_c,
     });
+
     addCommonIncludePaths(b, libipc_module);
     libipc_module.addIncludePath(b.path("projects/aos/libipc/include"));
     libipc_module.addIncludePath(b.path("projects/aos/sos/src"));
+    libipc_module.addImport("cimports", cimports);
     addExePatch(b, libipc_module, .{ .lto = false });
 
     const libipc = b.addLibrary(.{
@@ -56,6 +67,7 @@ pub fn build(b: *std.Build) void {
     addCommonIncludePaths(b, libipc_server_module);
     libipc_server_module.addIncludePath(b.path("projects/aos/libipc/include"));
     libipc_server_module.addIncludePath(b.path("projects/aos/sos/src"));
+    libipc_server_module.addImport("cimports", cimports);
     addExePatch(b, libipc_server_module, .{ .lto = false });
 
     const libipc_server = b.addLibrary(.{
@@ -73,6 +85,8 @@ pub fn build(b: *std.Build) void {
         .sanitize_c = sanitize_c,
     });
     addCommonIncludePaths(b, libsosapi_module);
+
+    libsosapi_module.addImport("cimports", cimports);
     libsosapi_module.addImport("libipc", libipc_module);
     libsosapi_module.addIncludePath(b.path("projects/aos/libsosapi/include"));
     addExePatch(b, libsosapi_module, .{ .lto = false });
@@ -92,6 +106,8 @@ pub fn build(b: *std.Build) void {
         .sanitize_c = sanitize_c,
     });
     addCommonIncludePaths(b, libclock_module);
+
+    libclock_module.addImport("cimports", cimports);
     libclock_module.addIncludePath(b.path("projects/aos/libclock/include"));
     libclock_module.addIncludePath(b.path("projects/aos/libclock/src"));
     addExePatch(b, libclock_module, .{ .lto = false });
@@ -110,6 +126,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_c = sanitize_c,
     });
+
+    libfile_module.addImport("cimports", cimports);
     addCommonIncludePaths(b, libfile_module);
     libfile_module.addIncludePath(b.path("projects/aos/sos/src"));
     addExePatch(b, libfile_module, .{ .lto = false });
@@ -130,6 +148,7 @@ pub fn build(b: *std.Build) void {
             .sanitize_c = sanitize_c,
         });
         addCommonIncludePaths(b, m);
+        m.addImport("cimports", cimports);
         m.addIncludePath(b.path("projects/aos/libipc/include"));
         const l = b.addLibrary(.{
             .linkage = .static,
@@ -150,6 +169,7 @@ pub fn build(b: *std.Build) void {
         });
         addCommonIncludePaths(b, m);
         addExePatch(b, m, .{ .lto = false });
+        m.addImport("cimports", cimports);
         m.addImport("libipc", libipc_module);
         m.addIncludePath(src);
         const l = b.addLibrary(.{
@@ -171,6 +191,7 @@ pub fn build(b: *std.Build) void {
             .sanitize_c = sanitize_c,
         });
         addCommonIncludePaths(b, m);
+        m.addImport("cimports", cimports);
         m.addImport("libipc", libipc_module);
         m.addIncludePath(src);
         const l = b.addLibrary(.{
@@ -232,6 +253,8 @@ fn addCommonIncludePaths(b: *std.Build, m: *std.Build.Module) void {
         "projects/aos/libethernet/include",
         "projects/libgdb/include",
         "projects/libco",
+        "projects/aos/sos/src",
+        "projects/aos/libclock/src",
         ".vscode/preinclude.h",
     };
     for (paths) |path| m.addIncludePath(b.path(path));

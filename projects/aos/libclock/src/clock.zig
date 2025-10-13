@@ -512,12 +512,8 @@ const heap_allocator: Allocator = .{
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("clock/clock.h");
-    @cInclude("clock/device.h");
-    @cInclude("device.h");
-    @cInclude("sel4/sel4.h");
-});
+const cimports = @import("cimports");
+const c = cimports.c;
 
 const math = std.math;
 const Allocator = std.mem.Allocator;
