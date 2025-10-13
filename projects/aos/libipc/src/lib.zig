@@ -1,6 +1,5 @@
-pub const sel4 = @cImport({
-    @cInclude("sel4/sel4.h");
-});
+const cimports = @import("cimports");
+pub const sel4 = cimports.sel4;
 
 pub const std = @import("std");
 

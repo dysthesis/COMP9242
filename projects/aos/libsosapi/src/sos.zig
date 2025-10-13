@@ -5,17 +5,10 @@ const Syscall = ipc.Syscall;
 const SyscallResponse = ipc.SyscallResponse;
 const SyscallCallError = ipc.SyscallCallError;
 
-const sel4 = @cImport({
-    @cInclude("sel4/sel4.h");
-});
-
-const c = @cImport({
-    @cInclude("errno.h");
-});
-
-const sos_types = @cImport({
-    @cInclude("sos.h");
-});
+const cimports = @import("cimports");
+const sel4 = cimports.sel4;
+const c = cimports.c;
+const sos_types = cimports.sos_types;
 
 pub export var sos_errno: c_int = 0;
 

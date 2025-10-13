@@ -554,25 +554,10 @@ const libipc = @import("libipc");
 const Syscall = libipc.Syscall;
 const SyscallResponse = libipc.SyscallResponse;
 
-const c = @cImport({
-    @cInclude("stdio.h");
-    @cInclude("errno.h");
-    @cInclude("fcntl.h");
-    @cInclude("string.h");
-});
-
-const sel4 = @cImport({
-    @cInclude("sel4/sel4.h");
-});
-
-const sos = @cImport({
-    @cInclude("ipc.h");
-    @cInclude("file.h");
-    @cInclude("sos_time.h");
-    @cInclude("vmem_layout.h");
-    @cInclude("utils/page.h");
-    @cInclude("ut.h");
-    @cInclude("utils.h");
-});
+const cimports = @import("cimports");
+const c = cimports.c;
+const sel4 = cimports.sel4;
+const sos = cimports.sos;
+const vmem_logging = @import("vmem/logging.zig");
 
 extern var cspace: sos.cspace_t;

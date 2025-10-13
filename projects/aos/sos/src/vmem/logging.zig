@@ -56,6 +56,6 @@ pub const VmLogger = struct {
     }
 };
 
-const cimports = @import("../../../cimports.zig");
+const cimports = @import("cimports");
 const sel4 = cimports.sel4;
 const c = cimports.c;

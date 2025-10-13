@@ -236,9 +236,5 @@ pub export fn vfs_lookup_ops(name: [*c]const u8) ?*const c.file_ops_t {
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("fcntl.h");
-    @cInclude("file.h");
-    @cInclude("networkconsole/networkconsole.h");
-});
+const cimports = @import("cimports");
+const c = cimports.c;
