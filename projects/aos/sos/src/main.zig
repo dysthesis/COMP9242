@@ -558,6 +558,6 @@ const cimports = @import("cimports");
 const c = cimports.c;
 const sel4 = cimports.sel4;
 const sos = cimports.sos;
-const vmem_logging = @import("vmem/logging.zig");
+const vmem_logging = @import("vm/logging.zig");
 
 extern var cspace: sos.cspace_t;
