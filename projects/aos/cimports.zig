@@ -1,5 +1,6 @@
 pub const c = @cImport({
     @cInclude("stdio.h");
+    @cInclude("stdint.h");
     @cInclude("errno.h");
     @cInclude("fcntl.h");
     @cInclude("string.h");

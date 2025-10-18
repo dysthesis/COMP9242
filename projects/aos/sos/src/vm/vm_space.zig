@@ -1,1 +1,0 @@
-const VmSpace = struct {};

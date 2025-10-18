@@ -135,7 +135,7 @@ test "rb_list" {
     try ex(rb_list.find(2) == null);
 }
 
-const rb = @import("rb.zig");
+const rb = @import("rbtree.zig");
 const builtin = @import("builtin");
 const ex = std.testing.expect;
 const std = @import("std");

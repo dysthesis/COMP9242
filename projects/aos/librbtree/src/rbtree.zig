@@ -41,6 +41,19 @@ pub const RbNode = packed struct {
         return y;
     }
 
+    /// Get the predecessor of the current node; that is, get the node with the largest key strictly
+    /// smaller than the current one
+    pub inline fn pred(self: *Self) *Self {
+        var x = self;
+        if (x.left != nil) return x.left.maxChild();
+        var y = x.parent();
+        while (y != nil and x == y.left) {
+            x = y;
+            y = y.parent();
+        }
+        return y;
+    }
+
     /// Verify if self is a nil node
     pub inline fn nilChecked(self: *Self) ?*Self {
         if (self != nil) return self;
@@ -56,7 +69,7 @@ pub const RbNode = packed struct {
 
 var nil_val: RbNode = undefined;
 var nil_init = false;
-const nil: *RbNode = &nil_val;
+pub const nil: *RbNode = &nil_val;
 
 /// Constrct a red-black tree
 pub fn RbTree(
