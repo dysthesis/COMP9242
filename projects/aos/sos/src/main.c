@@ -11,7 +11,6 @@
  */
 #include <assert.h>
 #include <autoconf.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <ipc.h>
 #include <stdbool.h>
@@ -29,7 +28,6 @@
 #include <elf/elf.h>
 #include <networkconsole/networkconsole.h>
 
-#include "sos_time.h"
 #include <sel4runtime.h>
 #include <sel4runtime/auxv.h>
 
@@ -42,7 +40,6 @@
 #include "irq.h"
 #include "mapping.h"
 #include "network.h"
-#include "sel4/functions.h"
 #include "syscalls.h"
 #include "tests.h"
 #include "threads.h"
@@ -68,7 +65,7 @@
 #define IRQ_EP_BADGE BIT(seL4_BadgeBits - 1ul)
 #define IRQ_IDENT_BADGE_BITS MASK(seL4_BadgeBits - 1ul)
 
-#define APP_NAME "sosh"
+#define APP_NAME "vm_test"
 #define APP_PRIORITY (0)
 #define APP_EP_BADGE (101)
 
