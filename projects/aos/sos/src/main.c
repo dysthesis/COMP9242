@@ -123,12 +123,29 @@ static struct {
   seL4_CPtr stack;
 } user_process;
 
+/* Temporary helpers until a general VM subsystem is in place. */
+cspace_t *client_get_cspace(client_t *client) {
+  if (client != NULL && client == user_process.client) {
+    return &user_process.cspace;
+  }
+  return NULL;
+}
+
+seL4_CPtr client_get_vspace(client_t *client) {
+  if (client != NULL && client == user_process.client) {
+    return user_process.vspace;
+  }
+  return seL4_CapNull;
+}
+
 // ZIG FUNCTION STUBS
 
 seL4_MessageInfo_t handle_syscall(seL4_Word badge,
                                   const seL4_MessageInfo_t *message,
                                   bool *have_reply, client_t *caller,
                                   seL4_CPtr *reply, ut_t **reply_ut);
+bool handle_vm_fault(seL4_Word badge, const seL4_MessageInfo_t *message,
+                     client_t *caller);
 
 // END OF ZIG FUNCTION STUBS
 
@@ -159,12 +176,15 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
     /* Awake! We got a message - check the label and badge to
      * see what the message is about */
     seL4_Word label = seL4_MessageInfo_get_label(message);
+    // printf("[sos] msg label=%lu len=%lu badge=0x%lx\n", label,
+    // seL4_MessageInfo_get_length(message), badge);
 
     if (badge & IRQ_EP_BADGE) {
       /* It's a notification from our bound notification
        * object! */
       sos_handle_irq_notification(&badge, &have_reply);
-    } else if (label == seL4_Fault_NullFault) {
+    } else if (label == seL4_Fault_NullFault ||
+               label == seL4_Fault_UnknownSyscall) {
       client_t *caller = client_lookup(badge);
       if (!caller) {
         ZF_LOGE("Unknown/stale caller badge=0x%lx", (unsigned long)badge);
@@ -176,7 +196,23 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
        * message from console_test! */
       reply_msg = handle_syscall(badge, &message, &have_reply, caller, &reply,
                                  &reply_ut);
+    } else if (label == seL4_Fault_VMFault) {
+      client_t *caller = client_lookup(badge);
+      if (!caller) {
+        ZF_LOGE("Unknown/stale caller badge=0x%lx", (unsigned long)badge);
+        have_reply = false;
+        continue;
+      }
+
+      if (handle_vm_fault(badge, &message, caller)) {
+        reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
+        have_reply = true;
+        continue;
+      }
+
+      goto fault_log;
     } else {
+    fault_log:
 
       sos_ipc_msg_t ipc_msg;
       if (sos_deserialise_ipc_msg(&message, &ipc_msg) == 0) {

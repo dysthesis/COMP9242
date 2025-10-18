@@ -121,3 +121,4 @@ Justfile
 .zig-cache
 zig-cache
 zls.json
+References/

@@ -1,79 +1,79 @@
 #include <assert.h>
-#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/mman.h>
-#include <unistd.h>
+#include <utils/page.h>
 
-static uint8_t pattern_byte(uint8_t seed, size_t index) {
-  return (uint8_t)(seed + (uint8_t)(index & 0xff));
-}
+#define NBLOCKS 9
+#define NPAGES_PER_BLOCK 28
+#define TEST_ADDRESS 0x8000000000ull
 
-static void touch_range(uint8_t *base, size_t length, uint8_t seed) {
-  for (size_t i = 0; i < length; i++) {
-    base[i] = pattern_byte(seed, i);
-  }
-
-  for (size_t i = 0; i < length; i++) {
-    uint8_t want = pattern_byte(seed, i);
-    if (base[i] != want) {
-      fprintf(stderr, "memory mismatch at +%zu: got 0x%02x, expected 0x%02x\n",
-              i, base[i], want);
-      exit(1);
+static void do_pt_test(char **buf) {
+  printf("[do_pt_test] begin buf=%p\n", (void *)buf);
+  for (int b = 0; b < NBLOCKS; b++) {
+    printf("[do_pt_test] setting block %d base=%p\n", b, (void *)buf[b]);
+    for (int p = 0; p < NPAGES_PER_BLOCK; p++) {
+      char value = (char)p;
+      char *page_addr = &buf[b][p * PAGE_SIZE_4K];
+      printf("[do_pt_test]   write block=%d page=%d addr=%p value=%d\n", b, p, (void *)page_addr, (int)value);
+      buf[b][p * PAGE_SIZE_4K] = value;
     }
   }
+
+  for (int b = 0; b < NBLOCKS; b++) {
+    printf("[do_pt_test] verifying block %d base=%p\n", b, (void *)buf[b]);
+    for (int p = 0; p < NPAGES_PER_BLOCK; p++) {
+      char *page_addr = &buf[b][p * PAGE_SIZE_4K];
+      char got = buf[b][p * PAGE_SIZE_4K];
+      char want = (char)p;
+      printf("[do_pt_test]   check block=%d page=%d addr=%p got=%d want=%d\n", b, p, (void *)page_addr, (int)got, (int)want);
+      assert(got == want);
+    }
+  }
+  printf("[do_pt_test] complete\n");
+}
+
+static void pt_test(void) {
+  printf("[pt_test] begin\n");
+  char buf1[NBLOCKS][NPAGES_PER_BLOCK * PAGE_SIZE_4K];
+  char *buf1_ptrs[NBLOCKS];
+  char *buf2[NBLOCKS];
+
+  for (int b = 0; b < NBLOCKS; b++) {
+    printf("[pt_test] buf1_ptrs[%d] initialised to %p\n", b, (void *)buf1[b]);
+    buf1_ptrs[b] = buf1[b];
+  }
+
+  printf("[pt_test] asserting stack base buf1=%p exceeds test address 0x%llx\n", (void *)buf1, (unsigned long long)TEST_ADDRESS);
+  assert((uintptr_t)buf1 > TEST_ADDRESS);
+  printf("[pt_test] stack address assertion passed\n");
+
+  printf("[pt_test] invoking do_pt_test on stack buffers\n");
+  do_pt_test(buf1_ptrs);
+  printf("[pt_test] stack buffer test complete\n");
+
+  for (int b = 0; b < NBLOCKS; b++) {
+    size_t alloc_bytes = NPAGES_PER_BLOCK * PAGE_SIZE_4K;
+    printf("[pt_test] allocating heap block %d size=%zu\n", b, alloc_bytes);
+    buf2[b] = malloc(NPAGES_PER_BLOCK * PAGE_SIZE_4K);
+    printf("[pt_test] allocation result block %d addr=%p\n", b, (void *)buf2[b]);
+    assert(buf2[b] != NULL);
+  }
+
+  printf("[pt_test] invoking do_pt_test on heap buffers\n");
+  do_pt_test(buf2);
+  printf("[pt_test] heap buffer test complete\n");
+
+  for (int b = 0; b < NBLOCKS; b++) {
+    printf("[pt_test] freeing heap block %d addr=%p\n", b, (void *)buf2[b]);
+    free(buf2[b]);
+  }
+  printf("[pt_test] end\n");
 }
 
 int main(void) {
-  const long page_size = sysconf(_SC_PAGESIZE);
-  if (page_size <= 0) {
-    fprintf(stderr, "page size unavailable\n");
-    return 1;
-  }
-
-  printf("[vm_test] page size = %ld bytes\n", page_size);
-
-  void *heap_base = sbrk(0);
-  if (heap_base == (void *)-1) {
-    perror("sbrk(0)");
-    return 1;
-  }
-
-  const size_t heap_pages = 8;
-  const size_t heap_bytes = (size_t)page_size * heap_pages;
-
-  if (sbrk(heap_bytes) == (void *)-1) {
-    perror("sbrk(grow)");
-    return 1;
-  }
-
-  printf("[vm_test] grew heap by %zu bytes from %p\n", heap_bytes, heap_base);
-  touch_range((uint8_t *)heap_base, heap_bytes, 0x5a);
-  printf("[vm_test] heap touch complete\n");
-
-  const size_t anon_bytes = 512 * 1024;
-  void *anon_map = mmap(NULL, anon_bytes, PROT_READ | PROT_WRITE,
-                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (anon_map == MAP_FAILED) {
-    perror("mmap");
-    return 1;
-  }
-
-  printf("[vm_test] mapped %zu anonymous bytes at %p\n", anon_bytes, anon_map);
-  touch_range((uint8_t *)anon_map, anon_bytes, 0xa5);
-  printf("[vm_test] mmap touch complete\n");
-
-  if (munmap(anon_map, anon_bytes) != 0) {
-    if (errno != ENOSYS) {
-      perror("munmap");
-      return 1;
-    }
-    printf("[vm_test] munmap not implemented yet (errno=ENOSYS); skipping\n");
-  } else {
-    printf("[vm_test] unmapped anonymous region\n");
-  }
-
-  printf("[vm_test] success\n");
+  printf("[vm_test] entering main\n");
+  pt_test();
+  printf("[vm_test] main complete, exiting successfully\n");
   return 0;
 }

@@ -92,6 +92,7 @@ cmake_minimum_required(VERSION 3.7.2)
 add_subdirectory(apps/console_test)
 add_subdirectory(apps/syscall_test)
 add_subdirectory(apps/sosh)
+add_subdirectory(apps/vm_test)
 # add any additional apps here
 
 # add sos itself, this is your OS

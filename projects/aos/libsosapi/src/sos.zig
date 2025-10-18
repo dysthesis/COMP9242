@@ -64,6 +64,14 @@ fn signedIntToWord(value: anytype) sel4.seL4_Word {
     };
 }
 
+fn usizeToWord(value: usize) sel4.seL4_Word {
+    return switch (@bitSizeOf(sel4.seL4_Word)) {
+        64 => @intCast(value),
+        32 => @intCast(value),
+        else => @compileError("Unsupported seL4_Word size"),
+    };
+}
+
 fn strnlen(ptr: [*]const u8, max: usize) usize {
     var i: usize = 0;
     while (i < max) : (i += 1) {
@@ -237,11 +245,62 @@ pub export fn sos_write(file: c_int, buf: [*c]const u8, nbyte: usize) callconv(.
     return @as(c_int, @intCast(total));
 }
 
+fn handleVmReturn(raw: i64) i64 {
+    if (raw < 0) {
+        sos_errno = @intCast(-raw);
+    } else {
+        clearErrno();
+    }
+    return raw;
+}
+
+pub export fn sos_brk_call(new_break: usize) callconv(.c) i64 {
+    const syscall = Syscall{
+        .Brk = .{ .new_break = usizeToWord(new_break) },
+    };
+    const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| return switch (handleCallError(err)) {
+        -1 => -@as(i64, c.EINVAL),
+        else => -@as(i64, c.EINVAL),
+    };
+    return switch (reply) {
+        .Brk => |payload| handleVmReturn(payload.result),
+        else => unreachable,
+    };
+}
+
+pub export fn sos_mmap_call(
+    addr: usize,
+    length: usize,
+    prot: c_int,
+    flags: c_int,
+    fd: c_int,
+    offset: usize,
+) callconv(.c) i64 {
+    const syscall = Syscall{
+        .Mmap = .{
+            .addr = usizeToWord(addr),
+            .length = usizeToWord(length),
+            .prot = signedIntToWord(prot),
+            .flags = signedIntToWord(flags),
+            .fd = signedIntToWord(fd),
+            .offset = usizeToWord(offset),
+        },
+    };
+    const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| return switch (handleCallError(err)) {
+        -1 => -@as(i64, c.EINVAL),
+        else => -@as(i64, c.EINVAL),
+    };
+    return switch (reply) {
+        .Mmap => |payload| handleVmReturn(payload.result),
+        else => unreachable,
+    };
+}
+
 pub export fn sos_getdirent(pos: c_int, name: [*c]u8, nbyte: usize) callconv(.c) c_int {
     _ = pos;
     _ = name;
     _ = nbyte;
-    std.debug.panic("You need to implement this", .{});
+    return setErrno(c.ENOSYS);
 }
 
 pub export fn sos_stat(path: [*c]const u8, buf: ?*sos_types.sos_stat_t) callconv(.c) c_int {
@@ -252,12 +311,13 @@ pub export fn sos_stat(path: [*c]const u8, buf: ?*sos_types.sos_stat_t) callconv
 
 pub export fn sos_process_create(path: [*c]const u8) callconv(.c) sos_types.pid_t {
     _ = path;
-    std.debug.panic("You need to implement this", .{});
+    _ = setErrno(c.ENOSYS);
+    return -1;
 }
 
 pub export fn sos_process_delete(pid: sos_types.pid_t) callconv(.c) c_int {
     _ = pid;
-    std.debug.panic("You need to implement this", .{});
+    return setErrno(c.ENOSYS);
 }
 
 pub export fn sos_my_id() callconv(.c) sos_types.pid_t {
@@ -275,12 +335,13 @@ pub export fn sos_my_id() callconv(.c) sos_types.pid_t {
 pub export fn sos_process_status(processes: ?*sos_types.sos_process_t, max: c_uint) callconv(.c) c_int {
     _ = processes;
     _ = max;
-    std.debug.panic("You need to implement this", .{});
+    return setErrno(c.ENOSYS);
 }
 
 pub export fn sos_process_wait(pid: sos_types.pid_t) callconv(.c) sos_types.pid_t {
     _ = pid;
-    std.debug.panic("You need to implement this", .{});
+    _ = setErrno(c.ENOSYS);
+    return -1;
 }
 
 pub export fn sos_usleep(usec: c_int) callconv(.c) void {

@@ -1,6 +1,7 @@
 pub const c = @cImport({
     @cInclude("stdio.h");
     @cInclude("stdint.h");
+    @cInclude("stddef.h");
     @cInclude("errno.h");
     @cInclude("fcntl.h");
     @cInclude("string.h");
@@ -9,6 +10,7 @@ pub const c = @cImport({
     @cInclude("clock/clock.h");
     @cInclude("clock/device.h");
     @cInclude("device.h");
+    @cInclude("sys/mman.h");
     @cInclude("sel4/sel4.h");
     @cInclude("sel4/shared_types.h");
     @cInclude("sel4/sel4_arch/mapping.h");

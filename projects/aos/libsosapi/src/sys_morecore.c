@@ -18,18 +18,8 @@
 #include <errno.h>
 #include <assert.h>
 
-/*
- * Statically allocated morecore area.
- *
- * This is rather terrible, but is the simplest option without a
- * huge amount of infrastructure.
- */
-#define MORECORE_AREA_BYTE_SIZE 0x100000
-char morecore_area[MORECORE_AREA_BYTE_SIZE];
-
-/* Pointer to free space in the morecore area. */
-static uintptr_t morecore_base = (uintptr_t) &morecore_area;
-static uintptr_t morecore_top = (uintptr_t) &morecore_area[MORECORE_AREA_BYTE_SIZE];
+extern long long sos_brk_call(uintptr_t new_break);
+extern long long sos_mmap_call(uintptr_t addr, size_t length, int prot, int flags, int fd, uintptr_t offset);
 
 /* Actual morecore implementation
    returns 0 if failure, returns newbrk if success.
@@ -37,17 +27,15 @@ static uintptr_t morecore_top = (uintptr_t) &morecore_area[MORECORE_AREA_BYTE_SI
 
 long sys_brk(va_list ap)
 {
-
     uintptr_t ret;
     uintptr_t newbrk = va_arg(ap, uintptr_t);
 
-    /*if the newbrk is 0, return the bottom of the heap*/
-    if (!newbrk) {
-        ret = morecore_base;
-    } else if (newbrk < morecore_top && newbrk > (uintptr_t)&morecore_area[0]) {
-        ret = morecore_base = newbrk;
-    } else {
+    long long result = sos_brk_call(newbrk);
+    if (result < 0) {
+        errno = (int)(-result);
         ret = 0;
+    } else {
+        ret = (uintptr_t)result;
     }
 
     return ret;
@@ -64,15 +52,10 @@ long sys_mmap(va_list ap)
     int fd = va_arg(ap, int);
     off_t offset = va_arg(ap, off_t);
 
-    if (flags & MAP_ANONYMOUS) {
-        /* Check that we don't try and allocate more than exists */
-        if (length > morecore_top - morecore_base) {
-            return -ENOMEM;
-        }
-        /* Steal from the top */
-        morecore_top -= length;
-        return morecore_top;
+    long long result = sos_mmap_call((uintptr_t)addr, length, prot, flags, fd, (uintptr_t)offset);
+    if (result < 0) {
+        errno = (int)(-result);
+        return (long)result;
     }
-    ZF_LOGF("not implemented");
-    return -ENOMEM;
+    return (long)result;
 }
