@@ -4,6 +4,37 @@ pub const VmHandle = struct {
     idx: usize,
     generation: u8,
     client: ?*sos.client_t,
+
+    pub const Self = @This();
+
+    pub fn validate(self: *Self) void {
+        const idx = self.idx;
+        if (idx >= MAX_CLIENTS) {
+            @panic("VM handle index out of range");
+        }
+        if (!vm_handle_active[idx]) {
+            @panic("VM handle inactive");
+        }
+        const cl = self.client orelse @panic("VM handle missing client reference");
+        const stored_id: usize = @intCast(cl.*.id);
+        if (stored_id != idx) {
+            @panic("VM handle/client ID mismatch");
+        }
+        if (cl.*.gen != self.generation) {
+            @panic("VM handle stale generation");
+        }
+    }
+
+    pub fn getClient(self: *Self) *sos.client_t {
+        validate(self);
+        return self.client.?;
+    }
+
+    pub fn getState(self: *Self) *client.VmClientState {
+        validate(self);
+        bootstrapVmStates();
+        return &vm_states[self.idx];
+    }
 };
 
 var vm_handles: [MAX_CLIENTS]VmHandle = [_]VmHandle{VmHandle{
@@ -14,35 +45,6 @@ var vm_handles: [MAX_CLIENTS]VmHandle = [_]VmHandle{VmHandle{
 var vm_handle_active: [MAX_CLIENTS]bool = [_]bool{false} ** MAX_CLIENTS;
 
 const MetadataPage = page.MetadataPage;
-
-fn validateHandle(handle: *VmHandle) void {
-    const idx = handle.idx;
-    if (idx >= MAX_CLIENTS) {
-        @panic("VM handle index out of range");
-    }
-    if (!vm_handle_active[idx]) {
-        @panic("VM handle inactive");
-    }
-    const cl = handle.client orelse @panic("VM handle missing client reference");
-    const stored_id: usize = @intCast(cl.*.id);
-    if (stored_id != idx) {
-        @panic("VM handle/client ID mismatch");
-    }
-    if (cl.*.gen != handle.generation) {
-        @panic("VM handle stale generation");
-    }
-}
-
-fn clientFromHandle(handle: *VmHandle) *sos.client_t {
-    validateHandle(handle);
-    return handle.client.?;
-}
-
-fn stateFromHandle(handle: *VmHandle) *client.VmClientState {
-    validateHandle(handle);
-    bootstrapVmStates();
-    return &vm_states[handle.idx];
-}
 
 pub const VmError = error{
     ClientContext,
@@ -146,8 +148,8 @@ fn bootstrapVmStates() void {
 
 fn ensureVmState(handle: *VmHandle) *client.VmClientState {
     const idx = handle.idx;
-    const cl = clientFromHandle(handle);
-    const state = stateFromHandle(handle);
+    const cl = handle.getClient();
+    const state = handle.getState();
     if (!state.initialised) {
         _ = c.printf("[vm_state] initialise idx=%lu caller=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))));
         initVmState(state, idx);
@@ -175,7 +177,7 @@ fn mapAnonymousPage(handle: *VmHandle, state: *client.VmClientState, vaddr: usiz
         return VmError.InvalidArgs;
     }
 
-    const caller = clientFromHandle(handle);
+    const caller = handle.getClient();
 
     const prot_flags = tracker.prot();
     const readable = (prot_flags & sos.PROT_READ) != 0;
@@ -282,7 +284,7 @@ fn mapAnonymousPage(handle: *VmHandle, state: *client.VmClientState, vaddr: usiz
 
 pub fn brkImpl(handle: *VmHandle, requested: usize) VmError!usize {
     const state = ensureVmState(handle);
-    const caller_ptr: c_ulong = @intCast(@intFromPtr(clientFromHandle(handle)));
+    const caller_ptr: c_ulong = @intCast(@intFromPtr(handle.getClient()));
     _ = c.printf("[vm_brk] enter caller=0x%lx requested=0x%lx heap_break=0x%lx mapped_end=0x%lx limit=0x%lx\n", caller_ptr, @as(c_ulong, @intCast(requested)), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(HEAP_LIMIT)));
 
     if (requested == 0) {
@@ -324,7 +326,7 @@ pub fn brkImpl(handle: *VmHandle, requested: usize) VmError!usize {
 }
 
 pub fn mmapImpl(handle: *VmHandle, addr: usize, length: usize, prot: c_int, flags: c_int, fd: c_int, offset: usize) VmError!usize {
-    const caller_ptr: c_ulong = @intCast(@intFromPtr(clientFromHandle(handle)));
+    const caller_ptr: c_ulong = @intCast(@intFromPtr(handle.getClient()));
     _ = c.printf("[vm_mmap] enter caller=0x%lx addr=0x%lx length=0x%lx prot=0x%x flags=0x%x fd=%d offset=0x%lx\n", caller_ptr, @as(c_ulong, @intCast(addr)), @as(c_ulong, @intCast(length)), prot, flags, fd, @as(c_ulong, @intCast(offset)));
     if (length == 0) {
         _ = c.printf("[vm_mmap] zero length invalid\n");
@@ -600,10 +602,10 @@ pub export fn vm_report_initial_stack(handle: *VmHandle, mapped_bottom: usize) c
 }
 
 pub export fn vm_reset_state(handle: *VmHandle) callconv(.c) void {
-    validateHandle(handle);
+    handle.validate();
     bootstrapVmStates();
     const idx = handle.idx;
-    const cl = clientFromHandle(handle);
+    const cl = handle.getClient();
     _ = c.printf("[vm_state] reset idx=%lu client=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))));
     teardownVmState(&vm_states[idx]);
     initVmState(&vm_states[idx], idx);
@@ -615,7 +617,7 @@ pub export fn handle_vm_fault(
     message: [*c]const sel4.seL4_MessageInfo_t,
 ) callconv(.c) bool {
     _ = badge;
-    validateHandle(handle);
+    handle.validate();
     const info = message.*;
     if (sel4.seL4_MessageInfo_get_label(info) != sel4.seL4_Fault_VMFault) {
         return false;
