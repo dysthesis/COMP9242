@@ -1,15 +1,3 @@
-const std = @import("std");
-const cimports = @import("cimports");
-const c = cimports.c;
-const sel4 = cimports.sel4;
-const sos = cimports.sos;
-
-pub const logging = @import("logging.zig");
-pub const addr_space = @import("addr_space.zig");
-pub const region = @import("region.zig");
-pub const mapping = @import("mapping.zig");
-pub const page = @import("page.zig");
-
 extern var cspace: sos.cspace_t;
 
 pub const VmHandle = struct {
@@ -25,104 +13,7 @@ var vm_handles: [MAX_CLIENTS]VmHandle = [_]VmHandle{VmHandle{
 }} ** MAX_CLIENTS;
 var vm_handle_active: [MAX_CLIENTS]bool = [_]bool{false} ** MAX_CLIENTS;
 
-const MappedPage = page.MappedPage;
 const MetadataPage = page.MetadataPage;
-const PageMap = std.AutoHashMap(usize, MappedPage);
-const RegionList = std.ArrayListUnmanaged(region.Region);
-
-const METADATA_REGION_BYTES: usize = sos.SOS_METADATA_REGION_BYTES;
-const METADATA_REGION_PAGES: usize = METADATA_REGION_BYTES / sos.PAGE_SIZE_4K;
-const METADATA_REGION_START: usize = sos.SOS_METADATA_BASE;
-
-const MetadataAllocError = error{OutOfMemory};
-
-const MetadataAllocator = struct {
-    state: ?*VmClientState = null,
-
-    const vtable = std.mem.Allocator.VTable{
-        .alloc = allocFn,
-        .resize = resizeFn,
-        .remap = remapFn,
-        .free = freeFn,
-    };
-
-    pub fn init(self: *MetadataAllocator, state: *VmClientState) void {
-        self.state = state;
-    }
-
-    pub fn allocator(self: *MetadataAllocator) std.mem.Allocator {
-        return std.mem.Allocator{
-            .ptr = self,
-            .vtable = &vtable,
-        };
-    }
-
-    pub fn deinit(self: *MetadataAllocator) void {
-        const state_opt = self.state;
-        if (state_opt == null) return;
-        const state = state_opt.?;
-        var idx: usize = 0;
-        while (idx < state.metadata_page_count) : (idx += 1) {
-            const meta_page = state.metadata_pages[idx];
-            _ = sel4.seL4_ARM_Page_Unmap(meta_page.cap_slot);
-            _ = sos.cspace_delete(&cspace, meta_page.cap_slot);
-            sos.cspace_free_slot(&cspace, meta_page.cap_slot);
-            sos.free_frame(meta_page.frame_ref);
-        }
-        state.metadata_page_count = 0;
-        state.metadata_mapped = 0;
-        state.metadata_cursor = state.metadata_base;
-        self.state = null;
-    }
-
-    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-        _ = ret_addr;
-        const self = @as(*MetadataAllocator, @ptrCast(@alignCast(ctx)));
-        return self.alloc(len, alignment) catch null;
-    }
-
-    fn alloc(self: *MetadataAllocator, len: usize, alignment: std.mem.Alignment) MetadataAllocError![*]u8 {
-        const state = self.state orelse return MetadataAllocError.OutOfMemory;
-        const align_bytes = alignment.toByteUnits();
-        var cursor = state.metadata_cursor;
-        cursor = std.mem.alignForward(usize, cursor, align_bytes);
-        if (len == 0) {
-            return @as([*]u8, @ptrFromInt(cursor));
-        }
-        const end = cursor + len;
-        if (end < cursor) {
-            return MetadataAllocError.OutOfMemory;
-        }
-        try state.ensureMetadataMapped(end);
-        state.metadata_cursor = end;
-        return @as([*]u8, @ptrFromInt(cursor));
-    }
-
-    fn resizeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
-        _ = ctx;
-        _ = memory;
-        _ = alignment;
-        _ = new_len;
-        _ = ret_addr;
-        return false;
-    }
-
-    fn remapFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
-        _ = ctx;
-        _ = memory;
-        _ = alignment;
-        _ = new_len;
-        _ = ret_addr;
-        return null;
-    }
-
-    fn freeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-        _ = ctx;
-        _ = memory;
-        _ = alignment;
-        _ = ret_addr;
-    }
-};
 
 fn validateHandle(handle: *VmHandle) void {
     const idx = handle.idx;
@@ -132,12 +23,12 @@ fn validateHandle(handle: *VmHandle) void {
     if (!vm_handle_active[idx]) {
         @panic("VM handle inactive");
     }
-    const client = handle.client orelse @panic("VM handle missing client reference");
-    const stored_id: usize = @intCast(client.*.id);
+    const cl = handle.client orelse @panic("VM handle missing client reference");
+    const stored_id: usize = @intCast(cl.*.id);
     if (stored_id != idx) {
         @panic("VM handle/client ID mismatch");
     }
-    if (client.*.gen != handle.generation) {
+    if (cl.*.gen != handle.generation) {
         @panic("VM handle stale generation");
     }
 }
@@ -147,7 +38,7 @@ fn clientFromHandle(handle: *VmHandle) *sos.client_t {
     return handle.client.?;
 }
 
-fn stateFromHandle(handle: *VmHandle) *VmClientState {
+fn stateFromHandle(handle: *VmHandle) *client.VmClientState {
     validateHandle(handle);
     bootstrapVmStates();
     return &vm_states[handle.idx];
@@ -164,94 +55,8 @@ pub const VmError = error{
     InvalidArgs,
 };
 
-pub const VmClientState = struct {
-    initialised: bool = false,
-    heap_break: usize = 0,
-    heap_mapped_end: usize = 0,
-    mmap_next: usize = 0,
-    stack_guard: usize = 0,
-    stack_low: usize = 0,
-    stack_top: usize = 0,
-    mapped_count: usize = 0,
-    active_mmaps: usize = 0,
-
-    heap_region: region.Region = .{},
-    stack_region: region.Region = .{},
-
-    metadata_allocator: MetadataAllocator = MetadataAllocator{},
-    metadata_alloc_handle: std.mem.Allocator = undefined,
-    metadata_base: usize = 0,
-    metadata_cursor: usize = 0,
-    metadata_mapped: usize = 0,
-    metadata_page_count: usize = 0,
-    metadata_pages: [METADATA_REGION_PAGES]MetadataPage = [_]MetadataPage{MetadataPage{
-        .frame_ref = 0,
-        .cap_slot = sel4.seL4_CapNull,
-        .vaddr = 0,
-    }} ** METADATA_REGION_PAGES,
-    page_map: PageMap = undefined,
-    mmap_regions: RegionList = .{},
-
-    fn metadataAllocator(self: *VmClientState) std.mem.Allocator {
-        return self.metadata_alloc_handle;
-    }
-
-    fn ensureMetadataMapped(self: *VmClientState, target: usize) MetadataAllocError!void {
-        while (self.metadata_base + self.metadata_mapped < target) {
-            if (self.metadata_page_count >= METADATA_REGION_PAGES) {
-                _ = c.printf("[vm_meta] region exhausted idx=%lu\n", @as(c_ulong, @intCast(metadataIndex(self))));
-                return MetadataAllocError.OutOfMemory;
-            }
-
-            const frame_ref = sos.alloc_frame();
-            if (frame_ref == 0) {
-                _ = c.printf("[vm_meta] alloc_frame failed\n");
-                return MetadataAllocError.OutOfMemory;
-            }
-
-            const frame_data_ptr: [*]u8 = @ptrCast(sos.frame_data(frame_ref));
-            @memset(frame_data_ptr[0..PAGE_SIZE_4K], 0);
-
-            const slot = sos.cspace_alloc_slot(&cspace);
-            if (slot == sel4.seL4_CapNull) {
-                sos.free_frame(frame_ref);
-                _ = c.printf("[vm_meta] cspace_alloc_slot failed\n");
-                return MetadataAllocError.OutOfMemory;
-            }
-
-            const src_cspace = sos.frame_table_cspace();
-            const frame_cap = sos.frame_page(frame_ref);
-            if (sos.cspace_copy(&cspace, slot, src_cspace, frame_cap, toSosRights(sel4.seL4_AllRights)) != sel4.seL4_NoError) {
-                sos.cspace_free_slot(&cspace, slot);
-                sos.free_frame(frame_ref);
-                _ = c.printf("[vm_meta] cspace_copy failed\n");
-                return MetadataAllocError.OutOfMemory;
-            }
-
-            const rights = toSosRights(region.rightsFromBooleans(true, true));
-            const attrs = sel4.seL4_ARM_Default_VMAttributes | sel4.seL4_ARM_ExecuteNever;
-            const vaddr = self.metadata_base + self.metadata_mapped;
-            if (sos.map_frame(&cspace, slot, sel4.seL4_CapInitThreadVSpace, vaddr, rights, attrs) != sel4.seL4_NoError) {
-                _ = sos.cspace_delete(&cspace, slot);
-                sos.cspace_free_slot(&cspace, slot);
-                sos.free_frame(frame_ref);
-                _ = c.printf("[vm_meta] map_frame failed\n");
-                return MetadataAllocError.OutOfMemory;
-            }
-
-            self.metadata_pages[self.metadata_page_count] = MetadataPage{
-                .frame_ref = frame_ref,
-                .cap_slot = slot,
-                .vaddr = vaddr,
-            };
-            self.metadata_page_count += 1;
-            self.metadata_mapped += PAGE_SIZE_4K;
-        }
-    }
-};
-
 const MAX_CLIENTS: usize = sos.MAX_CLIENTS;
-const PAGE_SIZE_4K: usize = sos.PAGE_SIZE_4K;
+pub const PAGE_SIZE_4K: usize = sos.PAGE_SIZE_4K;
 const HEAP_BASE: usize = 0x40000000;
 const MMAP_BASE: usize = 0x80000000;
 const HEAP_LIMIT: usize = MMAP_BASE - PAGE_SIZE_4K;
@@ -278,14 +83,10 @@ comptime {
     }
 }
 
-var vm_states: [MAX_CLIENTS]VmClientState = undefined;
+var vm_states: [MAX_CLIENTS]client.VmClientState = undefined;
 var vm_states_initialised = false;
 
-fn metadataIndex(state: *VmClientState) usize {
-    return (state.metadata_base - METADATA_REGION_START) / METADATA_REGION_BYTES;
-}
-
-fn initVmState(state: *VmClientState, idx: usize) void {
+fn initVmState(state: *client.VmClientState, idx: usize) void {
     state.initialised = true;
     state.heap_break = HEAP_BASE;
     state.heap_mapped_end = HEAP_BASE;
@@ -302,56 +103,35 @@ fn initVmState(state: *VmClientState, idx: usize) void {
     state.stack_region.reset(region.RegionKind.Stack);
     state.stack_region.configure(STACK_TOP, region.RegionKind.Stack, DEFAULT_STACK_PROT);
 
-    state.metadata_base = METADATA_REGION_START + idx * METADATA_REGION_BYTES;
+    state.metadata_base = allocator.METADATA_REGION_START + idx * allocator.METADATA_REGION_BYTES;
     state.metadata_cursor = state.metadata_base;
     state.metadata_mapped = 0;
     state.metadata_page_count = 0;
     state.metadata_allocator.init(state);
     state.metadata_alloc_handle = state.metadata_allocator.allocator();
-    state.page_map = PageMap.init(state.metadata_alloc_handle);
-    state.mmap_regions = RegionList{};
+    state.page_map = client.PageMap.init(state.metadata_alloc_handle);
+    state.mmap_regions = client.RegionList{};
 }
 
-fn releaseMappedPage(entry: *MappedPage) void {
-    if (entry.cap_owner) |owner| {
-        if (entry.cap_slot != sel4.seL4_CapNull and entry.owns_cap) {
-            const unmap_err = sel4.seL4_ARM_Page_Unmap(entry.cap_slot);
-            if (unmap_err != sel4.seL4_NoError) {
-                const unmap_err_i32: c_int = @intCast(unmap_err);
-                _ = c.printf("[vm_release] Page_Unmap err=%d slot=%lu\n", unmap_err_i32, @as(c_ulong, @intCast(entry.cap_slot)));
-            }
-            const delete_err = sos.cspace_delete(owner, entry.cap_slot);
-            if (delete_err != sel4.seL4_NoError) {
-                const delete_err_i32: c_int = @intCast(delete_err);
-                _ = c.printf("[vm_release] cspace_delete err=%d slot=%lu\n", delete_err_i32, @as(c_ulong, @intCast(entry.cap_slot)));
-            }
-            sos.cspace_free_slot(owner, entry.cap_slot);
-        }
-    }
-    if (entry.owns_frame and entry.frame_ref != 0) {
-        sos.free_frame(entry.frame_ref);
-    }
-}
-
-fn releaseAllVmPages(state: *VmClientState) void {
+fn releaseAllVmPages(state: *client.VmClientState) void {
     var it = state.page_map.iterator();
     while (it.next()) |kv| {
-        releaseMappedPage(kv.value_ptr);
+        kv.value_ptr.release();
     }
     state.page_map.clearRetainingCapacity();
     state.mapped_count = 0;
 }
 
-fn teardownVmState(state: *VmClientState) void {
+fn teardownVmState(state: *client.VmClientState) void {
     if (!state.initialised) {
-        state.* = VmClientState{};
+        state.* = client.VmClientState{};
         return;
     }
     releaseAllVmPages(state);
     state.page_map.deinit();
     state.mmap_regions.deinit(state.metadata_alloc_handle);
     state.metadata_allocator.deinit();
-    state.* = VmClientState{};
+    state.* = client.VmClientState{};
 }
 
 fn bootstrapVmStates() void {
@@ -359,20 +139,20 @@ fn bootstrapVmStates() void {
         return;
     }
     for (&vm_states) |*state| {
-        state.* = VmClientState{};
+        state.* = client.VmClientState{};
     }
     vm_states_initialised = true;
 }
 
-fn ensureVmState(handle: *VmHandle) *VmClientState {
+fn ensureVmState(handle: *VmHandle) *client.VmClientState {
     const idx = handle.idx;
-    const client = clientFromHandle(handle);
+    const cl = clientFromHandle(handle);
     const state = stateFromHandle(handle);
     if (!state.initialised) {
-        _ = c.printf("[vm_state] initialise idx=%lu caller=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(client))));
+        _ = c.printf("[vm_state] initialise idx=%lu caller=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))));
         initVmState(state, idx);
     } else {
-        _ = c.printf("[vm_state] reuse idx=%lu caller=0x%lx heap_break=0x%lx mapped_end=0x%lx stack_low=0x%lx active_mmaps=%lu mapped_pages=%lu\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(client))), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(state.stack_low)), @as(c_ulong, @intCast(state.active_mmaps)), @as(c_ulong, @intCast(state.mapped_count)));
+        _ = c.printf("[vm_state] reuse idx=%lu caller=0x%lx heap_break=0x%lx mapped_end=0x%lx stack_low=0x%lx active_mmaps=%lu mapped_pages=%lu\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(state.stack_low)), @as(c_ulong, @intCast(state.active_mmaps)), @as(c_ulong, @intCast(state.mapped_count)));
     }
     return state;
 }
@@ -390,7 +170,7 @@ pub fn vmErrorToErrno(err: VmError) c_int {
     };
 }
 
-fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, tracker: *region.Region) VmError!void {
+fn mapAnonymousPage(handle: *VmHandle, state: *client.VmClientState, vaddr: usize, tracker: *region.Region) VmError!void {
     if (!tracker.used) {
         return VmError.InvalidArgs;
     }
@@ -472,7 +252,7 @@ fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, trac
     _ = insertPage(state, vaddr, frame_ref, slot, &cspace, true, true) catch |err| {
         if (err == VmError.Capacity) {
             const meta_used = state.metadata_cursor - state.metadata_base;
-            _ = c.printf("[vm_meta] capacity hit vaddr=0x%lx mapped_count=%lu max_mapped=%lu used_bytes=%lu limit_bytes=%lu pages=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(state.mapped_count)), @as(c_ulong, @intCast(MAX_MAPPED_PAGES)), @as(c_ulong, @intCast(meta_used)), @as(c_ulong, @intCast(METADATA_REGION_BYTES)), @as(c_ulong, @intCast(state.metadata_page_count)));
+            _ = c.printf("[vm_meta] capacity hit vaddr=0x%lx mapped_count=%lu max_mapped=%lu used_bytes=%lu limit_bytes=%lu pages=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(state.mapped_count)), @as(c_ulong, @intCast(MAX_MAPPED_PAGES)), @as(c_ulong, @intCast(meta_used)), @as(c_ulong, @intCast(allocator.METADATA_REGION_BYTES)), @as(c_ulong, @intCast(state.metadata_page_count)));
         }
         _ = sos.cspace_delete(&cspace, slot);
         _ = sos.cspace_free_slot(&cspace, slot);
@@ -669,19 +449,19 @@ fn pageBase(addr: usize) usize {
     return alignDown(addr, PAGE_SIZE_4K);
 }
 
-fn findPage(state: *VmClientState, vaddr: usize) ?*MappedPage {
+fn findPage(state: *client.VmClientState, vaddr: usize) ?*page.MappedPage {
     return state.page_map.getPtr(vaddr);
 }
 
 fn insertPage(
-    state: *VmClientState,
+    state: *client.VmClientState,
     vaddr: usize,
     frame_ref: usize,
     cap_slot: sel4.seL4_CPtr,
     cap_owner: ?*sos.cspace_t,
     owns_frame: bool,
     owns_cap: bool,
-) VmError!*MappedPage {
+) VmError!*page.MappedPage {
     if (owns_cap and cap_owner == null) {
         _ = c.printf("[vm_map] insertPage missing cap_owner for vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
         return VmError.InvalidArgs;
@@ -699,7 +479,7 @@ fn insertPage(
         return VmError.Capacity;
     }
 
-    state.page_map.put(vaddr, MappedPage{
+    state.page_map.put(vaddr, page.MappedPage{
         .frame_ref = frame_ref,
         .cap_slot = cap_slot,
         .cap_owner = cap_owner,
@@ -712,7 +492,7 @@ fn insertPage(
     return state.page_map.getPtr(vaddr).?;
 }
 
-fn leaseMmapRegion(state: *VmClientState, base: usize, prot: c_int) VmError!*region.Region {
+fn leaseMmapRegion(state: *client.VmClientState, base: usize, prot: c_int) VmError!*region.Region {
     if (state.mmap_regions.items.len >= MAX_MMAP_REGIONS) {
         _ = c.printf("[vm_mmap] no free region slots\n");
         return VmError.Capacity;
@@ -728,7 +508,7 @@ fn leaseMmapRegion(state: *VmClientState, base: usize, prot: c_int) VmError!*reg
     return reg;
 }
 
-fn releaseMmapRegion(state: *VmClientState, tracker: *region.Region) void {
+fn releaseMmapRegion(state: *client.VmClientState, tracker: *region.Region) void {
     if (!tracker.used) return;
     if (state.active_mmaps > 0) state.active_mmaps -= 1;
     const base_ptr = state.mmap_regions.items.ptr;
@@ -736,26 +516,26 @@ fn releaseMmapRegion(state: *VmClientState, tracker: *region.Region) void {
     _ = state.mmap_regions.swapRemove(idx);
 }
 
-fn findMmapRegion(state: *VmClientState, addr: usize) ?*region.Region {
+fn findMmapRegion(state: *client.VmClientState, addr: usize) ?*region.Region {
     for (state.mmap_regions.items) |*reg| {
         if (reg.contains(addr)) return reg;
     }
     return null;
 }
 
-fn toSosRights(rights: sel4.seL4_CapRights_t) sos.seL4_CapRights_t {
+pub fn toSosRights(rights: sel4.seL4_CapRights_t) sos.seL4_CapRights_t {
     var converted: sos.seL4_CapRights_t = undefined;
     converted.words[0] = rights.words[0];
     return converted;
 }
 
-pub export fn vm_state_acquire(client: *sos.client_t) callconv(.c) *VmHandle {
+pub export fn vm_state_acquire(cl: *sos.client_t) callconv(.c) *VmHandle {
     bootstrapVmStates();
-    const idx = vmStateIndex(client);
+    const idx = vmStateIndex(cl);
     vm_handles[idx] = VmHandle{
         .idx = idx,
-        .generation = client.*.gen,
-        .client = client,
+        .generation = cl.*.gen,
+        .client = cl,
     };
     vm_handle_active[idx] = true;
     const handle = &vm_handles[idx];
@@ -763,31 +543,31 @@ pub export fn vm_state_acquire(client: *sos.client_t) callconv(.c) *VmHandle {
     return handle;
 }
 
-pub export fn vm_state_lookup(client: *sos.client_t) callconv(.c) ?*VmHandle {
+pub export fn vm_state_lookup(cl: *sos.client_t) callconv(.c) ?*VmHandle {
     bootstrapVmStates();
-    const idx = vmStateIndex(client);
+    const idx = vmStateIndex(cl);
     if (!vm_handle_active[idx]) {
         return null;
     }
     const handle = &vm_handles[idx];
-    if (handle.client != client) {
+    if (handle.client != cl) {
         return null;
     }
-    if (handle.generation != client.*.gen) {
+    if (handle.generation != cl.*.gen) {
         return null;
     }
     return handle;
 }
 
-pub export fn vm_state_release(client: *sos.client_t) callconv(.c) void {
+pub export fn vm_state_release(cl: *sos.client_t) callconv(.c) void {
     bootstrapVmStates();
-    const idx = vmStateIndex(client);
+    const idx = vmStateIndex(cl);
     if (!vm_handle_active[idx]) {
         return;
     }
     const handle = &vm_handles[idx];
-    if (handle.client != null and handle.client.? != client) {
-        _ = c.printf("[vm_state] release mismatch idx=%lu stored=0x%lx provided=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(handle.client.?))), @as(c_ulong, @intCast(@intFromPtr(client))));
+    if (handle.client != null and handle.client.? != cl) {
+        _ = c.printf("[vm_state] release mismatch idx=%lu stored=0x%lx provided=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(handle.client.?))), @as(c_ulong, @intCast(@intFromPtr(cl))));
     }
     vm_handle_active[idx] = false;
     vm_handles[idx] = VmHandle{ .idx = idx, .generation = 0, .client = null };
@@ -823,8 +603,8 @@ pub export fn vm_reset_state(handle: *VmHandle) callconv(.c) void {
     validateHandle(handle);
     bootstrapVmStates();
     const idx = handle.idx;
-    const client = clientFromHandle(handle);
-    _ = c.printf("[vm_state] reset idx=%lu client=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(client))));
+    const cl = clientFromHandle(handle);
+    _ = c.printf("[vm_state] reset idx=%lu client=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))));
     teardownVmState(&vm_states[idx]);
     initVmState(&vm_states[idx], idx);
 }
@@ -865,3 +645,17 @@ pub export fn handle_vm_fault(
 
 const DEFAULT_HEAP_PROT: c_int = sos.PROT_READ | sos.PROT_WRITE;
 const DEFAULT_STACK_PROT: c_int = sos.PROT_READ | sos.PROT_WRITE;
+
+const std = @import("std");
+const cimports = @import("cimports");
+const c = cimports.c;
+const sel4 = cimports.sel4;
+const sos = cimports.sos;
+
+pub const logging = @import("logging.zig");
+pub const addr_space = @import("addr_space.zig");
+pub const region = @import("region.zig");
+pub const mapping = @import("mapping.zig");
+pub const page = @import("page.zig");
+pub const client = @import("client.zig");
+pub const allocator = @import("allocator.zig");
