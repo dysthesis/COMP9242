@@ -1,14 +1,14 @@
 const std = @import("std");
 const cimports = @import("cimports");
-const logging_pkg = @import("logging.zig");
-const addr_space_pkg = @import("addr_space.zig");
-const region_mod = @import("region.zig");
-const mapping_mod = @import("mapping.zig");
-const page_mod = @import("page.zig");
-
 const c = cimports.c;
 const sel4 = cimports.sel4;
 const sos = cimports.sos;
+
+pub const logging = @import("logging.zig");
+pub const addr_space = @import("addr_space.zig");
+pub const region = @import("region.zig");
+pub const mapping = @import("mapping.zig");
+pub const page = @import("page.zig");
 
 extern var cspace: sos.cspace_t;
 
@@ -25,10 +25,10 @@ var vm_handles: [MAX_CLIENTS]VmHandle = [_]VmHandle{VmHandle{
 }} ** MAX_CLIENTS;
 var vm_handle_active: [MAX_CLIENTS]bool = [_]bool{false} ** MAX_CLIENTS;
 
-const MappedPage = page_mod.MappedPage;
-const MetadataPage = page_mod.MetadataPage;
+const MappedPage = page.MappedPage;
+const MetadataPage = page.MetadataPage;
 const PageMap = std.AutoHashMap(usize, MappedPage);
-const RegionList = std.ArrayListUnmanaged(region_mod.Region);
+const RegionList = std.ArrayListUnmanaged(region.Region);
 
 const METADATA_REGION_BYTES: usize = sos.SOS_METADATA_REGION_BYTES;
 const METADATA_REGION_PAGES: usize = METADATA_REGION_BYTES / sos.PAGE_SIZE_4K;
@@ -175,8 +175,8 @@ pub const VmClientState = struct {
     mapped_count: usize = 0,
     active_mmaps: usize = 0,
 
-    heap_region: region_mod.Region = .{},
-    stack_region: region_mod.Region = .{},
+    heap_region: region.Region = .{},
+    stack_region: region.Region = .{},
 
     metadata_allocator: MetadataAllocator = MetadataAllocator{},
     metadata_alloc_handle: std.mem.Allocator = undefined,
@@ -228,7 +228,7 @@ pub const VmClientState = struct {
                 return MetadataAllocError.OutOfMemory;
             }
 
-            const rights = toSosRights(region_mod.rightsFromBooleans(true, true));
+            const rights = toSosRights(region.rightsFromBooleans(true, true));
             const attrs = sel4.seL4_ARM_Default_VMAttributes | sel4.seL4_ARM_ExecuteNever;
             const vaddr = self.metadata_base + self.metadata_mapped;
             if (sos.map_frame(&cspace, slot, sel4.seL4_CapInitThreadVSpace, vaddr, rights, attrs) != sel4.seL4_NoError) {
@@ -296,11 +296,11 @@ fn initVmState(state: *VmClientState, idx: usize) void {
     state.mapped_count = 0;
     state.active_mmaps = 0;
 
-    state.heap_region.reset(region_mod.RegionKind.Heap);
-    state.heap_region.configure(HEAP_BASE, region_mod.RegionKind.Heap, DEFAULT_HEAP_PROT);
+    state.heap_region.reset(region.RegionKind.Heap);
+    state.heap_region.configure(HEAP_BASE, region.RegionKind.Heap, DEFAULT_HEAP_PROT);
 
-    state.stack_region.reset(region_mod.RegionKind.Stack);
-    state.stack_region.configure(STACK_TOP, region_mod.RegionKind.Stack, DEFAULT_STACK_PROT);
+    state.stack_region.reset(region.RegionKind.Stack);
+    state.stack_region.configure(STACK_TOP, region.RegionKind.Stack, DEFAULT_STACK_PROT);
 
     state.metadata_base = METADATA_REGION_START + idx * METADATA_REGION_BYTES;
     state.metadata_cursor = state.metadata_base;
@@ -390,7 +390,7 @@ pub fn vmErrorToErrno(err: VmError) c_int {
     };
 }
 
-fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, tracker: *region_mod.Region) VmError!void {
+fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, tracker: *region.Region) VmError!void {
     if (!tracker.used) {
         return VmError.InvalidArgs;
     }
@@ -452,7 +452,7 @@ fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, trac
     }
     _ = c.printf("[vm_map] copied frame cap slot=%lu frame_ref=%lu\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
 
-    const rights = region_mod.rightsFromBooleans(readable, writable);
+    const rights = region.rightsFromBooleans(readable, writable);
     const rights_sos = toSosRights(rights);
     var attrs = sel4.seL4_ARM_Default_VMAttributes;
     if (!executable) {
@@ -712,23 +712,23 @@ fn insertPage(
     return state.page_map.getPtr(vaddr).?;
 }
 
-fn leaseMmapRegion(state: *VmClientState, base: usize, prot: c_int) VmError!*region_mod.Region {
+fn leaseMmapRegion(state: *VmClientState, base: usize, prot: c_int) VmError!*region.Region {
     if (state.mmap_regions.items.len >= MAX_MMAP_REGIONS) {
         _ = c.printf("[vm_mmap] no free region slots\n");
         return VmError.Capacity;
     }
 
-    state.mmap_regions.append(state.metadataAllocator(), region_mod.Region{}) catch {
+    state.mmap_regions.append(state.metadataAllocator(), region.Region{}) catch {
         return VmError.Capacity;
     };
     const reg = &state.mmap_regions.items[state.mmap_regions.items.len - 1];
-    reg.reset(region_mod.RegionKind.Mmap);
-    reg.configure(base, region_mod.RegionKind.Mmap, prot);
+    reg.reset(region.RegionKind.Mmap);
+    reg.configure(base, region.RegionKind.Mmap, prot);
     state.active_mmaps += 1;
     return reg;
 }
 
-fn releaseMmapRegion(state: *VmClientState, tracker: *region_mod.Region) void {
+fn releaseMmapRegion(state: *VmClientState, tracker: *region.Region) void {
     if (!tracker.used) return;
     if (state.active_mmaps > 0) state.active_mmaps -= 1;
     const base_ptr = state.mmap_regions.items.ptr;
@@ -736,7 +736,7 @@ fn releaseMmapRegion(state: *VmClientState, tracker: *region_mod.Region) void {
     _ = state.mmap_regions.swapRemove(idx);
 }
 
-fn findMmapRegion(state: *VmClientState, addr: usize) ?*region_mod.Region {
+fn findMmapRegion(state: *VmClientState, addr: usize) ?*region.Region {
     for (state.mmap_regions.items) |*reg| {
         if (reg.contains(addr)) return reg;
     }
@@ -865,8 +865,3 @@ pub export fn handle_vm_fault(
 
 const DEFAULT_HEAP_PROT: c_int = sos.PROT_READ | sos.PROT_WRITE;
 const DEFAULT_STACK_PROT: c_int = sos.PROT_READ | sos.PROT_WRITE;
-
-pub const logging = logging_pkg;
-pub const addr_space = addr_space_pkg;
-pub const region = region_mod;
-pub const mapping = mapping_mod;
