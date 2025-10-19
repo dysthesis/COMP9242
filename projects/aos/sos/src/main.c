@@ -353,8 +353,8 @@ static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace,
   }
 
   /* virtual addresses in the target process' address space */
-  uintptr_t stack_top = PROCESS_STACK_TOP;
-  uintptr_t stack_bottom = PROCESS_STACK_TOP - PAGE_SIZE_4K;
+  uintptr_t stack_top = PROCESS_STACK_TOP & ~((uintptr_t)PAGE_SIZE_4K - 1);
+  uintptr_t stack_bottom = stack_top - PAGE_SIZE_4K;
   /* virtual addresses in the SOS's address space */
   void *local_stack_top = (seL4_Word *)SOS_SCRATCH;
   uintptr_t local_stack_bottom = SOS_SCRATCH - PAGE_SIZE_4K;

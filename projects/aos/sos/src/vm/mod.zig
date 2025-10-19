@@ -10,6 +10,8 @@ const c = cimports.c;
 const sel4 = cimports.sel4;
 const sos = cimports.sos;
 
+extern var cspace: sos.cspace_t;
+
 pub const VmHandle = struct {
     idx: usize,
     generation: u8,
@@ -27,6 +29,9 @@ const VM_ARENA_BYTES = 64 * 1024;
 const PageEntry = struct {
     frame_ref: usize,
     cap_slot: sel4.seL4_CPtr,
+    cap_owner: ?*sos.cspace_t,
+    owns_frame: bool,
+    owns_cap: bool,
 };
 const PageMap = std.AutoHashMap(usize, PageEntry);
 const RegionList = std.ArrayListUnmanaged(VmRegion);
@@ -164,7 +169,8 @@ const PAGE_SIZE_4K: usize = sos.PAGE_SIZE_4K;
 const HEAP_BASE: usize = 0x40000000;
 const MMAP_BASE: usize = 0x80000000;
 const HEAP_LIMIT: usize = MMAP_BASE - PAGE_SIZE_4K;
-const STACK_TOP: usize = sos.PROCESS_STACK_TOP;
+const STACK_TOP_RAW: usize = sos.PROCESS_STACK_TOP;
+const STACK_TOP: usize = STACK_TOP_RAW & ~(PAGE_SIZE_4K - 1);
 const STACK_MAX_BYTES: usize = 64 * 1024 * 1024;
 const STACK_GUARD_BASE: usize = STACK_TOP - STACK_MAX_BYTES;
 const MMAP_LIMIT: usize = STACK_GUARD_BASE - PAGE_SIZE_4K;
@@ -213,12 +219,43 @@ fn initVmState(state: *VmClientState) void {
     state.mmap_regions = RegionList{};
 }
 
+fn releasePageEntry(entry: *PageEntry) void {
+    if (entry.cap_owner) |owner| {
+        if (entry.cap_slot != sel4.seL4_CapNull and entry.owns_cap) {
+            const unmap_err = sel4.seL4_ARM_Page_Unmap(entry.cap_slot);
+            if (unmap_err != sel4.seL4_NoError) {
+                const unmap_err_i32: c_int = @intCast(unmap_err);
+                _ = c.printf("[vm_release] Page_Unmap err=%d slot=%lu\n", unmap_err_i32, @as(c_ulong, @intCast(entry.cap_slot)));
+            }
+            const delete_err = sos.cspace_delete(owner, entry.cap_slot);
+            if (delete_err != sel4.seL4_NoError) {
+                const delete_err_i32: c_int = @intCast(delete_err);
+                _ = c.printf("[vm_release] cspace_delete err=%d slot=%lu\n", delete_err_i32, @as(c_ulong, @intCast(entry.cap_slot)));
+            }
+            sos.cspace_free_slot(owner, entry.cap_slot);
+        }
+    }
+    if (entry.owns_frame and entry.frame_ref != 0) {
+        sos.free_frame(entry.frame_ref);
+    }
+}
+
+fn releaseAllPages(state: *VmClientState) void {
+    var it = state.page_map.iterator();
+    while (it.next()) |kv| {
+        releasePageEntry(kv.value_ptr);
+    }
+    state.page_map.clearRetainingCapacity();
+    state.mapped_count = 0;
+}
+
 fn teardownVmState(state: *VmClientState) void {
     if (!state.initialised) {
         state.* = VmClientState{};
         return;
     }
     const arena_alloc = state.arena_allocator.allocator();
+    releaseAllPages(state);
     state.page_map.deinit();
     state.mmap_regions.deinit(arena_alloc);
     state.arena_allocator.deinit();
@@ -286,8 +323,6 @@ fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, trac
         return VmError.Capacity;
     }
 
-    const caller_c: [*c]sos.client_t = @ptrCast(caller);
-    const proc_cspace = sos.client_get_cspace(caller_c) orelse return VmError.ClientContext;
     const proc_vspace = sos.client_get_vspace(caller);
     if (proc_vspace == 0) {
         return VmError.ClientContext;
@@ -305,19 +340,20 @@ fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, trac
     @memset(frame_bytes[0..PAGE_SIZE_4K], 0);
     _ = c.printf("[vm_map] cleared frame_data addr=0x%lx size=%lu\n", @as(c_ulong, @intCast(@intFromPtr(frame_raw))), @as(c_ulong, @intCast(PAGE_SIZE_4K)));
 
-    const slot = sos.cspace_alloc_slot(proc_cspace);
+    const slot = sos.cspace_alloc_slot(&cspace);
     if (slot == sel4.seL4_CapNull) {
         sos.free_frame(frame_ref);
         _ = c.printf("[vm_map] cspace_alloc_slot failed frame_ref=%lu\n", @as(c_ulong, @intCast(frame_ref)));
         return VmError.OutOfSlots;
     }
+    _ = c.printf("[vm_map] allocated slot=%lu owner_cspace=0x%lx\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(@intFromPtr(&cspace))));
     _ = c.printf("[vm_map] allocated slot=%lu for frame_ref=%lu\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
 
     const src_cspace = sos.frame_table_cspace();
     const frame_cap = sos.frame_page(frame_ref);
-    const copy_err = sos.cspace_copy(proc_cspace, slot, src_cspace, frame_cap, toSosRights(sel4.seL4_AllRights));
+    const copy_err = sos.cspace_copy(&cspace, slot, src_cspace, frame_cap, toSosRights(sel4.seL4_AllRights));
     if (copy_err != sel4.seL4_NoError) {
-        _ = sos.cspace_free_slot(proc_cspace, slot);
+        _ = sos.cspace_free_slot(&cspace, slot);
         sos.free_frame(frame_ref);
         const copy_err_i32: c_int = @intCast(copy_err);
         _ = c.printf("[vm_map] cspace_copy failed err=%d slot=%lu frame_ref=%lu\n", copy_err_i32, @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
@@ -331,10 +367,10 @@ fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, trac
     if (!executable) {
         attrs = attrs | sel4.seL4_ARM_ExecuteNever;
     }
-    const map_err = sos.map_frame(proc_cspace, slot, proc_vspace, vaddr, rights_sos, attrs);
+    const map_err = sos.map_frame(&cspace, slot, proc_vspace, vaddr, rights_sos, attrs);
     if (map_err != sel4.seL4_NoError) {
-        _ = sos.cspace_delete(proc_cspace, slot);
-        _ = sos.cspace_free_slot(proc_cspace, slot);
+        _ = sos.cspace_delete(&cspace, slot);
+        _ = sos.cspace_free_slot(&cspace, slot);
         sos.free_frame(frame_ref);
         const map_err_i32: c_int = @intCast(map_err);
         _ = c.printf("[vm_map] map_frame failed err=%d slot=%lu frame_ref=%lu vaddr=0x%lx\n", map_err_i32, @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
@@ -342,9 +378,9 @@ fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, trac
     }
     _ = c.printf("[vm_map] map_frame success slot=%lu frame_ref=%lu vaddr=0x%lx\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
 
-    _ = insertPage(state, vaddr, frame_ref, slot) catch |err| {
-        _ = sos.cspace_delete(proc_cspace, slot);
-        _ = sos.cspace_free_slot(proc_cspace, slot);
+    _ = insertPage(state, vaddr, frame_ref, slot, &cspace, true, true) catch |err| {
+        _ = sos.cspace_delete(&cspace, slot);
+        _ = sos.cspace_free_slot(&cspace, slot);
         sos.free_frame(frame_ref);
         return err;
     };
@@ -542,10 +578,25 @@ fn findPage(state: *VmClientState, vaddr: usize) ?*PageEntry {
     return state.page_map.getPtr(vaddr);
 }
 
-fn insertPage(state: *VmClientState, vaddr: usize, frame_ref: usize, cap_slot: sel4.seL4_CPtr) VmError!*PageEntry {
+fn insertPage(
+    state: *VmClientState,
+    vaddr: usize,
+    frame_ref: usize,
+    cap_slot: sel4.seL4_CPtr,
+    cap_owner: ?*sos.cspace_t,
+    owns_frame: bool,
+    owns_cap: bool,
+) VmError!*PageEntry {
+    if (owns_cap and cap_owner == null) {
+        _ = c.printf("[vm_map] insertPage missing cap_owner for vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
+        return VmError.InvalidArgs;
+    }
     if (state.page_map.getPtr(vaddr)) |entry| {
         entry.frame_ref = frame_ref;
         entry.cap_slot = cap_slot;
+        entry.cap_owner = cap_owner;
+        entry.owns_frame = owns_frame;
+        entry.owns_cap = owns_cap;
         return entry;
     }
 
@@ -556,6 +607,9 @@ fn insertPage(state: *VmClientState, vaddr: usize, frame_ref: usize, cap_slot: s
     state.page_map.put(vaddr, PageEntry{
         .frame_ref = frame_ref,
         .cap_slot = cap_slot,
+        .cap_owner = cap_owner,
+        .owns_frame = owns_frame,
+        .owns_cap = owns_cap,
     }) catch {
         return VmError.Capacity;
     };
@@ -679,7 +733,7 @@ pub export fn vm_state_release(client: *sos.client_t) callconv(.c) void {
 
 pub export fn vm_register_stack_mapping(handle: *VmHandle, vaddr: usize, frame_ref: usize, cap_slot: sel4.seL4_CPtr) callconv(.c) void {
     const state = ensureVmState(handle);
-    _ = insertPage(state, vaddr, frame_ref, cap_slot) catch |err| {
+    _ = insertPage(state, vaddr, frame_ref, cap_slot, null, false, false) catch |err| {
         const errno = vmErrorToErrno(err);
         _ = c.printf("[vm_stack] failed to record mapping errno=%d vaddr=0x%lx\n", errno, @as(c_ulong, @intCast(vaddr)));
         @panic("unable to record stack mapping");
