@@ -25,7 +25,6 @@ var vm_handles: [MAX_CLIENTS]VmHandle = [_]VmHandle{VmHandle{
 }} ** MAX_CLIENTS;
 var vm_handle_active: [MAX_CLIENTS]bool = [_]bool{false} ** MAX_CLIENTS;
 
-const VM_ARENA_BYTES = 64 * 1024;
 const PageEntry = struct {
     frame_ref: usize,
     cap_slot: sel4.seL4_CPtr,
@@ -35,6 +34,106 @@ const PageEntry = struct {
 };
 const PageMap = std.AutoHashMap(usize, PageEntry);
 const RegionList = std.ArrayListUnmanaged(VmRegion);
+
+const MetadataPage = struct {
+    frame_ref: usize = 0,
+    cap_slot: sel4.seL4_CPtr = sel4.seL4_CapNull,
+    vaddr: usize = 0,
+};
+
+const METADATA_REGION_BYTES: usize = sos.SOS_METADATA_REGION_BYTES;
+const METADATA_REGION_PAGES: usize = METADATA_REGION_BYTES / sos.PAGE_SIZE_4K;
+const METADATA_REGION_START: usize = sos.SOS_METADATA_BASE;
+
+const MetadataAllocError = error{OutOfMemory};
+
+const MetadataAllocator = struct {
+    state: ?*VmClientState = null,
+
+    const vtable = std.mem.Allocator.VTable{
+        .alloc = allocFn,
+        .resize = resizeFn,
+        .remap = remapFn,
+        .free = freeFn,
+    };
+
+    pub fn init(self: *MetadataAllocator, state: *VmClientState) void {
+        self.state = state;
+    }
+
+    pub fn allocator(self: *MetadataAllocator) std.mem.Allocator {
+        return std.mem.Allocator{
+            .ptr = self,
+            .vtable = &vtable,
+        };
+    }
+
+    pub fn deinit(self: *MetadataAllocator) void {
+        const state_opt = self.state;
+        if (state_opt == null) return;
+        const state = state_opt.?;
+        var idx: usize = 0;
+        while (idx < state.metadata_page_count) : (idx += 1) {
+            const meta_page = state.metadata_pages[idx];
+            _ = sel4.seL4_ARM_Page_Unmap(meta_page.cap_slot);
+            _ = sos.cspace_delete(&cspace, meta_page.cap_slot);
+            sos.cspace_free_slot(&cspace, meta_page.cap_slot);
+            sos.free_frame(meta_page.frame_ref);
+        }
+        state.metadata_page_count = 0;
+        state.metadata_mapped = 0;
+        state.metadata_cursor = state.metadata_base;
+        self.state = null;
+    }
+
+    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        _ = ret_addr;
+        const self = @as(*MetadataAllocator, @ptrCast(@alignCast(ctx)));
+        return self.alloc(len, alignment) catch null;
+    }
+
+    fn alloc(self: *MetadataAllocator, len: usize, alignment: std.mem.Alignment) MetadataAllocError![*]u8 {
+        const state = self.state orelse return MetadataAllocError.OutOfMemory;
+        const align_bytes = alignment.toByteUnits();
+        var cursor = state.metadata_cursor;
+        cursor = std.mem.alignForward(usize, cursor, align_bytes);
+        if (len == 0) {
+            return @as([*]u8, @ptrFromInt(cursor));
+        }
+        const end = cursor + len;
+        if (end < cursor) {
+            return MetadataAllocError.OutOfMemory;
+        }
+        try state.ensureMetadataMapped(end);
+        state.metadata_cursor = end;
+        return @as([*]u8, @ptrFromInt(cursor));
+    }
+
+    fn resizeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        _ = ctx;
+        _ = memory;
+        _ = alignment;
+        _ = new_len;
+        _ = ret_addr;
+        return false;
+    }
+
+    fn remapFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        _ = ctx;
+        _ = memory;
+        _ = alignment;
+        _ = new_len;
+        _ = ret_addr;
+        return null;
+    }
+
+    fn freeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        _ = ctx;
+        _ = memory;
+        _ = alignment;
+        _ = ret_addr;
+    }
+};
 
 fn validateHandle(handle: *VmHandle) void {
     const idx = handle.idx;
@@ -156,12 +255,72 @@ pub const VmClientState = struct {
     heap_region: VmRegion = VmRegion{},
     stack_region: VmRegion = VmRegion{},
 
-    arena_buf: [VM_ARENA_BYTES]u8 = undefined,
-    arena_fixed: std.heap.FixedBufferAllocator = undefined,
-    base_allocator: std.mem.Allocator = undefined,
-    arena_allocator: std.heap.ArenaAllocator = undefined,
+    metadata_allocator: MetadataAllocator = MetadataAllocator{},
+    metadata_alloc_handle: std.mem.Allocator = undefined,
+    metadata_base: usize = 0,
+    metadata_cursor: usize = 0,
+    metadata_mapped: usize = 0,
+    metadata_page_count: usize = 0,
+    metadata_pages: [METADATA_REGION_PAGES]MetadataPage = [_]MetadataPage{MetadataPage{}} ** METADATA_REGION_PAGES,
     page_map: PageMap = undefined,
     mmap_regions: RegionList = .{},
+
+    fn metadataAllocator(self: *VmClientState) std.mem.Allocator {
+        return self.metadata_alloc_handle;
+    }
+
+    fn ensureMetadataMapped(self: *VmClientState, target: usize) MetadataAllocError!void {
+        while (self.metadata_base + self.metadata_mapped < target) {
+            if (self.metadata_page_count >= METADATA_REGION_PAGES) {
+                _ = c.printf("[vm_meta] region exhausted idx=%lu\n", @as(c_ulong, @intCast(metadataIndex(self))));
+                return MetadataAllocError.OutOfMemory;
+            }
+
+            const frame_ref = sos.alloc_frame();
+            if (frame_ref == 0) {
+                _ = c.printf("[vm_meta] alloc_frame failed\n");
+                return MetadataAllocError.OutOfMemory;
+            }
+
+            const frame_data_ptr: [*]u8 = @ptrCast(sos.frame_data(frame_ref));
+            @memset(frame_data_ptr[0..PAGE_SIZE_4K], 0);
+
+            const slot = sos.cspace_alloc_slot(&cspace);
+            if (slot == sel4.seL4_CapNull) {
+                sos.free_frame(frame_ref);
+                _ = c.printf("[vm_meta] cspace_alloc_slot failed\n");
+                return MetadataAllocError.OutOfMemory;
+            }
+
+            const src_cspace = sos.frame_table_cspace();
+            const frame_cap = sos.frame_page(frame_ref);
+            if (sos.cspace_copy(&cspace, slot, src_cspace, frame_cap, toSosRights(sel4.seL4_AllRights)) != sel4.seL4_NoError) {
+                sos.cspace_free_slot(&cspace, slot);
+                sos.free_frame(frame_ref);
+                _ = c.printf("[vm_meta] cspace_copy failed\n");
+                return MetadataAllocError.OutOfMemory;
+            }
+
+            const rights = toSosRights(rightsFromBooleans(true, true));
+            const attrs = sel4.seL4_ARM_Default_VMAttributes | sel4.seL4_ARM_ExecuteNever;
+            const vaddr = self.metadata_base + self.metadata_mapped;
+            if (sos.map_frame(&cspace, slot, sel4.seL4_CapInitThreadVSpace, vaddr, rights, attrs) != sel4.seL4_NoError) {
+                _ = sos.cspace_delete(&cspace, slot);
+                sos.cspace_free_slot(&cspace, slot);
+                sos.free_frame(frame_ref);
+                _ = c.printf("[vm_meta] map_frame failed\n");
+                return MetadataAllocError.OutOfMemory;
+            }
+
+            self.metadata_pages[self.metadata_page_count] = MetadataPage{
+                .frame_ref = frame_ref,
+                .cap_slot = slot,
+                .vaddr = vaddr,
+            };
+            self.metadata_page_count += 1;
+            self.metadata_mapped += PAGE_SIZE_4K;
+        }
+    }
 };
 
 const MAX_CLIENTS: usize = sos.MAX_CLIENTS;
@@ -195,7 +354,11 @@ comptime {
 var vm_states: [MAX_CLIENTS]VmClientState = undefined;
 var vm_states_initialised = false;
 
-fn initVmState(state: *VmClientState) void {
+fn metadataIndex(state: *VmClientState) usize {
+    return (state.metadata_base - METADATA_REGION_START) / METADATA_REGION_BYTES;
+}
+
+fn initVmState(state: *VmClientState, idx: usize) void {
     state.initialised = true;
     state.heap_break = HEAP_BASE;
     state.heap_mapped_end = HEAP_BASE;
@@ -212,10 +375,13 @@ fn initVmState(state: *VmClientState) void {
     state.stack_region.reset(region_mod.RegionKind.Stack);
     state.stack_region.configure(STACK_TOP, region_mod.RegionKind.Stack, DEFAULT_STACK_PROT);
 
-    state.arena_fixed = std.heap.FixedBufferAllocator.init(state.arena_buf[0..]);
-    state.base_allocator = state.arena_fixed.allocator();
-    state.arena_allocator = std.heap.ArenaAllocator.init(state.base_allocator);
-    state.page_map = PageMap.init(state.arena_allocator.allocator());
+    state.metadata_base = METADATA_REGION_START + idx * METADATA_REGION_BYTES;
+    state.metadata_cursor = state.metadata_base;
+    state.metadata_mapped = 0;
+    state.metadata_page_count = 0;
+    state.metadata_allocator.init(state);
+    state.metadata_alloc_handle = state.metadata_allocator.allocator();
+    state.page_map = PageMap.init(state.metadata_alloc_handle);
     state.mmap_regions = RegionList{};
 }
 
@@ -254,12 +420,10 @@ fn teardownVmState(state: *VmClientState) void {
         state.* = VmClientState{};
         return;
     }
-    const arena_alloc = state.arena_allocator.allocator();
     releaseAllPages(state);
     state.page_map.deinit();
-    state.mmap_regions.deinit(arena_alloc);
-    state.arena_allocator.deinit();
-    state.arena_fixed.reset();
+    state.mmap_regions.deinit(state.metadata_alloc_handle);
+    state.metadata_allocator.deinit();
     state.* = VmClientState{};
 }
 
@@ -279,7 +443,7 @@ fn ensureVmState(handle: *VmHandle) *VmClientState {
     const state = stateFromHandle(handle);
     if (!state.initialised) {
         _ = c.printf("[vm_state] initialise idx=%lu caller=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(client))));
-        initVmState(state);
+        initVmState(state, idx);
     } else {
         _ = c.printf("[vm_state] reuse idx=%lu caller=0x%lx heap_break=0x%lx mapped_end=0x%lx stack_low=0x%lx active_mmaps=%lu mapped_pages=%lu\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(client))), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(state.stack_low)), @as(c_ulong, @intCast(state.active_mmaps)), @as(c_ulong, @intCast(state.mapped_count)));
     }
@@ -379,6 +543,10 @@ fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, trac
     _ = c.printf("[vm_map] map_frame success slot=%lu frame_ref=%lu vaddr=0x%lx\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
 
     _ = insertPage(state, vaddr, frame_ref, slot, &cspace, true, true) catch |err| {
+        if (err == VmError.Capacity) {
+            const meta_used = state.metadata_cursor - state.metadata_base;
+            _ = c.printf("[vm_meta] capacity hit vaddr=0x%lx mapped_count=%lu max_mapped=%lu used_bytes=%lu limit_bytes=%lu pages=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(state.mapped_count)), @as(c_ulong, @intCast(MAX_MAPPED_PAGES)), @as(c_ulong, @intCast(meta_used)), @as(c_ulong, @intCast(METADATA_REGION_BYTES)), @as(c_ulong, @intCast(state.metadata_page_count)));
+        }
         _ = sos.cspace_delete(&cspace, slot);
         _ = sos.cspace_free_slot(&cspace, slot);
         sos.free_frame(frame_ref);
@@ -623,7 +791,7 @@ fn leaseMmapRegion(state: *VmClientState, base: usize, prot: c_int) VmError!*VmR
         return VmError.Capacity;
     }
 
-    state.mmap_regions.append(state.arena_allocator.allocator(), VmRegion{}) catch {
+    state.mmap_regions.append(state.metadataAllocator(), VmRegion{}) catch {
         return VmError.Capacity;
     };
     const reg = &state.mmap_regions.items[state.mmap_regions.items.len - 1];
@@ -763,7 +931,7 @@ pub export fn vm_reset_state(handle: *VmHandle) callconv(.c) void {
     const client = clientFromHandle(handle);
     _ = c.printf("[vm_state] reset idx=%lu client=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(client))));
     teardownVmState(&vm_states[idx]);
-    initVmState(&vm_states[idx]);
+    initVmState(&vm_states[idx], idx);
 }
 
 pub export fn handle_vm_fault(
