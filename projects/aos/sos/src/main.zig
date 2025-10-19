@@ -84,6 +84,7 @@ const ServerContext = struct {
     badge: sel4.seL4_Word,
     have_reply: [*c]bool,
     caller: ?*sos.client_t,
+    vm_handle: ?*vm.VmHandle,
     reply: [*c]sel4.seL4_CPtr,
     reply_ut: [*c]*sos.ut_t,
 };
@@ -119,10 +120,13 @@ pub export fn handle_syscall(
         return sel4.seL4_MessageInfo_new(0, 0, 0, 1);
     };
 
+    const vm_handle = if (caller) |cptr| vm.vm_state_lookup(cptr) else null;
+
     var ctx = ServerContext{
         .badge = badge,
         .have_reply = have_reply,
         .caller = caller,
+        .vm_handle = vm_handle,
         .reply = reply,
         .reply_ut = reply_ut,
     };
@@ -454,12 +458,16 @@ fn handleMyId(ctx: *ServerContext) SyscallResponse {
 fn handleBrk(ctx: *ServerContext, args: anytype) SyscallResponse {
     const caller_ptr_value: usize = if (ctx.caller) |ptr| @intFromPtr(ptr) else 0;
     _ = c.printf("[vm_brk] handleBrk badge=%lu new_break=0x%lx caller_ptr=0x%lx\n", @as(c_ulong, @intCast(ctx.badge)), @as(c_ulong, @intCast(args.new_break)), @as(c_ulong, @intCast(caller_ptr_value)));
-    const caller = ctx.caller orelse {
+    if (ctx.caller == null) {
         _ = c.printf("[vm_brk] handleBrk no caller context\n");
+        return SyscallResponse{ .Brk = .{ .result = -@as(i64, sos.EINVAL) } };
+    }
+    const handle = ctx.vm_handle orelse {
+        _ = c.printf("[vm_brk] handleBrk missing vm_handle\n");
         return SyscallResponse{ .Brk = .{ .result = -@as(i64, sos.EINVAL) } };
     };
     const requested: usize = @intCast(args.new_break);
-    const result = vm.brkImpl(caller, requested) catch |err| {
+    const result = vm.brkImpl(handle, requested) catch |err| {
         const errno = vm.vmErrorToErrno(err);
         _ = c.printf("[vm_brk] handleBrk error errno=%d\n", errno);
         return SyscallResponse{ .Brk = .{ .result = -@as(i64, errno) } };
@@ -469,7 +477,10 @@ fn handleBrk(ctx: *ServerContext, args: anytype) SyscallResponse {
 }
 
 fn handleMmap(ctx: *ServerContext, args: anytype) SyscallResponse {
-    const caller = ctx.caller orelse {
+    if (ctx.caller == null) {
+        return SyscallResponse{ .Mmap = .{ .result = -@as(i64, sos.EINVAL) } };
+    }
+    const handle = ctx.vm_handle orelse {
         return SyscallResponse{ .Mmap = .{ .result = -@as(i64, sos.EINVAL) } };
     };
     const addr: usize = @intCast(args.addr);
@@ -479,7 +490,7 @@ fn handleMmap(ctx: *ServerContext, args: anytype) SyscallResponse {
     const fd: c_int = @intCast(wordToI64(args.fd));
     const offset: usize = @intCast(args.offset);
 
-    const base = vm.mmapImpl(caller, addr, length, prot, flags, fd, offset) catch |err| {
+    const base = vm.mmapImpl(handle, addr, length, prot, flags, fd, offset) catch |err| {
         const errno = vm.vmErrorToErrno(err);
         return SyscallResponse{ .Mmap = .{ .result = -@as(i64, errno) } };
     };

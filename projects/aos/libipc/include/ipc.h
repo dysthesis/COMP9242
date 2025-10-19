@@ -81,11 +81,14 @@ seL4_CPtr sos_shared_page_client_cap(const shared_page_t *shared_page);
 uintptr_t sos_shared_page_kernel_va(const shared_page_t *shared_page);
 uintptr_t sos_shared_page_client_va(const shared_page_t *shared_page);
 
+struct vm_handle;
+
 typedef struct client {
   unsigned id;         // slot ID
   uint8_t gen;         // generation
   seL4_CPtr vspace;    // client's VSpace root capability (in SOS's CSpace)
   shared_page_t *shbuf; // the shared page for IPC
+  struct vm_handle *vm_state; // opaque VM bookkeeping handle
 } client_t;
 
 extern client_t *clients[MAX_CLIENTS];

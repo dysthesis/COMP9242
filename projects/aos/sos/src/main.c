@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <ipc.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +46,7 @@
 #include "threads.h"
 #include "ut.h"
 #include "utils.h"
+#include "vm/api.h"
 #include "vmem_layout.h"
 #include <sos/gen_config.h>
 #ifdef CONFIG_SOS_GDB_ENABLED
@@ -102,11 +104,6 @@ uint8_t generations[MAX_CLIENTS]; // keep track of the current generation
 uint16_t free_ids[MAX_CLIENTS];   // free IDs for new clients
 size_t free_top;
 
-extern void vm_register_stack_mapping(client_t *client, uintptr_t vaddr,
-                                      frame_ref_t frame_ref, seL4_CPtr slot);
-extern void vm_report_initial_stack(client_t *client, uintptr_t mapped_bottom);
-extern void vm_reset_state(client_t *client);
-
 /* the one process we start */
 static struct {
   ut_t *tcb_ut;
@@ -151,8 +148,6 @@ seL4_MessageInfo_t handle_syscall(seL4_Word badge,
                                   const seL4_MessageInfo_t *message,
                                   bool *have_reply, client_t *caller,
                                   seL4_CPtr *reply, ut_t **reply_ut);
-bool handle_vm_fault(seL4_Word badge, const seL4_MessageInfo_t *message,
-                     client_t *caller);
 
 // END OF ZIG FUNCTION STUBS
 
@@ -211,7 +206,18 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
         continue;
       }
 
-      if (handle_vm_fault(badge, &message, caller)) {
+      struct vm_handle *vm = caller->vm_state;
+      if (vm == NULL) {
+        vm = vm_state_lookup(caller);
+        if (vm == NULL) {
+          ZF_LOGE("VM state missing for caller badge=0x%lx", (unsigned long)badge);
+          have_reply = false;
+          continue;
+        }
+        caller->vm_state = vm;
+      }
+
+      if (handle_vm_fault(vm, badge, &message)) {
         reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
         have_reply = true;
         continue;
@@ -224,14 +230,17 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
       sos_ipc_msg_t ipc_msg;
       if (sos_deserialise_ipc_msg(&message, &ipc_msg) == 0) {
         // inspect the IPC message received if we can
-        printf("[sos] syscall_loop(fault): badge -> %d\n", badge);
-        printf("[sos] syscall_loop(fault): sysno -> %d\n",
-               (sos_sysno_t)ipc_msg.sysno);
-        printf("[sos] syscall_loop(fault): arg -> %d\n", ipc_msg.arg);
-        printf("[sos] syscall_loop(fault): buf_addr -> %x\n", ipc_msg.buf_addr);
-        printf("[sos] syscall_loop(fault): buf_size -> %d\n", ipc_msg.buf_size);
+        printf("[sos] syscall_loop(fault): badge -> %lu\n", (unsigned long)badge);
+        printf("[sos] syscall_loop(fault): sysno -> %lu\n",
+               (unsigned long)(sos_sysno_t)ipc_msg.sysno);
+        printf("[sos] syscall_loop(fault): arg -> %lu\n",
+               (unsigned long)ipc_msg.arg);
+        printf("[sos] syscall_loop(fault): buf_addr -> %lx\n",
+               (unsigned long)ipc_msg.buf_addr);
+        printf("[sos] syscall_loop(fault): buf_size -> %lu\n",
+               (unsigned long)ipc_msg.buf_size);
         printf("[sos] syscall_loop(fault): shbuf-> %.*s\n", 10,
-               PROCESS_SHBUF_UVA);
+               (const char *)(uintptr_t)PROCESS_SHBUF_UVA);
       }
       /* some kind of fault */
       debug_print_fault(message, APP_NAME);
@@ -321,7 +330,11 @@ static int map_process_stack_page(uintptr_t vaddr) {
     return -1;
   }
 
-  vm_register_stack_mapping(user_process.client, vaddr, frame, slot);
+  if (user_process.client == NULL || user_process.client->vm_state == NULL) {
+    ZF_LOGE("Missing VM handle while recording stack mapping");
+  } else {
+    vm_register_stack_mapping(user_process.client->vm_state, vaddr, frame, slot);
+  }
 
   user_process.stack_frames[user_process.stack_frame_count] = frame;
   user_process.stack_slots[user_process.stack_frame_count] = slot;
@@ -447,7 +460,9 @@ static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace,
     }
   }
 
-  vm_report_initial_stack(user_process.client, stack_bottom);
+  if (user_process.client != NULL && user_process.client->vm_state != NULL) {
+    vm_report_initial_stack(user_process.client->vm_state, stack_bottom);
+  }
 
   return stack_top;
 }
@@ -639,7 +654,9 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
 
 out:
   if (!success && client) {
-    vm_reset_state(client);
+    if (client->vm_state != NULL) {
+      vm_reset_state(client->vm_state);
+    }
     client_destroy(client, &cspace);
     user_process.client = NULL;
     user_process.badge = 0;

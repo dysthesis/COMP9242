@@ -10,6 +10,47 @@ const c = cimports.c;
 const sel4 = cimports.sel4;
 const sos = cimports.sos;
 
+pub const VmHandle = struct {
+    idx: usize,
+    generation: u8,
+    client: ?*sos.client_t,
+};
+
+var vm_handles: [MAX_CLIENTS]VmHandle = [_]VmHandle{VmHandle{
+    .idx = 0,
+    .generation = 0,
+    .client = null,
+}} ** MAX_CLIENTS;
+var vm_handle_active: [MAX_CLIENTS]bool = [_]bool{false} ** MAX_CLIENTS;
+
+fn validateHandle(handle: *VmHandle) void {
+    const idx = handle.idx;
+    if (idx >= MAX_CLIENTS) {
+        @panic("VM handle index out of range");
+    }
+    if (!vm_handle_active[idx]) {
+        @panic("VM handle inactive");
+    }
+    const client = handle.client orelse @panic("VM handle missing client reference");
+    const stored_id: usize = @intCast(client.*.id);
+    if (stored_id != idx) {
+        @panic("VM handle/client ID mismatch");
+    }
+    if (client.*.gen != handle.generation) {
+        @panic("VM handle stale generation");
+    }
+}
+
+fn clientFromHandle(handle: *VmHandle) *sos.client_t {
+    validateHandle(handle);
+    return handle.client.?;
+}
+
+fn stateFromHandle(handle: *VmHandle) *VmClientState {
+    validateHandle(handle);
+    return &vm_states[handle.idx];
+}
+
 pub const VmError = error{
     ClientContext,
     Bounds,
@@ -132,7 +173,7 @@ comptime {
     }
 }
 
-var vm_states: [MAX_CLIENTS]VmClientState = [_]VmClientState{VmClientState{}} ** MAX_CLIENTS;
+var vm_states: [MAX_CLIENTS]VmClientState = std.mem.zeroes([MAX_CLIENTS]VmClientState);
 
 fn initVmState(state: *VmClientState) void {
     state.initialised = true;
@@ -160,14 +201,15 @@ fn initVmState(state: *VmClientState) void {
     }
 }
 
-fn ensureVmState(caller: *sos.client_t) *VmClientState {
-    const idx = vmStateIndex(caller);
-    const state = &vm_states[idx];
+fn ensureVmState(handle: *VmHandle) *VmClientState {
+    const idx = handle.idx;
+    const client = clientFromHandle(handle);
+    const state = stateFromHandle(handle);
     if (!state.initialised) {
-        _ = c.printf("[vm_state] initialise idx=%lu caller=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(caller))));
+        _ = c.printf("[vm_state] initialise idx=%lu caller=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(client))));
         initVmState(state);
     } else {
-        _ = c.printf("[vm_state] reuse idx=%lu caller=0x%lx heap_break=0x%lx mapped_end=0x%lx stack_low=0x%lx active_mmaps=%lu mapped_pages=%lu\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(state.stack_low)), @as(c_ulong, @intCast(state.active_mmaps)), @as(c_ulong, @intCast(state.mapped_count)));
+        _ = c.printf("[vm_state] reuse idx=%lu caller=0x%lx heap_break=0x%lx mapped_end=0x%lx stack_low=0x%lx active_mmaps=%lu mapped_pages=%lu\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(client))), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(state.stack_low)), @as(c_ulong, @intCast(state.active_mmaps)), @as(c_ulong, @intCast(state.mapped_count)));
     }
     return state;
 }
@@ -185,10 +227,12 @@ pub fn vmErrorToErrno(err: VmError) c_int {
     };
 }
 
-fn mapAnonymousPage(state: *VmClientState, caller: *sos.client_t, vaddr: usize, tracker: *VmRegion) VmError!void {
+fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, tracker: *VmRegion) VmError!void {
     if (!tracker.used) {
         return VmError.InvalidArgs;
     }
+
+    const caller = clientFromHandle(handle);
 
     const prot_flags = tracker.prot();
     const readable = (prot_flags & sos.PROT_READ) != 0;
@@ -289,9 +333,10 @@ fn mapAnonymousPage(state: *VmClientState, caller: *sos.client_t, vaddr: usize, 
     }
 }
 
-pub fn brkImpl(caller: *sos.client_t, requested: usize) VmError!usize {
-    const state = ensureVmState(caller);
-    _ = c.printf("[vm_brk] enter caller=0x%lx requested=0x%lx heap_break=0x%lx mapped_end=0x%lx limit=0x%lx\n", @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(requested)), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(HEAP_LIMIT)));
+pub fn brkImpl(handle: *VmHandle, requested: usize) VmError!usize {
+    const state = ensureVmState(handle);
+    const caller_ptr: c_ulong = @intCast(@intFromPtr(clientFromHandle(handle)));
+    _ = c.printf("[vm_brk] enter caller=0x%lx requested=0x%lx heap_break=0x%lx mapped_end=0x%lx limit=0x%lx\n", caller_ptr, @as(c_ulong, @intCast(requested)), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(HEAP_LIMIT)));
 
     if (requested == 0) {
         _ = c.printf("[vm_brk] query current break=0x%lx\n", @as(c_ulong, @intCast(state.heap_break)));
@@ -317,7 +362,7 @@ pub fn brkImpl(caller: *sos.client_t, requested: usize) VmError!usize {
     if (cursor < HEAP_BASE) cursor = HEAP_BASE;
     while (cursor < target_map_end) : (cursor += PAGE_SIZE_4K) {
         _ = c.printf("[vm_brk] mapping cursor=0x%lx target=0x%lx\n", @as(c_ulong, @intCast(cursor)), @as(c_ulong, @intCast(target_map_end)));
-        mapAnonymousPage(state, caller, cursor, &state.heap_region) catch |err| {
+        mapAnonymousPage(handle, state, cursor, &state.heap_region) catch |err| {
             const err_code: c_int = vmErrorToErrno(err);
             _ = c.printf("[vm_brk] mapAnonymousPage failed cursor=0x%lx errno=%d\n", @as(c_ulong, @intCast(cursor)), err_code);
             return err;
@@ -331,8 +376,9 @@ pub fn brkImpl(caller: *sos.client_t, requested: usize) VmError!usize {
     return requested;
 }
 
-pub fn mmapImpl(caller: *sos.client_t, addr: usize, length: usize, prot: c_int, flags: c_int, fd: c_int, offset: usize) VmError!usize {
-    _ = c.printf("[vm_mmap] enter caller=0x%lx addr=0x%lx length=0x%lx prot=0x%x flags=0x%x fd=%d offset=0x%lx\n", @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(addr)), @as(c_ulong, @intCast(length)), prot, flags, fd, @as(c_ulong, @intCast(offset)));
+pub fn mmapImpl(handle: *VmHandle, addr: usize, length: usize, prot: c_int, flags: c_int, fd: c_int, offset: usize) VmError!usize {
+    const caller_ptr: c_ulong = @intCast(@intFromPtr(clientFromHandle(handle)));
+    _ = c.printf("[vm_mmap] enter caller=0x%lx addr=0x%lx length=0x%lx prot=0x%x flags=0x%x fd=%d offset=0x%lx\n", caller_ptr, @as(c_ulong, @intCast(addr)), @as(c_ulong, @intCast(length)), prot, flags, fd, @as(c_ulong, @intCast(offset)));
     if (length == 0) {
         _ = c.printf("[vm_mmap] zero length invalid\n");
         return VmError.InvalidArgs;
@@ -363,7 +409,7 @@ pub fn mmapImpl(caller: *sos.client_t, addr: usize, length: usize, prot: c_int, 
     const executable = (prot & sos.PROT_EXEC) != 0;
     _ = c.printf("[vm_mmap] permissions read=%d write=%d exec=%d\n", @as(c_int, if (readable) 1 else 0), @as(c_int, if (writable) 1 else 0), @as(c_int, if (executable) 1 else 0));
 
-    const state = ensureVmState(caller);
+    const state = ensureVmState(handle);
     if (state.mmap_next + aligned > MMAP_LIMIT) {
         _ = c.printf("[vm_mmap] exceeds limit mmap_next=0x%lx aligned=0x%lx limit=0x%lx\n", @as(c_ulong, @intCast(state.mmap_next)), @as(c_ulong, @intCast(aligned)), @as(c_ulong, @intCast(MMAP_LIMIT)));
         return VmError.Bounds;
@@ -380,7 +426,7 @@ pub fn mmapImpl(caller: *sos.client_t, addr: usize, length: usize, prot: c_int, 
     _ = c.printf("[vm_mmap] base=0x%lx end=0x%lx\n", @as(c_ulong, @intCast(base)), @as(c_ulong, @intCast(end_addr)));
     while (cursor < end_addr) : (cursor += PAGE_SIZE_4K) {
         _ = c.printf("[vm_mmap] mapping cursor=0x%lx\n", @as(c_ulong, @intCast(cursor)));
-        mapAnonymousPage(state, caller, cursor, tracker) catch |err| {
+        mapAnonymousPage(handle, state, cursor, tracker) catch |err| {
             const err_code: c_int = vmErrorToErrno(err);
             _ = c.printf("[vm_mmap] mapAnonymousPage failed cursor=0x%lx errno=%d\n", @as(c_ulong, @intCast(cursor)), err_code);
             map_failed = true;
@@ -399,10 +445,10 @@ pub fn mmapImpl(caller: *sos.client_t, addr: usize, length: usize, prot: c_int, 
     return base;
 }
 
-fn handleVmFaultInternal(caller: *sos.client_t, fault_addr: usize, want_write: bool, is_fetch: bool) VmError!void {
+fn handleVmFaultInternal(handle: *VmHandle, fault_addr: usize, want_write: bool, is_fetch: bool) VmError!void {
     _ = want_write;
     _ = is_fetch;
-    const state = ensureVmState(caller);
+    const state = ensureVmState(handle);
     const base = pageBase(fault_addr);
 
     if (findPage(state, base) != null) {
@@ -412,7 +458,7 @@ fn handleVmFaultInternal(caller: *sos.client_t, fault_addr: usize, want_write: b
     const min_stack = state.stack_guard + PAGE_SIZE_4K;
     if (base >= min_stack and base < state.stack_top) {
         _ = c.printf("[vm_fault] growing stack at 0x%lx (low=0x%lx guard=0x%lx top=0x%lx)\n", @as(c_ulong, @intCast(base)), @as(c_ulong, @intCast(state.stack_low)), @as(c_ulong, @intCast(state.stack_guard)), @as(c_ulong, @intCast(state.stack_top)));
-        try mapAnonymousPage(state, caller, base, &state.stack_region);
+        try mapAnonymousPage(handle, state, base, &state.stack_region);
         return;
     }
 
@@ -422,12 +468,12 @@ fn handleVmFaultInternal(caller: *sos.client_t, fault_addr: usize, want_write: b
     }
 
     if (base >= HEAP_BASE and base < state.heap_break) {
-        try mapAnonymousPage(state, caller, base, &state.heap_region);
+        try mapAnonymousPage(handle, state, base, &state.heap_region);
         return;
     }
 
     if (findMmapRegion(state, base)) |tracker| {
-        try mapAnonymousPage(state, caller, base, tracker);
+        try mapAnonymousPage(handle, state, base, tracker);
         return;
     }
 
@@ -577,8 +623,51 @@ fn dataToProt(data: u60) c_int {
     return @intCast(@as(u64, data));
 }
 
-pub export fn vm_register_stack_mapping(client: *sos.client_t, vaddr: usize, frame_ref: usize, cap_slot: sel4.seL4_CPtr) callconv(.c) void {
-    const state = ensureVmState(client);
+pub export fn vm_state_acquire(client: *sos.client_t) callconv(.c) *VmHandle {
+    const idx = vmStateIndex(client);
+    vm_handles[idx] = VmHandle{
+        .idx = idx,
+        .generation = client.*.gen,
+        .client = client,
+    };
+    vm_handle_active[idx] = true;
+    const handle = &vm_handles[idx];
+    _ = ensureVmState(handle);
+    return handle;
+}
+
+pub export fn vm_state_lookup(client: *sos.client_t) callconv(.c) ?*VmHandle {
+    const idx = vmStateIndex(client);
+    if (!vm_handle_active[idx]) {
+        return null;
+    }
+    const handle = &vm_handles[idx];
+    if (handle.client != client) {
+        return null;
+    }
+    if (handle.generation != client.*.gen) {
+        return null;
+    }
+    return handle;
+}
+
+pub export fn vm_state_release(client: *sos.client_t) callconv(.c) void {
+    const idx = vmStateIndex(client);
+    if (!vm_handle_active[idx]) {
+        return;
+    }
+    const handle = &vm_handles[idx];
+    if (handle.client != null and handle.client.? != client) {
+        _ = c.printf("[vm_state] release mismatch idx=%lu stored=0x%lx provided=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(handle.client.?))), @as(c_ulong, @intCast(@intFromPtr(client))));
+    }
+    vm_handle_active[idx] = false;
+    vm_handles[idx] = VmHandle{ .idx = idx, .generation = 0, .client = null };
+    vm_states[idx] = VmClientState{};
+    initVmState(&vm_states[idx]);
+}
+
+pub export fn vm_register_stack_mapping(handle: *VmHandle, vaddr: usize, frame_ref: usize, cap_slot: sel4.seL4_CPtr) callconv(.c) void {
+    const state = ensureVmState(handle);
     _ = insertPage(state, vaddr, frame_ref, cap_slot) catch |err| {
         const errno = vmErrorToErrno(err);
         _ = c.printf("[vm_stack] failed to record mapping errno=%d vaddr=0x%lx\n", errno, @as(c_ulong, @intCast(vaddr)));
@@ -591,8 +680,8 @@ pub export fn vm_register_stack_mapping(client: *sos.client_t, vaddr: usize, fra
     }
 }
 
-pub export fn vm_report_initial_stack(client: *sos.client_t, mapped_bottom: usize) callconv(.c) void {
-    const state = ensureVmState(client);
+pub export fn vm_report_initial_stack(handle: *VmHandle, mapped_bottom: usize) callconv(.c) void {
+    const state = ensureVmState(handle);
     if (!state.stack_region.contains(mapped_bottom)) {
         state.stack_region.recordMapping(mapped_bottom, PAGE_SIZE_4K);
     }
@@ -601,20 +690,22 @@ pub export fn vm_report_initial_stack(client: *sos.client_t, mapped_bottom: usiz
     }
 }
 
-pub export fn vm_reset_state(client: *sos.client_t) callconv(.c) void {
-    const idx = vmStateIndex(client);
+pub export fn vm_reset_state(handle: *VmHandle) callconv(.c) void {
+    validateHandle(handle);
+    const idx = handle.idx;
+    const client = clientFromHandle(handle);
     _ = c.printf("[vm_state] reset idx=%lu client=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(client))));
     vm_states[idx] = VmClientState{};
     initVmState(&vm_states[idx]);
 }
 
 pub export fn handle_vm_fault(
+    handle: *VmHandle,
     badge: sel4.seL4_Word,
     message: [*c]const sel4.seL4_MessageInfo_t,
-    caller: ?*sos.client_t,
 ) callconv(.c) bool {
     _ = badge;
-    const caller_ptr = caller orelse return false;
+    validateHandle(handle);
     const info = message.*;
     if (sel4.seL4_MessageInfo_get_label(info) != sel4.seL4_Fault_VMFault) {
         return false;
@@ -635,7 +726,7 @@ pub export fn handle_vm_fault(
     const fsr_raw: c_ulong = @intCast(fsr);
     _ = c.printf("[vm_fault] addr=0x%lx fsr=0x%lx write=%d fetch=%d\n", @as(c_ulong, addr_raw), @as(c_ulong, fsr_raw), @as(c_int, if (want_write) 1 else 0), @as(c_int, if (prefetch) 1 else 0));
 
-    handleVmFaultInternal(caller_ptr, fault_addr, want_write, prefetch) catch |err| {
+    handleVmFaultInternal(handle, fault_addr, want_write, prefetch) catch |err| {
         _ = c.printf("[vm_fault] handler error=%d\n", vmErrorToErrno(err));
         return false;
     };
