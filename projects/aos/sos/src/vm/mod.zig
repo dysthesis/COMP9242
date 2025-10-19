@@ -25,21 +25,10 @@ var vm_handles: [MAX_CLIENTS]VmHandle = [_]VmHandle{VmHandle{
 }} ** MAX_CLIENTS;
 var vm_handle_active: [MAX_CLIENTS]bool = [_]bool{false} ** MAX_CLIENTS;
 
-const PageEntry = struct {
-    frame_ref: usize,
-    cap_slot: sel4.seL4_CPtr,
-    cap_owner: ?*sos.cspace_t,
-    owns_frame: bool,
-    owns_cap: bool,
-};
-const PageMap = std.AutoHashMap(usize, PageEntry);
-const RegionList = std.ArrayListUnmanaged(VmRegion);
-
-const MetadataPage = struct {
-    frame_ref: usize = 0,
-    cap_slot: sel4.seL4_CPtr = sel4.seL4_CapNull,
-    vaddr: usize = 0,
-};
+const MappedPage = page_mod.MappedPage;
+const MetadataPage = page_mod.MetadataPage;
+const PageMap = std.AutoHashMap(usize, MappedPage);
+const RegionList = std.ArrayListUnmanaged(region_mod.Region);
 
 const METADATA_REGION_BYTES: usize = sos.SOS_METADATA_REGION_BYTES;
 const METADATA_REGION_PAGES: usize = METADATA_REGION_BYTES / sos.PAGE_SIZE_4K;
@@ -175,72 +164,6 @@ pub const VmError = error{
     InvalidArgs,
 };
 
-const VmRegion = struct {
-    region: region_mod.Region = .{
-        .start = 0,
-        .end = 0,
-        .attr = .{ .kind = region_mod.RegionKind.Normal, .data = 0 },
-        .perm = std.mem.zeroes(sel4.seL4_CapRights_t),
-    },
-    used: bool = false,
-    mapped: bool = false,
-
-    pub fn configure(self: *VmRegion, start: usize, kind: region_mod.RegionKind, prot_flags: c_int) void {
-        const readable = (prot_flags & sos.PROT_READ) != 0;
-        const writable = (prot_flags & sos.PROT_WRITE) != 0;
-        self.region.start = start;
-        self.region.end = start;
-        self.region.attr = .{ .kind = kind, .data = protToData(prot_flags) };
-        self.region.perm = rightsFromBooleans(readable, writable);
-        self.used = true;
-        self.mapped = false;
-    }
-
-    pub fn reset(self: *VmRegion, kind: region_mod.RegionKind) void {
-        self.region.start = 0;
-        self.region.end = 0;
-        self.region.attr = .{ .kind = kind, .data = 0 };
-        self.region.perm = std.mem.zeroes(sel4.seL4_CapRights_t);
-        self.used = false;
-        self.mapped = false;
-    }
-
-    pub fn updateAccess(self: *VmRegion, readable: bool, writable: bool, executable: bool) void {
-        const prot_flags = encodeProtFlags(readable, writable, executable);
-        if (!self.mapped) {
-            self.region.attr.data = protToData(prot_flags);
-            self.region.perm = rightsFromBooleans(readable, writable);
-        } else {
-            const merged = dataToProt(self.region.attr.data) | prot_flags;
-            self.region.attr.data = protToData(merged);
-            self.region.perm = mergeCapRights(self.region.perm, rightsFromBooleans(readable, writable));
-        }
-    }
-
-    pub fn recordMapping(self: *VmRegion, addr: usize, page_size: usize) void {
-        const base = alignDown(addr, page_size);
-        const end_addr = base + page_size;
-        if (!self.mapped) {
-            self.region.start = base;
-            self.region.end = end_addr;
-            self.mapped = true;
-        } else {
-            if (base < self.region.start) self.region.start = base;
-            if (end_addr > self.region.end) self.region.end = end_addr;
-        }
-    }
-
-    pub fn contains(self: *const VmRegion, addr: usize) bool {
-        if (!self.used) return false;
-        if (!self.mapped) return false;
-        return addr >= self.region.start and addr < self.region.end;
-    }
-
-    pub fn prot(self: *const VmRegion) c_int {
-        return dataToProt(self.region.attr.data);
-    }
-};
-
 pub const VmClientState = struct {
     initialised: bool = false,
     heap_break: usize = 0,
@@ -252,8 +175,8 @@ pub const VmClientState = struct {
     mapped_count: usize = 0,
     active_mmaps: usize = 0,
 
-    heap_region: VmRegion = VmRegion{},
-    stack_region: VmRegion = VmRegion{},
+    heap_region: region_mod.Region = .{},
+    stack_region: region_mod.Region = .{},
 
     metadata_allocator: MetadataAllocator = MetadataAllocator{},
     metadata_alloc_handle: std.mem.Allocator = undefined,
@@ -261,7 +184,11 @@ pub const VmClientState = struct {
     metadata_cursor: usize = 0,
     metadata_mapped: usize = 0,
     metadata_page_count: usize = 0,
-    metadata_pages: [METADATA_REGION_PAGES]MetadataPage = [_]MetadataPage{MetadataPage{}} ** METADATA_REGION_PAGES,
+    metadata_pages: [METADATA_REGION_PAGES]MetadataPage = [_]MetadataPage{MetadataPage{
+        .frame_ref = 0,
+        .cap_slot = sel4.seL4_CapNull,
+        .vaddr = 0,
+    }} ** METADATA_REGION_PAGES,
     page_map: PageMap = undefined,
     mmap_regions: RegionList = .{},
 
@@ -301,7 +228,7 @@ pub const VmClientState = struct {
                 return MetadataAllocError.OutOfMemory;
             }
 
-            const rights = toSosRights(rightsFromBooleans(true, true));
+            const rights = toSosRights(region_mod.rightsFromBooleans(true, true));
             const attrs = sel4.seL4_ARM_Default_VMAttributes | sel4.seL4_ARM_ExecuteNever;
             const vaddr = self.metadata_base + self.metadata_mapped;
             if (sos.map_frame(&cspace, slot, sel4.seL4_CapInitThreadVSpace, vaddr, rights, attrs) != sel4.seL4_NoError) {
@@ -385,7 +312,7 @@ fn initVmState(state: *VmClientState, idx: usize) void {
     state.mmap_regions = RegionList{};
 }
 
-fn releasePageEntry(entry: *PageEntry) void {
+fn releaseMappedPage(entry: *MappedPage) void {
     if (entry.cap_owner) |owner| {
         if (entry.cap_slot != sel4.seL4_CapNull and entry.owns_cap) {
             const unmap_err = sel4.seL4_ARM_Page_Unmap(entry.cap_slot);
@@ -406,10 +333,10 @@ fn releasePageEntry(entry: *PageEntry) void {
     }
 }
 
-fn releaseAllPages(state: *VmClientState) void {
+fn releaseAllVmPages(state: *VmClientState) void {
     var it = state.page_map.iterator();
     while (it.next()) |kv| {
-        releasePageEntry(kv.value_ptr);
+        releaseMappedPage(kv.value_ptr);
     }
     state.page_map.clearRetainingCapacity();
     state.mapped_count = 0;
@@ -420,7 +347,7 @@ fn teardownVmState(state: *VmClientState) void {
         state.* = VmClientState{};
         return;
     }
-    releaseAllPages(state);
+    releaseAllVmPages(state);
     state.page_map.deinit();
     state.mmap_regions.deinit(state.metadata_alloc_handle);
     state.metadata_allocator.deinit();
@@ -463,7 +390,7 @@ pub fn vmErrorToErrno(err: VmError) c_int {
     };
 }
 
-fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, tracker: *VmRegion) VmError!void {
+fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, tracker: *region_mod.Region) VmError!void {
     if (!tracker.used) {
         return VmError.InvalidArgs;
     }
@@ -525,7 +452,7 @@ fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, trac
     }
     _ = c.printf("[vm_map] copied frame cap slot=%lu frame_ref=%lu\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
 
-    const rights = rightsFromBooleans(readable, writable);
+    const rights = region_mod.rightsFromBooleans(readable, writable);
     const rights_sos = toSosRights(rights);
     var attrs = sel4.seL4_ARM_Default_VMAttributes;
     if (!executable) {
@@ -558,15 +485,15 @@ fn mapAnonymousPage(handle: *VmHandle, state: *VmClientState, vaddr: usize, trac
     tracker.updateAccess(readable, writable, executable);
     tracker.recordMapping(vaddr, PAGE_SIZE_4K);
 
-    switch (tracker.region.attr.kind) {
+    switch (tracker.attr.kind) {
         .Stack => {
-            if (tracker.region.start < state.stack_low) {
-                state.stack_low = tracker.region.start;
+            if (tracker.start < state.stack_low) {
+                state.stack_low = tracker.start;
             }
         },
         .Heap => {
-            if (tracker.region.end > state.heap_mapped_end) {
-                state.heap_mapped_end = tracker.region.end;
+            if (tracker.end > state.heap_mapped_end) {
+                state.heap_mapped_end = tracker.end;
             }
         },
         else => {},
@@ -610,7 +537,7 @@ pub fn brkImpl(handle: *VmHandle, requested: usize) VmError!usize {
         _ = c.printf("[vm_brk] mapped cursor=0x%lx\n", @as(c_ulong, @intCast(cursor)));
     }
 
-    state.heap_mapped_end = if (state.heap_region.region.end > HEAP_BASE) state.heap_region.region.end else state.heap_mapped_end;
+    state.heap_mapped_end = if (state.heap_region.end > HEAP_BASE) state.heap_region.end else state.heap_mapped_end;
     state.heap_break = requested;
     _ = c.printf("[vm_brk] updated state heap_break=0x%lx heap_mapped_end=0x%lx\n", @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)));
     return requested;
@@ -742,7 +669,7 @@ fn pageBase(addr: usize) usize {
     return alignDown(addr, PAGE_SIZE_4K);
 }
 
-fn findPage(state: *VmClientState, vaddr: usize) ?*PageEntry {
+fn findPage(state: *VmClientState, vaddr: usize) ?*MappedPage {
     return state.page_map.getPtr(vaddr);
 }
 
@@ -754,7 +681,7 @@ fn insertPage(
     cap_owner: ?*sos.cspace_t,
     owns_frame: bool,
     owns_cap: bool,
-) VmError!*PageEntry {
+) VmError!*MappedPage {
     if (owns_cap and cap_owner == null) {
         _ = c.printf("[vm_map] insertPage missing cap_owner for vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
         return VmError.InvalidArgs;
@@ -772,7 +699,7 @@ fn insertPage(
         return VmError.Capacity;
     }
 
-    state.page_map.put(vaddr, PageEntry{
+    state.page_map.put(vaddr, MappedPage{
         .frame_ref = frame_ref,
         .cap_slot = cap_slot,
         .cap_owner = cap_owner,
@@ -785,13 +712,13 @@ fn insertPage(
     return state.page_map.getPtr(vaddr).?;
 }
 
-fn leaseMmapRegion(state: *VmClientState, base: usize, prot: c_int) VmError!*VmRegion {
+fn leaseMmapRegion(state: *VmClientState, base: usize, prot: c_int) VmError!*region_mod.Region {
     if (state.mmap_regions.items.len >= MAX_MMAP_REGIONS) {
         _ = c.printf("[vm_mmap] no free region slots\n");
         return VmError.Capacity;
     }
 
-    state.mmap_regions.append(state.metadataAllocator(), VmRegion{}) catch {
+    state.mmap_regions.append(state.metadataAllocator(), region_mod.Region{}) catch {
         return VmError.Capacity;
     };
     const reg = &state.mmap_regions.items[state.mmap_regions.items.len - 1];
@@ -801,7 +728,7 @@ fn leaseMmapRegion(state: *VmClientState, base: usize, prot: c_int) VmError!*VmR
     return reg;
 }
 
-fn releaseMmapRegion(state: *VmClientState, tracker: *VmRegion) void {
+fn releaseMmapRegion(state: *VmClientState, tracker: *region_mod.Region) void {
     if (!tracker.used) return;
     if (state.active_mmaps > 0) state.active_mmaps -= 1;
     const base_ptr = state.mmap_regions.items.ptr;
@@ -809,49 +736,17 @@ fn releaseMmapRegion(state: *VmClientState, tracker: *VmRegion) void {
     _ = state.mmap_regions.swapRemove(idx);
 }
 
-fn findMmapRegion(state: *VmClientState, addr: usize) ?*VmRegion {
+fn findMmapRegion(state: *VmClientState, addr: usize) ?*region_mod.Region {
     for (state.mmap_regions.items) |*reg| {
         if (reg.contains(addr)) return reg;
     }
     return null;
 }
 
-fn encodeProtFlags(readable: bool, writable: bool, executable: bool) c_int {
-    var prot: c_int = 0;
-    if (readable) prot |= sos.PROT_READ;
-    if (writable) prot |= sos.PROT_WRITE;
-    if (executable) prot |= sos.PROT_EXEC;
-    return prot;
-}
-
-fn rightsFromBooleans(readable: bool, writable: bool) sel4.seL4_CapRights_t {
-    return sel4.seL4_CapRights_new(
-        0,
-        0,
-        if (readable) 1 else 0,
-        if (writable) 1 else 0,
-    );
-}
-
-fn mergeCapRights(a: sel4.seL4_CapRights_t, b: sel4.seL4_CapRights_t) sel4.seL4_CapRights_t {
-    var merged = a;
-    merged.words[0] = merged.words[0] | b.words[0];
-    return merged;
-}
-
 fn toSosRights(rights: sel4.seL4_CapRights_t) sos.seL4_CapRights_t {
     var converted: sos.seL4_CapRights_t = undefined;
     converted.words[0] = rights.words[0];
     return converted;
-}
-
-fn protToData(prot: c_int) u60 {
-    const masked: u64 = @as(u64, @intCast(prot)) & ((@as(u64, 1) << 60) - 1);
-    return @intCast(masked);
-}
-
-fn dataToProt(data: u60) c_int {
-    return @intCast(@as(u64, data));
 }
 
 pub export fn vm_state_acquire(client: *sos.client_t) callconv(.c) *VmHandle {
@@ -909,8 +804,8 @@ pub export fn vm_register_stack_mapping(handle: *VmHandle, vaddr: usize, frame_r
     state.mapped_count = state.page_map.count();
     state.stack_region.updateAccess(true, true, false);
     state.stack_region.recordMapping(vaddr, PAGE_SIZE_4K);
-    if (state.stack_region.region.start < state.stack_low) {
-        state.stack_low = state.stack_region.region.start;
+    if (state.stack_region.start < state.stack_low) {
+        state.stack_low = state.stack_region.start;
     }
 }
 
@@ -975,4 +870,3 @@ pub const logging = logging_pkg;
 pub const addr_space = addr_space_pkg;
 pub const region = region_mod;
 pub const mapping = mapping_mod;
-pub const page = page_mod;
