@@ -1,5 +1,5 @@
 pub const MetadataAllocator = struct {
-    state: ?*client.VmClientState = null,
+    state: ?*client.Client = null,
 
     const vtable = std.mem.Allocator.VTable{
         .alloc = allocFn,
@@ -8,7 +8,7 @@ pub const MetadataAllocator = struct {
         .free = freeFn,
     };
 
-    pub fn init(self: *MetadataAllocator, state: *client.VmClientState) void {
+    pub fn init(self: *MetadataAllocator, state: *client.Client) void {
         self.state = state;
     }
 

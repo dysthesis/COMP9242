@@ -1,3 +1,5 @@
+//! This module is the entrypoint to the virtual memory management system.
+
 extern var cspace: sos.cspace_t;
 
 pub const VmHandle = struct {
@@ -30,10 +32,23 @@ pub const VmHandle = struct {
         return self.client.?;
     }
 
-    pub fn getState(self: *Self) *client.VmClientState {
+    pub fn getState(self: *Self) *client.Client {
         validate(self);
         bootstrapVmStates();
         return &vm_states[self.idx];
+    }
+
+    pub fn ensureVmState(self: *Self) *client.Client {
+        const idx = self.idx;
+        const cl = self.getClient();
+        const state = self.getState();
+        if (!state.initialised) {
+            _ = c.printf("[vm_state] initialise idx=%lu caller=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))));
+            state.init(idx);
+        } else {
+            _ = c.printf("[vm_state] reuse idx=%lu caller=0x%lx heap_break=0x%lx mapped_end=0x%lx stack_low=0x%lx active_mmaps=%lu mapped_pages=%lu\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(state.stack_low)), @as(c_ulong, @intCast(state.active_mmaps)), @as(c_ulong, @intCast(state.mapped_count)));
+        }
+        return state;
     }
 };
 
@@ -59,16 +74,16 @@ pub const VmError = error{
 
 const MAX_CLIENTS: usize = sos.MAX_CLIENTS;
 pub const PAGE_SIZE_4K: usize = sos.PAGE_SIZE_4K;
-const HEAP_BASE: usize = 0x40000000;
-const MMAP_BASE: usize = 0x80000000;
-const HEAP_LIMIT: usize = MMAP_BASE - PAGE_SIZE_4K;
-const STACK_TOP_RAW: usize = sos.PROCESS_STACK_TOP;
-const STACK_TOP: usize = STACK_TOP_RAW & ~(PAGE_SIZE_4K - 1);
-const STACK_MAX_BYTES: usize = 64 * 1024 * 1024;
-const STACK_GUARD_BASE: usize = STACK_TOP - STACK_MAX_BYTES;
-const MMAP_LIMIT: usize = STACK_GUARD_BASE - PAGE_SIZE_4K;
-const MAX_MAPPED_PAGES: usize = 4096;
-const MAX_MMAP_REGIONS: usize = 64;
+pub const HEAP_BASE: usize = 0x40000000;
+pub const MMAP_BASE: usize = 0x80000000;
+pub const HEAP_LIMIT: usize = MMAP_BASE - PAGE_SIZE_4K;
+pub const STACK_TOP_RAW: usize = sos.PROCESS_STACK_TOP;
+pub const STACK_TOP: usize = STACK_TOP_RAW & ~(PAGE_SIZE_4K - 1);
+pub const STACK_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub const STACK_GUARD_BASE: usize = STACK_TOP - STACK_MAX_BYTES;
+pub const MMAP_LIMIT: usize = STACK_GUARD_BASE - PAGE_SIZE_4K;
+pub const MAX_MAPPED_PAGES: usize = 4096;
+pub const MAX_MMAP_REGIONS: usize = 64;
 
 comptime {
     if (MAX_MAPPED_PAGES == 0 or (MAX_MAPPED_PAGES & (MAX_MAPPED_PAGES - 1)) != 0) {
@@ -85,78 +100,17 @@ comptime {
     }
 }
 
-var vm_states: [MAX_CLIENTS]client.VmClientState = undefined;
+var vm_states: [MAX_CLIENTS]client.Client = undefined;
 var vm_states_initialised = false;
-
-fn initVmState(state: *client.VmClientState, idx: usize) void {
-    state.initialised = true;
-    state.heap_break = HEAP_BASE;
-    state.heap_mapped_end = HEAP_BASE;
-    state.mmap_next = MMAP_BASE;
-    state.stack_guard = STACK_GUARD_BASE;
-    state.stack_low = STACK_TOP;
-    state.stack_top = STACK_TOP;
-    state.mapped_count = 0;
-    state.active_mmaps = 0;
-
-    state.heap_region.reset(region.RegionKind.Heap);
-    state.heap_region.configure(HEAP_BASE, region.RegionKind.Heap, DEFAULT_HEAP_PROT);
-
-    state.stack_region.reset(region.RegionKind.Stack);
-    state.stack_region.configure(STACK_TOP, region.RegionKind.Stack, DEFAULT_STACK_PROT);
-
-    state.metadata_base = allocator.METADATA_REGION_START + idx * allocator.METADATA_REGION_BYTES;
-    state.metadata_cursor = state.metadata_base;
-    state.metadata_mapped = 0;
-    state.metadata_page_count = 0;
-    state.metadata_allocator.init(state);
-    state.metadata_alloc_handle = state.metadata_allocator.allocator();
-    state.page_map = client.PageMap.init(state.metadata_alloc_handle);
-    state.mmap_regions = client.RegionList{};
-}
-
-fn releaseAllVmPages(state: *client.VmClientState) void {
-    var it = state.page_map.iterator();
-    while (it.next()) |kv| {
-        kv.value_ptr.release();
-    }
-    state.page_map.clearRetainingCapacity();
-    state.mapped_count = 0;
-}
-
-fn teardownVmState(state: *client.VmClientState) void {
-    if (!state.initialised) {
-        state.* = client.VmClientState{};
-        return;
-    }
-    releaseAllVmPages(state);
-    state.page_map.deinit();
-    state.mmap_regions.deinit(state.metadata_alloc_handle);
-    state.metadata_allocator.deinit();
-    state.* = client.VmClientState{};
-}
 
 fn bootstrapVmStates() void {
     if (vm_states_initialised) {
         return;
     }
     for (&vm_states) |*state| {
-        state.* = client.VmClientState{};
+        state.* = client.Client{};
     }
     vm_states_initialised = true;
-}
-
-fn ensureVmState(handle: *VmHandle) *client.VmClientState {
-    const idx = handle.idx;
-    const cl = handle.getClient();
-    const state = handle.getState();
-    if (!state.initialised) {
-        _ = c.printf("[vm_state] initialise idx=%lu caller=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))));
-        initVmState(state, idx);
-    } else {
-        _ = c.printf("[vm_state] reuse idx=%lu caller=0x%lx heap_break=0x%lx mapped_end=0x%lx stack_low=0x%lx active_mmaps=%lu mapped_pages=%lu\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(state.stack_low)), @as(c_ulong, @intCast(state.active_mmaps)), @as(c_ulong, @intCast(state.mapped_count)));
-    }
-    return state;
 }
 
 pub fn vmErrorToErrno(err: VmError) c_int {
@@ -172,7 +126,7 @@ pub fn vmErrorToErrno(err: VmError) c_int {
     };
 }
 
-fn mapAnonymousPage(handle: *VmHandle, state: *client.VmClientState, vaddr: usize, tracker: *region.Region) VmError!void {
+fn mapAnonymousPage(handle: *VmHandle, state: *client.Client, vaddr: usize, tracker: *region.Region) VmError!void {
     if (!tracker.used) {
         return VmError.InvalidArgs;
     }
@@ -186,7 +140,7 @@ fn mapAnonymousPage(handle: *VmHandle, state: *client.VmClientState, vaddr: usiz
 
     _ = c.printf("[vm_map] enter caller=0x%lx vaddr=0x%lx read=%d write=%d exec=%d mapped_count=%lu\n", @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(vaddr)), @as(c_int, if (readable) 1 else 0), @as(c_int, if (writable) 1 else 0), @as(c_int, if (executable) 1 else 0), @as(c_ulong, @intCast(state.mapped_count)));
 
-    if (findPage(state, vaddr) != null) {
+    if (state.findPage(vaddr) != null) {
         _ = c.printf("[vm_map] already mapped vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
         return;
     }
@@ -283,7 +237,7 @@ fn mapAnonymousPage(handle: *VmHandle, state: *client.VmClientState, vaddr: usiz
 }
 
 pub fn brkImpl(handle: *VmHandle, requested: usize) VmError!usize {
-    const state = ensureVmState(handle);
+    const state = handle.ensureVmState();
     const caller_ptr: c_ulong = @intCast(@intFromPtr(handle.getClient()));
     _ = c.printf("[vm_brk] enter caller=0x%lx requested=0x%lx heap_break=0x%lx mapped_end=0x%lx limit=0x%lx\n", caller_ptr, @as(c_ulong, @intCast(requested)), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(HEAP_LIMIT)));
 
@@ -358,7 +312,7 @@ pub fn mmapImpl(handle: *VmHandle, addr: usize, length: usize, prot: c_int, flag
     const executable = (prot & sos.PROT_EXEC) != 0;
     _ = c.printf("[vm_mmap] permissions read=%d write=%d exec=%d\n", @as(c_int, if (readable) 1 else 0), @as(c_int, if (writable) 1 else 0), @as(c_int, if (executable) 1 else 0));
 
-    const state = ensureVmState(handle);
+    const state = handle.ensureVmState();
     if (state.mmap_next + aligned > MMAP_LIMIT) {
         _ = c.printf("[vm_mmap] exceeds limit mmap_next=0x%lx aligned=0x%lx limit=0x%lx\n", @as(c_ulong, @intCast(state.mmap_next)), @as(c_ulong, @intCast(aligned)), @as(c_ulong, @intCast(MMAP_LIMIT)));
         return VmError.Bounds;
@@ -397,10 +351,10 @@ pub fn mmapImpl(handle: *VmHandle, addr: usize, length: usize, prot: c_int, flag
 fn handleVmFaultInternal(handle: *VmHandle, fault_addr: usize, want_write: bool, is_fetch: bool) VmError!void {
     _ = want_write;
     _ = is_fetch;
-    const state = ensureVmState(handle);
+    const state = handle.ensureVmState();
     const base = pageBase(fault_addr);
 
-    if (findPage(state, base) != null) {
+    if (state.findPage(base) != null) {
         return;
     }
 
@@ -451,12 +405,8 @@ fn pageBase(addr: usize) usize {
     return alignDown(addr, PAGE_SIZE_4K);
 }
 
-fn findPage(state: *client.VmClientState, vaddr: usize) ?*page.MappedPage {
-    return state.page_map.getPtr(vaddr);
-}
-
 fn insertPage(
-    state: *client.VmClientState,
+    state: *client.Client,
     vaddr: usize,
     frame_ref: usize,
     cap_slot: sel4.seL4_CPtr,
@@ -494,7 +444,7 @@ fn insertPage(
     return state.page_map.getPtr(vaddr).?;
 }
 
-fn leaseMmapRegion(state: *client.VmClientState, base: usize, prot: c_int) VmError!*region.Region {
+fn leaseMmapRegion(state: *client.Client, base: usize, prot: c_int) VmError!*region.Region {
     if (state.mmap_regions.items.len >= MAX_MMAP_REGIONS) {
         _ = c.printf("[vm_mmap] no free region slots\n");
         return VmError.Capacity;
@@ -510,7 +460,7 @@ fn leaseMmapRegion(state: *client.VmClientState, base: usize, prot: c_int) VmErr
     return reg;
 }
 
-fn releaseMmapRegion(state: *client.VmClientState, tracker: *region.Region) void {
+fn releaseMmapRegion(state: *client.Client, tracker: *region.Region) void {
     if (!tracker.used) return;
     if (state.active_mmaps > 0) state.active_mmaps -= 1;
     const base_ptr = state.mmap_regions.items.ptr;
@@ -518,7 +468,7 @@ fn releaseMmapRegion(state: *client.VmClientState, tracker: *region.Region) void
     _ = state.mmap_regions.swapRemove(idx);
 }
 
-fn findMmapRegion(state: *client.VmClientState, addr: usize) ?*region.Region {
+fn findMmapRegion(state: *client.Client, addr: usize) ?*region.Region {
     for (state.mmap_regions.items) |*reg| {
         if (reg.contains(addr)) return reg;
     }
@@ -541,7 +491,7 @@ pub export fn vm_state_acquire(cl: *sos.client_t) callconv(.c) *VmHandle {
     };
     vm_handle_active[idx] = true;
     const handle = &vm_handles[idx];
-    _ = ensureVmState(handle);
+    _ = handle.ensureVmState();
     return handle;
 }
 
@@ -573,11 +523,11 @@ pub export fn vm_state_release(cl: *sos.client_t) callconv(.c) void {
     }
     vm_handle_active[idx] = false;
     vm_handles[idx] = VmHandle{ .idx = idx, .generation = 0, .client = null };
-    teardownVmState(&vm_states[idx]);
+    _ = &vm_states[idx].teardown();
 }
 
 pub export fn vm_register_stack_mapping(handle: *VmHandle, vaddr: usize, frame_ref: usize, cap_slot: sel4.seL4_CPtr) callconv(.c) void {
-    const state = ensureVmState(handle);
+    const state = handle.ensureVmState();
     _ = insertPage(state, vaddr, frame_ref, cap_slot, null, false, false) catch |err| {
         const errno = vmErrorToErrno(err);
         _ = c.printf("[vm_stack] failed to record mapping errno=%d vaddr=0x%lx\n", errno, @as(c_ulong, @intCast(vaddr)));
@@ -592,7 +542,7 @@ pub export fn vm_register_stack_mapping(handle: *VmHandle, vaddr: usize, frame_r
 }
 
 pub export fn vm_report_initial_stack(handle: *VmHandle, mapped_bottom: usize) callconv(.c) void {
-    const state = ensureVmState(handle);
+    const state = handle.ensureVmState();
     if (!state.stack_region.contains(mapped_bottom)) {
         state.stack_region.recordMapping(mapped_bottom, PAGE_SIZE_4K);
     }
@@ -607,8 +557,8 @@ pub export fn vm_reset_state(handle: *VmHandle) callconv(.c) void {
     const idx = handle.idx;
     const cl = handle.getClient();
     _ = c.printf("[vm_state] reset idx=%lu client=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))));
-    teardownVmState(&vm_states[idx]);
-    initVmState(&vm_states[idx], idx);
+    _ = &vm_states[idx].teardown();
+    _ = &vm_states[idx].init(idx);
 }
 
 pub export fn handle_vm_fault(
@@ -645,8 +595,8 @@ pub export fn handle_vm_fault(
     return true;
 }
 
-const DEFAULT_HEAP_PROT: c_int = sos.PROT_READ | sos.PROT_WRITE;
-const DEFAULT_STACK_PROT: c_int = sos.PROT_READ | sos.PROT_WRITE;
+pub const DEFAULT_HEAP_PROT: c_int = sos.PROT_READ | sos.PROT_WRITE;
+pub const DEFAULT_STACK_PROT: c_int = sos.PROT_READ | sos.PROT_WRITE;
 
 const std = @import("std");
 const cimports = @import("cimports");
