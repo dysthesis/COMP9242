@@ -8,6 +8,7 @@ const SyscallCallError = ipc.SyscallCallError;
 const cimports = @import("cimports");
 const sel4 = cimports.sel4;
 const c = cimports.c;
+const sos = cimports.sos;
 const sos_types = cimports.sos_types;
 
 pub export var sos_errno: c_int = 0;
@@ -35,7 +36,7 @@ fn handleCallError(err: SyscallCallError) c_int {
     switch (err) {
         error.EmptyReply, error.HasExtraCaps => {},
     }
-    return setErrno(c.EINVAL);
+    return setErrno(sos.EINVAL);
 }
 
 fn handleCallErrorVoid(err: SyscallCallError) void {
@@ -91,13 +92,13 @@ fn handleResult(result: c_int) c_int {
 
 pub export fn sos_open(path: [*c]const u8, mode: c_int) callconv(.c) c_int {
     if (path == null) {
-        return setErrno(c.EINVAL);
+        return setErrno(sos.EINVAL);
     }
 
     const path_bytes: [*]const u8 = @ptrCast(path);
     const len = strnlen(path_bytes, MAX_IO_BUF);
     if (len >= MAX_IO_BUF) {
-        return setErrno(c.ENAMETOOLONG);
+        return setErrno(sos.ENAMETOOLONG);
     }
 
     const copy_len = len + 1;
@@ -135,7 +136,7 @@ pub export fn sos_close(file: c_int) callconv(.c) c_int {
 
 pub export fn sos_read(file: c_int, buf: [*c]u8, nbyte: usize) callconv(.c) c_int {
     if (buf == null) {
-        return setErrno(c.EINVAL);
+        return setErrno(sos.EINVAL);
     }
     if (nbyte == 0) {
         clearErrno();
@@ -191,7 +192,7 @@ pub export fn sos_read(file: c_int, buf: [*c]u8, nbyte: usize) callconv(.c) c_in
 
 pub export fn sos_write(file: c_int, buf: [*c]const u8, nbyte: usize) callconv(.c) c_int {
     if (buf == null) {
-        return setErrno(c.EINVAL);
+        return setErrno(sos.EINVAL);
     }
     if (nbyte == 0) {
         clearErrno();
@@ -259,8 +260,8 @@ pub export fn sos_brk_call(new_break: usize) callconv(.c) i64 {
         .Brk = .{ .new_break = usizeToWord(new_break) },
     };
     const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| return switch (handleCallError(err)) {
-        -1 => -@as(i64, c.EINVAL),
-        else => -@as(i64, c.EINVAL),
+        -1 => -@as(i64, sos.EINVAL),
+        else => -@as(i64, sos.EINVAL),
     };
     return switch (reply) {
         .Brk => |payload| handleVmReturn(payload.result),
@@ -287,8 +288,8 @@ pub export fn sos_mmap_call(
         },
     };
     const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| return switch (handleCallError(err)) {
-        -1 => -@as(i64, c.EINVAL),
-        else => -@as(i64, c.EINVAL),
+        -1 => -@as(i64, sos.EINVAL),
+        else => -@as(i64, sos.EINVAL),
     };
     return switch (reply) {
         .Mmap => |payload| handleVmReturn(payload.result),
@@ -300,24 +301,24 @@ pub export fn sos_getdirent(pos: c_int, name: [*c]u8, nbyte: usize) callconv(.c)
     _ = pos;
     _ = name;
     _ = nbyte;
-    return setErrno(c.ENOSYS);
+    return setErrno(sos.ENOSYS);
 }
 
 pub export fn sos_stat(path: [*c]const u8, buf: ?*sos_types.sos_stat_t) callconv(.c) c_int {
     _ = path;
     _ = buf;
-    return setErrno(c.ENOSYS);
+    return setErrno(sos.ENOSYS);
 }
 
 pub export fn sos_process_create(path: [*c]const u8) callconv(.c) sos_types.pid_t {
     _ = path;
-    _ = setErrno(c.ENOSYS);
+    _ = setErrno(sos.ENOSYS);
     return -1;
 }
 
 pub export fn sos_process_delete(pid: sos_types.pid_t) callconv(.c) c_int {
     _ = pid;
-    return setErrno(c.ENOSYS);
+    return setErrno(sos.ENOSYS);
 }
 
 pub export fn sos_my_id() callconv(.c) sos_types.pid_t {
@@ -335,18 +336,18 @@ pub export fn sos_my_id() callconv(.c) sos_types.pid_t {
 pub export fn sos_process_status(processes: ?*sos_types.sos_process_t, max: c_uint) callconv(.c) c_int {
     _ = processes;
     _ = max;
-    return setErrno(c.ENOSYS);
+    return setErrno(sos.ENOSYS);
 }
 
 pub export fn sos_process_wait(pid: sos_types.pid_t) callconv(.c) sos_types.pid_t {
     _ = pid;
-    _ = setErrno(c.ENOSYS);
+    _ = setErrno(sos.ENOSYS);
     return -1;
 }
 
 pub export fn sos_usleep(usec: c_int) callconv(.c) void {
     if (usec < 0) {
-        _ = setErrno(c.EINVAL);
+        _ = setErrno(sos.EINVAL);
         return;
     }
 

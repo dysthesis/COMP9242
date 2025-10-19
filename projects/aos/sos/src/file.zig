@@ -1,11 +1,11 @@
-const ring_capacity: usize = @intCast(c.CONSOLE_RING_SIZE);
+const ring_capacity: usize = @intCast(sos.CONSOLE_RING_SIZE);
 
 extern fn sos_console_data_ready() callconv(.c) void;
 
 const console_name: [:0]const u8 = "console";
 const console_name_ptr: [*c]const u8 = @ptrCast(console_name.ptr);
 
-pub export var global_console: c.console_dev_t = .{
+pub export var global_console: sos.console_dev_t = .{
     .reader_in_use = false,
     .reader_owner_id = 0,
     .write_refcnt = 0,
@@ -72,12 +72,12 @@ const ConsoleDevice = struct {
             return;
         }
 
-        const netcon = c.sos_nc;
+        const netcon = sos.sos_nc;
         if (netcon == null) {
             return;
         }
 
-        _ = c.network_console_register_handler(netcon, nc_input_handler);
+        _ = sos.network_console_register_handler(netcon, nc_input_handler);
         self.input_handler_registered = true;
     }
 
@@ -98,21 +98,21 @@ const ConsoleDevice = struct {
     /// Open handler for the console
     fn open(self: *ConsoleDevice, name: [*c]const u8, mode: c_int, out_id: ?*c_int) c_int {
         if (name == null or out_id == null) {
-            return -c.EINVAL;
+            return -sos.EINVAL;
         }
 
         if (!ConsoleDevice.nameMatches(name)) {
-            return -c.ENODEV;
+            return -sos.ENODEV;
         }
 
         self.ensureInputHandler();
-        if (c.sos_nc == null) {
-            return -c.ENODEV;
+        if (sos.sos_nc == null) {
+            return -sos.ENODEV;
         }
 
         const badge = ConsoleDevice.badgeFromMode(mode);
         if (badge == 0) {
-            return -c.EINVAL;
+            return -sos.EINVAL;
         }
 
         out_id.?.* = @as(c_int, badge);
@@ -126,7 +126,7 @@ const ConsoleDevice = struct {
         }
 
         if (self.ring.isEmpty()) {
-            return -c.EWOULDBLOCK;
+            return -sos.EWOULDBLOCK;
         }
 
         const raw_ptr: [*]u8 = @ptrCast(buf.?);
@@ -142,16 +142,16 @@ const ConsoleDevice = struct {
         }
 
         _ = self;
-        const netcon = c.sos_nc;
+        const netcon = sos.sos_nc;
         if (netcon == null) {
-            return -c.ENODEV;
+            return -sos.ENODEV;
         }
 
         const max_c_len = @as(usize, @intCast(std.math.maxInt(c_int)));
         const usable_len = @min(len, max_c_len);
-        const len_int = std.math.cast(c_int, usable_len) orelse return -c.EINVAL;
+        const len_int = std.math.cast(c_int, usable_len) orelse return -sos.EINVAL;
         const data_ptr: [*c]u8 = @ptrCast(buf.?);
-        const sent = c.network_console_send(netcon, data_ptr, len_int);
+        const sent = sos.network_console_send(netcon, data_ptr, len_int);
         return @as(isize, @intCast(sent));
     }
 
@@ -179,7 +179,7 @@ const ConsoleDevice = struct {
 var console_device = ConsoleDevice{};
 
 fn nc_input_handler(
-    _: ?*c.struct_network_console,
+    _: ?*sos.struct_network_console,
     ch: c_char,
 ) callconv(.c) void {
     console_device.handleInput(@bitCast(ch));
@@ -213,21 +213,21 @@ pub export fn console_write(
     return console_device.write(buf, len);
 }
 
-var console_ops = c.file_ops_t{
+var console_ops = sos.file_ops_t{
     .open = console_open,
     .read = console_read,
     .write = console_write,
     .close = console_close,
 };
 
-pub export var devices: [1]c.dev_reg_t = [_]c.dev_reg_t{.{
+pub export var devices: [1]sos.dev_reg_t = [_]sos.dev_reg_t{.{
     .name = console_name_ptr,
     .ops = &console_ops,
 }};
 
 pub export var dev_table_len: usize = devices.len;
 
-pub export fn vfs_lookup_ops(name: [*c]const u8) ?*const c.file_ops_t {
+pub export fn vfs_lookup_ops(name: [*c]const u8) ?*const sos.file_ops_t {
     if (!ConsoleDevice.nameMatches(name)) {
         return null;
     }
@@ -238,3 +238,4 @@ const std = @import("std");
 
 const cimports = @import("cimports");
 const c = cimports.c;
+const sos = cimports.sos;

@@ -102,6 +102,11 @@ uint8_t generations[MAX_CLIENTS]; // keep track of the current generation
 uint16_t free_ids[MAX_CLIENTS];   // free IDs for new clients
 size_t free_top;
 
+extern void vm_register_stack_mapping(client_t *client, uintptr_t vaddr,
+                                      frame_ref_t frame_ref, seL4_CPtr slot);
+extern void vm_report_initial_stack(client_t *client, uintptr_t mapped_bottom);
+extern void vm_reset_state(client_t *client);
+
 /* the one process we start */
 static struct {
   ut_t *tcb_ut;
@@ -119,8 +124,10 @@ static struct {
 
   cspace_t cspace;
 
-  ut_t *stack_ut;
-  seL4_CPtr stack;
+  frame_ref_t stack_frames[INITIAL_PROCESS_EXTRA_STACK_PAGES + 1];
+  seL4_CPtr stack_slots[INITIAL_PROCESS_EXTRA_STACK_PAGES + 1];
+  size_t stack_frame_count;
+  seL4_CPtr fault_ep_slot;
 } user_process;
 
 /* Temporary helpers until a general VM subsystem is in place. */
@@ -243,16 +250,93 @@ static int stack_write(seL4_Word *mapped_stack, int index, uintptr_t val) {
   return index - 1;
 }
 
+static void cleanup_stack_frames(void) {
+  while (user_process.stack_frame_count > 0) {
+    user_process.stack_frame_count--;
+    frame_ref_t frame = user_process.stack_frames[user_process.stack_frame_count];
+    seL4_CPtr slot = user_process.stack_slots[user_process.stack_frame_count];
+
+    if (slot != seL4_CapNull) {
+      seL4_Error err = seL4_ARM_Page_Unmap(slot);
+      if (err != seL4_NoError) {
+        ZF_LOGW("Failed to unmap stack slot %zu (err=%d)",
+                user_process.stack_frame_count, err);
+      }
+      err = cspace_delete(&cspace, slot);
+      if (err != seL4_NoError) {
+        ZF_LOGW("Failed to delete stack slot %zu (err=%d)",
+                user_process.stack_frame_count, err);
+      }
+      cspace_free_slot(&cspace, slot);
+      user_process.stack_slots[user_process.stack_frame_count] = seL4_CapNull;
+    }
+
+    if (frame != NULL_FRAME) {
+      free_frame(frame);
+      user_process.stack_frames[user_process.stack_frame_count] = NULL_FRAME;
+    }
+  }
+}
+
+static int map_process_stack_page(uintptr_t vaddr) {
+  if (user_process.stack_frame_count >= ARRAY_SIZE(user_process.stack_frames)) {
+    ZF_LOGE("Stack frame tracking overflow");
+    return -1;
+  }
+
+  frame_ref_t frame = alloc_frame();
+  if (frame == NULL_FRAME) {
+    ZF_LOGE("Failed to allocate stack frame");
+    return -1;
+  }
+
+  unsigned char *bytes = frame_data(frame);
+  memset(bytes, 0, PAGE_SIZE_4K);
+
+  seL4_CPtr slot = cspace_alloc_slot(&cspace);
+  if (slot == seL4_CapNull) {
+    free_frame(frame);
+    ZF_LOGE("Failed to allocate slot for stack frame");
+    return -1;
+  }
+
+  seL4_Error err =
+      cspace_copy(&cspace, slot, frame_table_cspace(), frame_page(frame),
+                  seL4_AllRights);
+  if (err != seL4_NoError) {
+    cspace_free_slot(&cspace, slot);
+    free_frame(frame);
+    ZF_LOGE("Failed to copy stack frame cap");
+    return -1;
+  }
+
+  seL4_CapRights_t rights = seL4_CapRights_new(0, 0, 1, 1);
+  err = map_frame(&cspace, slot, user_process.vspace, vaddr, rights,
+                  seL4_ARM_Default_VMAttributes);
+  if (err != seL4_NoError) {
+    cspace_delete(&cspace, slot);
+    cspace_free_slot(&cspace, slot);
+    free_frame(frame);
+    ZF_LOGE("Unable to map stack frame for user app");
+    return -1;
+  }
+
+  vm_register_stack_mapping(user_process.client, vaddr, frame, slot);
+
+  user_process.stack_frames[user_process.stack_frame_count] = frame;
+  user_process.stack_slots[user_process.stack_frame_count] = slot;
+  user_process.stack_frame_count++;
+  return 0;
+}
+
 /* set up System V ABI compliant stack, so that the process can
  * start up and initialise the C library */
 static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace,
                                     elf_t *elf_file) {
-  /* Create a stack frame */
-  user_process.stack_ut = alloc_retype(&user_process.stack,
-                                       seL4_ARM_SmallPageObject, seL4_PageBits);
-  if (user_process.stack_ut == NULL) {
-    ZF_LOGE("Failed to allocate stack");
-    return 0;
+  user_process.stack_frame_count = 0;
+  for (size_t i = 0; i < ARRAY_SIZE(user_process.stack_frames); i++) {
+    user_process.stack_frames[i] = NULL_FRAME;
+    user_process.stack_slots[i] = seL4_CapNull;
   }
 
   /* virtual addresses in the target process' address space */
@@ -270,38 +354,38 @@ static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace,
     return 0;
   }
 
-  /* Map in the stack frame for the user app */
-  seL4_Error err =
-      map_frame(cspace, user_process.stack, user_process.vspace, stack_bottom,
-                seL4_AllRights, seL4_ARM_Default_VMAttributes);
-  if (err != 0) {
-    ZF_LOGE("Unable to map stack for user app");
+  seL4_Error err;
+  seL4_CPtr local_stack_cptr = seL4_CapNull;
+  seL4_CapRights_t stack_rights = seL4_CapRights_new(0, 0, 1, 1);
+
+  if (map_process_stack_page(stack_bottom) != 0) {
+    cleanup_stack_frames();
     return 0;
   }
 
-  /* allocate a slot to duplicate the stack frame cap so we can map it into our
-   * address space */
-  seL4_CPtr local_stack_cptr = cspace_alloc_slot(cspace);
+  local_stack_cptr = cspace_alloc_slot(cspace);
   if (local_stack_cptr == seL4_CapNull) {
     ZF_LOGE("Failed to alloc slot for stack");
+    cleanup_stack_frames();
     return 0;
   }
 
-  /* copy the stack frame cap into the slot */
-  err = cspace_copy(cspace, local_stack_cptr, cspace, user_process.stack,
-                    seL4_AllRights);
+  err = cspace_copy(cspace, local_stack_cptr, frame_table_cspace(),
+                    frame_page(user_process.stack_frames[0]), seL4_AllRights);
   if (err != seL4_NoError) {
     cspace_free_slot(cspace, local_stack_cptr);
-    ZF_LOGE("Failed to copy cap");
+    ZF_LOGE("Failed to copy cap for local stack mapping");
+    cleanup_stack_frames();
     return 0;
   }
 
-  /* map it into the sos address space */
   err = map_frame(cspace, local_stack_cptr, local_vspace, local_stack_bottom,
-                  seL4_AllRights, seL4_ARM_Default_VMAttributes);
+                  stack_rights, seL4_ARM_Default_VMAttributes);
   if (err != seL4_NoError) {
     cspace_delete(cspace, local_stack_cptr);
     cspace_free_slot(cspace, local_stack_cptr);
+    ZF_LOGE("Failed to map stack into SOS");
+    cleanup_stack_frames();
     return 0;
   }
 
@@ -352,45 +436,18 @@ static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace,
 
   /* mark the slot as free */
   cspace_free_slot(cspace, local_stack_cptr);
+  local_stack_cptr = seL4_CapNull;
 
   /* Exend the stack with extra pages */
   for (int page = 0; page < INITIAL_PROCESS_EXTRA_STACK_PAGES; page++) {
     stack_bottom -= PAGE_SIZE_4K;
-    frame_ref_t frame = alloc_frame();
-    if (frame == NULL_FRAME) {
-      ZF_LOGE("Couldn't allocate additional stack frame");
-      return 0;
-    }
-
-    /* allocate a slot to duplicate the stack frame cap so we can map it into
-     * the application */
-    seL4_CPtr frame_cptr = cspace_alloc_slot(cspace);
-    if (frame_cptr == seL4_CapNull) {
-      free_frame(frame);
-      ZF_LOGE("Failed to alloc slot for stack extra stack frame");
-      return 0;
-    }
-
-    /* copy the stack frame cap into the slot */
-    err = cspace_copy(cspace, frame_cptr, cspace, frame_page(frame),
-                      seL4_AllRights);
-    if (err != seL4_NoError) {
-      cspace_free_slot(cspace, frame_cptr);
-      free_frame(frame);
-      ZF_LOGE("Failed to copy cap");
-      return 0;
-    }
-
-    err = map_frame(cspace, frame_cptr, user_process.vspace, stack_bottom,
-                    seL4_AllRights, seL4_ARM_Default_VMAttributes);
-    if (err != 0) {
-      cspace_delete(cspace, frame_cptr);
-      cspace_free_slot(cspace, frame_cptr);
-      free_frame(frame);
-      ZF_LOGE("Unable to map extra stack frame for user app");
+    if (map_process_stack_page(stack_bottom) != 0) {
+      cleanup_stack_frames();
       return 0;
     }
   }
+
+  vm_report_initial_stack(user_process.client, stack_bottom);
 
   return stack_top;
 }
@@ -408,6 +465,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
   seL4_Word client_badge = 0;
   user_process.client = NULL;
   user_process.badge = 0;
+  user_process.fault_ep_slot = seL4_CapNull;
   /* Create a VSpace */
   user_process.vspace_ut = alloc_retype(
       &user_process.vspace, seL4_ARM_PageGlobalDirectoryObject, seL4_PGDBits);
@@ -463,6 +521,19 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
     goto out;
   }
 
+  user_process.fault_ep_slot = cspace_alloc_slot(&cspace);
+  if (user_process.fault_ep_slot == seL4_CapNull) {
+    ZF_LOGE("Failed to alloc slot for fault endpoint");
+    goto out;
+  }
+
+  err = cspace_mint(&cspace, user_process.fault_ep_slot, &cspace, ep,
+                    seL4_AllRights, client_badge);
+  if (err) {
+    ZF_LOGE("Failed to mint fault endpoint");
+    goto out;
+  }
+
   /* Create a new TCB object */
   user_process.tcb_ut =
       alloc_retype(&user_process.tcb, seL4_TCBObject, seL4_TCBBits);
@@ -505,7 +576,8 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
    */
   err = seL4_TCB_SetSchedParams(user_process.tcb, seL4_CapInitThreadTCB,
                                 seL4_MinPrio, APP_PRIORITY,
-                                user_process.sched_context, ep);
+                                user_process.sched_context,
+                                user_process.fault_ep_slot);
   if (err != seL4_NoError) {
     ZF_LOGE("Unable to set scheduling params");
     goto out;
@@ -534,6 +606,10 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
   /* set up the stack */
   seL4_Word sp =
       init_process_stack(&cspace, seL4_CapInitThreadVSpace, &elf_file);
+  if (sp == 0) {
+    ZF_LOGE("Failed to initialise process stack");
+    goto out;
+  }
 
   /* load the elf image from the cpio file */
   err = elf_load(&cspace, user_process.vspace, &elf_file);
@@ -563,9 +639,18 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
 
 out:
   if (!success && client) {
+    vm_reset_state(client);
     client_destroy(client, &cspace);
     user_process.client = NULL;
     user_process.badge = 0;
+  }
+  if (!success && user_process.fault_ep_slot != seL4_CapNull) {
+    cspace_delete(&cspace, user_process.fault_ep_slot);
+    cspace_free_slot(&cspace, user_process.fault_ep_slot);
+    user_process.fault_ep_slot = seL4_CapNull;
+  }
+  if (!success) {
+    cleanup_stack_frames();
   }
   return success;
 }

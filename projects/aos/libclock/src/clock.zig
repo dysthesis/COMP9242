@@ -7,7 +7,7 @@ const Timeout = struct {
     /// The absolute time when this timeout will be triggered
     deadline: u64,
     /// The function to call back to when the timeout expires
-    callback: c.timer_callback_t,
+    callback: sos.timer_callback_t,
     /// Data to feed in to the callback
     data: ?*anyopaque,
     /// Is this timeout active
@@ -26,7 +26,7 @@ const TimeoutSlots = std.ArrayList(?*Timeout);
 /// A counter-timebase pair representing a delay
 const Delay = struct {
     count: u16,
-    base: c.timeout_timebase_t,
+    base: sos.timeout_timebase_t,
 
     /// Construct a new delay from raw microseconds.
     fn from(us: u64) Delay {
@@ -34,30 +34,30 @@ const Delay = struct {
         if (us <= max16) {
             return .{
                 .count = @intCast(us),
-                .base = c.TIMEOUT_TIMEBASE_1_US,
+                .base = sos.TIMEOUT_TIMEBASE_1_US,
             };
         }
         if (us <= max16 * 10) {
             return .{
                 .count = @intCast(us / 10),
-                .base = c.TIMEOUT_TIMEBASE_10_US,
+                .base = sos.TIMEOUT_TIMEBASE_10_US,
             };
         }
         if (us <= max16 * 100) {
             return .{
                 .count = @intCast(us / 100),
-                .base = c.TIMEOUT_TIMEBASE_100_US,
+                .base = sos.TIMEOUT_TIMEBASE_100_US,
             };
         }
         if (us <= max16 * 1000) {
             return .{
                 .count = @intCast(us / 1000),
-                .base = c.TIMEOUT_TIMEBASE_1_MS,
+                .base = sos.TIMEOUT_TIMEBASE_1_MS,
             };
         }
         return .{
             .count = math.maxInt(u16),
-            .base = c.TIMEOUT_TIMEBASE_1_MS,
+            .base = sos.TIMEOUT_TIMEBASE_1_MS,
         };
     }
 };
@@ -74,7 +74,7 @@ fn destroyTimeout(timeout: *Timeout) void {
 /// Global clock
 const Clock = struct {
     /// Hardware clock registers
-    regs: ?*volatile c.meson_timer_reg_t,
+    regs: ?*volatile sos.meson_timer_reg_t,
     /// Is the clock running?
     running: bool,
     /// Queue of timeouts sorted by earliest due
@@ -97,12 +97,12 @@ const Clock = struct {
     /// Disable the clock hardware
     fn disableHardware(self: *Clock) void {
         if (self.regs) |regs| {
-            c.configure_timeout(
+            sos.configure_timeout(
                 regs,
-                c.MESON_TIMER_A,
+                sos.MESON_TIMER_A,
                 false,
                 false,
-                c.TIMEOUT_TIMEBASE_1_MS,
+                sos.TIMEOUT_TIMEBASE_1_MS,
                 0,
             );
         }
@@ -113,7 +113,7 @@ const Clock = struct {
         if (!self.running or self.regs == null) {
             return null;
         }
-        return c.read_timestamp(self.regs.?);
+        return sos.read_timestamp(self.regs.?);
     }
 
     /// Get rid of the head if it is inactive.
@@ -155,9 +155,9 @@ const Clock = struct {
         const diff: u64 = if (head.deadline > now) head.deadline - now else 0;
         const delay = Delay.from(diff);
 
-        c.configure_timeout(
+        sos.configure_timeout(
             self.regs.?,
-            c.MESON_TIMER_A,
+            sos.MESON_TIMER_A,
             true,
             false,
             delay.base,
@@ -212,48 +212,48 @@ const Clock = struct {
     /// Start the clock
     fn start(self: *Clock, timer_vaddr: [*c]u8) c_int {
         if (timer_vaddr == null) {
-            return c.CLOCK_R_FAIL;
+            return sos.CLOCK_R_FAIL;
         }
 
         if (self.running) {
             const stopped = self.stop();
-            if (stopped != c.CLOCK_R_OK) {
+            if (stopped != sos.CLOCK_R_OK) {
                 return stopped;
             }
         } else {
             self.resetState();
         }
 
-        const base_addr = @intFromPtr(timer_vaddr) + c.TIMER_REG_START;
-        self.regs = @as(*volatile c.meson_timer_reg_t, @ptrFromInt(base_addr));
+        const base_addr = @intFromPtr(timer_vaddr) + sos.TIMER_REG_START;
+        self.regs = @as(*volatile sos.meson_timer_reg_t, @ptrFromInt(base_addr));
 
-        c.configure_timestamp(self.regs.?, c.TIMESTAMP_TIMEBASE_1_US);
+        sos.configure_timestamp(self.regs.?, sos.TIMESTAMP_TIMEBASE_1_US);
         self.regs.?.timer_e = 0;
 
         if (self.queue.ensureTotalCapacityPrecise(INITIAL_TIMEOUTS)) |_| {} else |err| {
             logError("start_timer: failed to reserve queue capacity: {s}", .{@errorName(err)});
             _ = self.stop();
-            return c.CLOCK_R_FAIL;
+            return sos.CLOCK_R_FAIL;
         }
 
         if (self.slots.ensureTotalCapacityPrecise(heap_allocator, INITIAL_TIMEOUTS)) |_| {} else |err| {
             logError("start_timer: failed to reserve slot capacity: {s}", .{@errorName(err)});
             _ = self.stop();
-            return c.CLOCK_R_FAIL;
+            return sos.CLOCK_R_FAIL;
         }
 
         self.active_count = 0;
         self.running = true;
-        return c.CLOCK_R_OK;
+        return sos.CLOCK_R_OK;
     }
 
     /// Get the current time as a `timestamp_t`
-    fn getTime(self: *Clock) c.timestamp_t {
+    fn getTime(self: *Clock) sos.timestamp_t {
         return self.currentTime() orelse 0;
     }
 
     /// Register a new timeout, returning the resulting ID for that timeout
-    fn registerTimer(self: *Clock, delay: u64, callback: c.timer_callback_t, data: ?*anyopaque) u32 {
+    fn registerTimer(self: *Clock, delay: u64, callback: sos.timer_callback_t, data: ?*anyopaque) u32 {
         if (!self.running) {
             logError("register_timer: driver not initialised", .{});
             return 0;
@@ -318,18 +318,18 @@ const Clock = struct {
     /// Remove a timoeut by ID.
     fn removeTimer(self: *Clock, id: u32) c_int {
         if (!self.running) {
-            return c.CLOCK_R_UINT;
+            return sos.CLOCK_R_UINT;
         }
         if (id == 0) {
-            return c.CLOCK_R_FAIL;
+            return sos.CLOCK_R_FAIL;
         }
 
         const timeout = self.getTimeoutById(id) orelse {
-            return c.CLOCK_R_FAIL;
+            return sos.CLOCK_R_FAIL;
         };
 
         if (!timeout.active) {
-            return c.CLOCK_R_FAIL;
+            return sos.CLOCK_R_FAIL;
         }
 
         timeout.active = false;
@@ -339,22 +339,22 @@ const Clock = struct {
 
         const now = self.currentTime();
         self.scheduleEarliest(now);
-        return c.CLOCK_R_OK;
+        return sos.CLOCK_R_OK;
     }
 
-    fn handleIrq(self: *Clock, data: ?*anyopaque, irq: c.seL4_Word, irq_handler: c.seL4_IRQHandler) c_int {
+    fn handleIrq(self: *Clock, data: ?*anyopaque, irq: sel4.seL4_Word, irq_handler: sel4.seL4_IRQHandler) c_int {
         _ = data;
         _ = irq;
 
         if (!self.running or self.regs == null) {
-            return c.CLOCK_R_UINT;
+            return sos.CLOCK_R_UINT;
         }
 
         var now_opt = self.currentTime();
         if (now_opt == null) {
             self.scheduleEarliest(null);
-            _ = c.seL4_IRQHandler_Ack(irq_handler);
-            return c.CLOCK_R_UINT;
+            _ = sel4.seL4_IRQHandler_Ack(irq_handler);
+            return sos.CLOCK_R_UINT;
         }
         var now = now_opt.?;
 
@@ -391,13 +391,13 @@ const Clock = struct {
         }
 
         self.scheduleEarliest(now_opt);
-        _ = c.seL4_IRQHandler_Ack(irq_handler);
-        return c.CLOCK_R_OK;
+        _ = sel4.seL4_IRQHandler_Ack(irq_handler);
+        return sos.CLOCK_R_OK;
     }
 
     fn stop(self: *Clock) c_int {
         if (!self.running) {
-            return c.CLOCK_R_OK;
+            return sos.CLOCK_R_OK;
         }
 
         self.disableHardware();
@@ -407,7 +407,7 @@ const Clock = struct {
         self.regs = null;
         self.running = false;
 
-        return c.CLOCK_R_OK;
+        return sos.CLOCK_R_OK;
     }
 };
 
@@ -422,11 +422,11 @@ pub export fn start_timer(timer_vaddr: [*c]u8) callconv(.c) c_int {
     return default_clock.start(timer_vaddr);
 }
 
-pub export fn get_time() callconv(.c) c.timestamp_t {
+pub export fn get_time() callconv(.c) sos.timestamp_t {
     return default_clock.getTime();
 }
 
-pub export fn register_timer(delay: u64, callback: c.timer_callback_t, data: ?*anyopaque) callconv(.c) u32 {
+pub export fn register_timer(delay: u64, callback: sos.timer_callback_t, data: ?*anyopaque) callconv(.c) u32 {
     return default_clock.registerTimer(delay, callback, data);
 }
 
@@ -434,7 +434,7 @@ pub export fn remove_timer(id: u32) callconv(.c) c_int {
     return default_clock.removeTimer(id);
 }
 
-pub export fn timer_irq(data: ?*anyopaque, irq: c.seL4_Word, irq_handler: c.seL4_IRQHandler) callconv(.c) c_int {
+pub export fn timer_irq(data: ?*anyopaque, irq: sel4.seL4_Word, irq_handler: sel4.seL4_IRQHandler) callconv(.c) c_int {
     return default_clock.handleIrq(data, irq, irq_handler);
 }
 
@@ -514,6 +514,8 @@ const std = @import("std");
 
 const cimports = @import("cimports");
 const c = cimports.c;
+const sos = cimports.sos;
+const sel4 = cimports.sel4;
 
 const math = std.math;
 const Allocator = std.mem.Allocator;

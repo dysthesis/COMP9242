@@ -112,7 +112,7 @@ in {
         zigWrapper
         zlsWrapper
         unstable.zlint
-        unstable.ddgr
+        unstable.binsider
       ]
       ++ (with pkgs'.gcc11Stdenv; [
         gcc11

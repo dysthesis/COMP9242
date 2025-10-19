@@ -11,6 +11,8 @@ pub const SyscallNum = enum(u8) {
     Usleep = 5,
     Timestamp = 6,
     MyId = 7,
+    Brk = 8,
+    Mmap = 9,
 };
 
 pub const SyscallDeserialisationError = error{

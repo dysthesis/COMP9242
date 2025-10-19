@@ -99,3 +99,7 @@ client_t *client_create(seL4_CPtr vspace_root, seL4_Word *out_badge,
                         cspace_t *sos_cspace);
 client_t *client_lookup(seL4_Word badge);
 void client_destroy(client_t *client, cspace_t *sos_cspace);
+
+/* Temporary helpers until full multi-process support exists. */
+cspace_t *client_get_cspace(client_t *client);
+seL4_CPtr client_get_vspace(client_t *client);
