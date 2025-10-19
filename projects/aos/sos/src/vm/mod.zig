@@ -23,6 +23,23 @@ var vm_handles: [MAX_CLIENTS]VmHandle = [_]VmHandle{VmHandle{
 }} ** MAX_CLIENTS;
 var vm_handle_active: [MAX_CLIENTS]bool = [_]bool{false} ** MAX_CLIENTS;
 
+const ARENA_BYTES = 512 * 1024;
+var allocator_buffer: [ARENA_BYTES]u8 = undefined;
+var fixed_allocator_state = std.heap.FixedBufferAllocator.init(allocator_buffer[0..]);
+var fixed_allocator_inst = fixed_allocator_state.allocator();
+
+pub fn vmAllocator() *std.mem.Allocator {
+    return &fixed_allocator_inst;
+}
+
+fn allocatorSmokeTest() void {
+    const alloc = vmAllocator();
+    const buf = alloc.alloc(u8, 1) catch {
+        @panic("vm allocator smoke test alloc failed");
+    };
+    _ = buf; // monotonic allocator; leak is acceptable for smoke check
+}
+
 fn validateHandle(handle: *VmHandle) void {
     const idx = handle.idx;
     if (idx >= MAX_CLIENTS) {
@@ -130,19 +147,19 @@ const VmRegion = struct {
 
 pub const VmClientState = struct {
     initialised: bool = false,
-    heap_break: usize = HEAP_BASE,
-    heap_mapped_end: usize = HEAP_BASE,
-    mmap_next: usize = MMAP_BASE,
-    stack_guard: usize = STACK_GUARD_BASE,
-    stack_low: usize = STACK_TOP,
-    stack_top: usize = STACK_TOP,
+    heap_break: usize = 0,
+    heap_mapped_end: usize = 0,
+    mmap_next: usize = 0,
+    stack_guard: usize = 0,
+    stack_low: usize = 0,
+    stack_top: usize = 0,
     mapped_count: usize = 0,
     active_mmaps: usize = 0,
 
     heap_region: VmRegion = VmRegion{},
     stack_region: VmRegion = VmRegion{},
-    mmap_regions: [MAX_MMAP_REGIONS]VmRegion = [_]VmRegion{VmRegion{}} ** MAX_MMAP_REGIONS,
-    pages: [MAX_MAPPED_PAGES]page_pkg.Page = [_]page_pkg.Page{page_pkg.Page{}} ** MAX_MAPPED_PAGES,
+    mmap_regions: [MAX_MMAP_REGIONS]VmRegion = undefined,
+    pages: [MAX_MAPPED_PAGES]page_pkg.Page = undefined,
 };
 
 const MAX_CLIENTS: usize = sos.MAX_CLIENTS;
@@ -154,9 +171,9 @@ const STACK_TOP: usize = sos.PROCESS_STACK_TOP;
 const STACK_MAX_BYTES: usize = 64 * 1024 * 1024;
 const STACK_GUARD_BASE: usize = STACK_TOP - STACK_MAX_BYTES;
 const MMAP_LIMIT: usize = STACK_GUARD_BASE - PAGE_SIZE_4K;
-const MAX_MAPPED_PAGES: usize = 16384;
+const MAX_MAPPED_PAGES: usize = 4096;
 const MAX_MAPPED_MASK: usize = MAX_MAPPED_PAGES - 1;
-const MAX_MMAP_REGIONS: usize = 256;
+const MAX_MMAP_REGIONS: usize = 64;
 
 comptime {
     if (MAX_MAPPED_PAGES == 0 or (MAX_MAPPED_PAGES & (MAX_MAPPED_PAGES - 1)) != 0) {
@@ -632,6 +649,7 @@ pub export fn vm_state_acquire(client: *sos.client_t) callconv(.c) *VmHandle {
     };
     vm_handle_active[idx] = true;
     const handle = &vm_handles[idx];
+    allocatorSmokeTest();
     _ = ensureVmState(handle);
     return handle;
 }

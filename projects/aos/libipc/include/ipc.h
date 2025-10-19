@@ -9,7 +9,7 @@
 #include "sel4/simple_types.h"
 
 #define MAX_CLIENTS                                                            \
-  1024u // how many clients can perform a system call simultaneously
+  128u // how many clients can perform a system call simultaneously
 
 /*
  * We mint one badged endpoint capability per client so the server can identify
@@ -37,7 +37,7 @@
  * only when the slot is reused for a different client, preventing ABA (see:
  * https://en.wikipedia.org/wiki/ABA_problem).
  */
-#define ID_BITS 10u // log(MAX_CLIENTS)
+#define ID_BITS 7u // log(MAX_CLIENTS)
 #define GEN_BITS 8u
 #define ID_MASK ((1u << ID_BITS) - 1)
 #define GEN_MASK ((seL4_Word)((((seL4_Word)1u << GEN_BITS) - 1u)))
