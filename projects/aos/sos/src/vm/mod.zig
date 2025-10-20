@@ -209,7 +209,7 @@ pub fn mmapImpl(handle: *VmHandle, addr: usize, length: usize, prot: c_int, flag
     }
 
     const base = state.mmap_next;
-    const tracker = leaseMmapRegion(state, base, prot) catch |err| {
+    const tracker = state.leaseMmapRegion(base, prot) catch |err| {
         return err;
     };
 
@@ -229,7 +229,7 @@ pub fn mmapImpl(handle: *VmHandle, addr: usize, length: usize, prot: c_int, flag
     }
 
     if (map_failed) {
-        releaseMmapRegion(state, tracker);
+        state.releaseMmapRegion(tracker);
         return VmError.MapFailed;
     }
 
@@ -265,7 +265,7 @@ fn handleVmFaultInternal(handle: *VmHandle, fault_addr: usize, want_write: bool,
         return;
     }
 
-    if (findMmapRegion(state, base)) |tracker| {
+    if (state.findMmapRegion(base)) |tracker| {
         try state.mapAnonymousPage(handle, base, tracker);
         return;
     }
@@ -295,42 +295,13 @@ fn pageBase(addr: usize) usize {
     return alignDown(addr, PAGE_SIZE_4K);
 }
 
-fn leaseMmapRegion(state: *client.Client, base: usize, prot: c_int) VmError!*region.Region {
-    if (state.mmap_regions.items.len >= MAX_MMAP_REGIONS) {
-        _ = c.printf("[vm_mmap] no free region slots\n");
-        return VmError.Capacity;
-    }
-
-    state.mmap_regions.append(state.metadataAllocator(), region.Region{}) catch {
-        return VmError.Capacity;
-    };
-    const reg = &state.mmap_regions.items[state.mmap_regions.items.len - 1];
-    reg.reset(region.RegionKind.Mmap);
-    reg.configure(base, region.RegionKind.Mmap, prot);
-    state.active_mmaps += 1;
-    return reg;
-}
-
-fn releaseMmapRegion(state: *client.Client, tracker: *region.Region) void {
-    if (!tracker.used) return;
-    if (state.active_mmaps > 0) state.active_mmaps -= 1;
-    const base_ptr = state.mmap_regions.items.ptr;
-    const idx: usize = @intCast(tracker - base_ptr);
-    _ = state.mmap_regions.swapRemove(idx);
-}
-
-fn findMmapRegion(state: *client.Client, addr: usize) ?*region.Region {
-    for (state.mmap_regions.items) |*reg| {
-        if (reg.contains(addr)) return reg;
-    }
-    return null;
-}
-
 pub fn toSosRights(rights: sel4.seL4_CapRights_t) sos.seL4_CapRights_t {
     var converted: sos.seL4_CapRights_t = undefined;
     converted.words[0] = rights.words[0];
     return converted;
 }
+
+// Interface that we export to C
 
 pub export fn vm_state_acquire(cl: *sos.client_t) callconv(.c) *VmHandle {
     bootstrapVmStates();

@@ -290,6 +290,37 @@ pub const Client = struct {
     pub fn metadataIndex(self: *Client) usize {
         return (self.metadata_base - allocator.METADATA_REGION_START) / allocator.METADATA_REGION_BYTES;
     }
+
+    pub fn leaseMmapRegion(self: *Self, base: usize, prot: c_int) super.VmError!*region.Region {
+        if (self.mmap_regions.items.len >= super.MAX_MMAP_REGIONS) {
+            _ = c.printf("[vm_mmap] no free region slots\n");
+            return super.VmError.Capacity;
+        }
+
+        self.mmap_regions.append(self.metadataAllocator(), region.Region{}) catch {
+            return super.VmError.Capacity;
+        };
+        const reg = &self.mmap_regions.items[self.mmap_regions.items.len - 1];
+        reg.reset(region.RegionKind.Mmap);
+        reg.configure(base, region.RegionKind.Mmap, prot);
+        self.active_mmaps += 1;
+        return reg;
+    }
+
+    pub fn releaseMmapRegion(self: *Self, tracker: *region.Region) void {
+        if (!tracker.used) return;
+        if (self.active_mmaps > 0) self.active_mmaps -= 1;
+        const base_ptr = self.mmap_regions.items.ptr;
+        const idx: usize = @intCast(tracker - base_ptr);
+        _ = self.mmap_regions.swapRemove(idx);
+    }
+
+    pub fn findMmapRegion(self: *Self, addr: usize) ?*region.Region {
+        for (self.mmap_regions.items) |*reg| {
+            if (reg.contains(addr)) return reg;
+        }
+        return null;
+    }
 };
 
 // TODO: Replace this with proper integration to AddrSpace
