@@ -81,6 +81,8 @@ pub fn RbTree(
         root: *RbNode,
         len: usize,
 
+        pub const Node = K;
+
         pub fn init() Self {
             if (!nil_init) {
                 @branchHint(.unlikely);

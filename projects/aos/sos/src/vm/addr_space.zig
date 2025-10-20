@@ -1,7 +1,64 @@
 /// Per-process address space
 pub const AddrSpace = struct {
     regions: RegionMap,
+    pages: PageMap,
+    alloc: std.mem.Allocator,
+    vspace: sel4.seL4_CPtr = sel4.seL4_CapInitThreadVSpace,
+
+    pub const Self = @This();
+
+    /// Initialise a new address space
+    pub fn init(alloc: std.mem.Allocator) Self {
+        return .{
+            .regions = RegionMap.init(),
+            .pages = PageMap.init(alloc),
+            .alloc = alloc,
+        };
+    }
+
+    /// Destroy the address space
+    pub fn deinit(self: *Self) void {
+        self.pages.deinit();
+    }
+
+    pub inline fn getPtr(self: *Self, vaddr: usize) ?*page.MappedPage {
+        return self.pages.getPtr(vaddr);
+    }
+
+    pub inline fn put(self: *Self, vaddr: usize, mapped_page: page.MappedPage) !void {
+        try self.pages.put(vaddr, mapped_page);
+    }
+
+    pub inline fn num_mapped(self: *const Self) usize {
+        return self.pages.count();
+    }
+
+    pub inline fn iterator(self: *Self) @TypeOf(self.pages.iterator()) {
+        return self.pages.iterator();
+    }
+
+    pub inline fn clearRetainingCapacity(self: *Self) void {
+        self.pages.clearRetainingCapacity();
+    }
+
+    pub inline fn insertRegion(self: *Self, node: *RegionNode, coalesce: bool) !void {
+        try self.regions.insert(node, coalesce);
+    }
+
+    pub inline fn removeRegion(self: *Self, node: *RegionNode) void {
+        self.regions.erase(node);
+    }
+
+    pub inline fn findRegion(self: *const Self, addr: usize) ?*RegionNode {
+        return self.regions.find(addr);
+    }
+
+    pub inline fn findFreeGap(self: *const Self, size: usize, bottom: usize, top: usize) ?usize {
+        return self.regions.findFree(size, bottom, top);
+    }
 };
+
+pub const PageMap = std.AutoHashMap(usize, page.MappedPage);
 
 /// A node for the RbTree containing individual regions
 pub const RegionNode = struct {
@@ -25,7 +82,7 @@ const RegionMap = struct {
     len: usize,
     pub const Self = @This();
 
-    const CapRights = std.meta.FieldType(Region, "perm");
+    const CapRights = @FieldType(Region, "perm");
 
     const Iterator = struct {
         next_node: ?*RbNode,
@@ -203,10 +260,15 @@ const RegionMap = struct {
     }
 };
 
-pub const super = @import("mod.zig");
-pub const Region = super.region.Region;
-pub const rbtree = @import("rbtree");
-pub const RbNode = rbtree.tree.RbNode;
-pub const RbTree = rbtree.tree.RbTree;
-pub const RbNodeNil = rbtree.tree.nil;
-pub const std = @import("std");
+const super = @import("mod.zig");
+const Region = super.region.Region;
+const rbtree = @import("rbtree");
+const RbNode = rbtree.tree.RbNode;
+const RbTree = rbtree.tree.RbTree;
+const RbNodeNil = rbtree.tree.nil;
+
+const std = @import("std");
+const page = @import("page.zig");
+
+const cimports = @import("cimports");
+const sel4 = cimports.sel4;

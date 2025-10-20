@@ -24,13 +24,11 @@ pub const Client = struct {
         .cap_slot = sel4.seL4_CapNull,
         .vaddr = 0,
     }} ** allocator.METADATA_REGION_PAGES,
-    page_map: PageMap = undefined,
-    mmap_regions: RegionList = .{},
 
     pub const Self = @This();
 
     pub fn findPage(self: *Self, vaddr: usize) ?*page.MappedPage {
-        return self.page_map.getPtr(vaddr);
+        return self.addr_space.getPtr(vaddr);
     }
 
     pub fn insertPage(
@@ -46,7 +44,7 @@ pub const Client = struct {
             _ = c.printf("[vm_map] insertPage missing cap_owner for vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
             return super.VmError.InvalidArgs;
         }
-        if (self.page_map.getPtr(vaddr)) |entry| {
+        if (self.addr_space.getPtr(vaddr)) |entry| {
             entry.frame_ref = frame_ref;
             entry.cap_slot = cap_slot;
             entry.cap_owner = cap_owner;
@@ -55,11 +53,11 @@ pub const Client = struct {
             return entry;
         }
 
-        if (self.page_map.count() >= super.MAX_MAPPED_PAGES) {
+        if (self.addr_space.num_mapped() >= super.MAX_MAPPED_PAGES) {
             return super.VmError.Capacity;
         }
 
-        self.page_map.put(vaddr, page.MappedPage{
+        self.addr_space.put(vaddr, page.MappedPage{
             .frame_ref = frame_ref,
             .cap_slot = cap_slot,
             .cap_owner = cap_owner,
@@ -68,8 +66,8 @@ pub const Client = struct {
         }) catch {
             return super.VmError.Capacity;
         };
-        self.mapped_count = self.page_map.count();
-        return self.page_map.getPtr(vaddr).?;
+        self.mapped_count = self.addr_space.num_mapped();
+        return self.addr_space.getPtr(vaddr).?;
     }
 
     pub fn mapAnonymousPage(self: *Self, handle: *super.VmHandle, vaddr: usize, tracker: *region.Region) super.VmError!void {
@@ -91,8 +89,8 @@ pub const Client = struct {
             return;
         }
 
-        if (self.page_map.count() >= super.MAX_MAPPED_PAGES) {
-            _ = c.printf("[vm_map] capacity reached mapped_count=%lu max=%lu\n", @as(c_ulong, @intCast(self.page_map.count())), @as(c_ulong, @intCast(super.MAX_MAPPED_PAGES)));
+        if (self.addr_space.num_mapped() >= super.MAX_MAPPED_PAGES) {
+            _ = c.printf("[vm_map] capacity reached mapped_count=%lu max=%lu\n", @as(c_ulong, @intCast(self.addr_space.num_mapped())), @as(c_ulong, @intCast(super.MAX_MAPPED_PAGES)));
             return super.VmError.Capacity;
         }
 
@@ -161,7 +159,7 @@ pub const Client = struct {
             sos.free_frame(frame_ref);
             return err;
         };
-        self.mapped_count = self.page_map.count();
+        self.mapped_count = self.addr_space.num_mapped();
         _ = c.printf("[vm_map] recorded mapping vaddr=0x%lx frame_ref=%lu slot=%lu new_mapped_count=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(self.mapped_count)));
 
         tracker.updateAccess(readable, writable, executable);
@@ -209,16 +207,15 @@ pub const Client = struct {
         self.metadata_page_count = 0;
         self.metadata_allocator.init(self);
         self.metadata_alloc_handle = self.metadata_allocator.allocator();
-        self.page_map = PageMap.init(self.metadata_alloc_handle);
-        self.mmap_regions = RegionList{};
+        self.addr_space = AddrSpace.init(self.metadataAllocator());
     }
 
     fn releaseAllPages(self: *Self) void {
-        var it = self.page_map.iterator();
+        var it = self.addr_space.iterator();
         while (it.next()) |kv| {
             kv.value_ptr.release();
         }
-        self.page_map.clearRetainingCapacity();
+        self.addr_space.clearRetainingCapacity();
         self.mapped_count = 0;
     }
 
@@ -228,8 +225,7 @@ pub const Client = struct {
             return;
         }
         self.releaseAllPages();
-        self.page_map.deinit();
-        self.mmap_regions.deinit(self.metadata_alloc_handle);
+        self.addr_space.deinit();
         self.metadata_allocator.deinit();
         self.* = Self{};
     }
@@ -292,43 +288,62 @@ pub const Client = struct {
     }
 
     pub fn leaseMmapRegion(self: *Self, base: usize, prot: c_int) super.VmError!*region.Region {
-        if (self.mmap_regions.items.len >= super.MAX_MMAP_REGIONS) {
-            _ = c.printf("[vm_mmap] no free region slots\n");
+        if (self.active_mmaps >= super.MAX_MMAP_REGIONS) {
+            _ = c.printf("[vm_mmap] no free region slots (active=%lu, max=%lu)\n", @as(c_ulong, @intCast(self.active_mmaps)), @as(c_ulong, @intCast(super.MAX_MMAP_REGIONS)));
             return super.VmError.Capacity;
         }
 
-        self.mmap_regions.append(self.metadataAllocator(), region.Region{}) catch {
+        const A = self.addr_space.alloc;
+        var node = A.create(RegionNode) catch {
+            _ = c.printf("[vm_mmap] alloc RegionNode failed\n");
             return super.VmError.Capacity;
         };
-        const reg = &self.mmap_regions.items[self.mmap_regions.items.len - 1];
-        reg.reset(region.RegionKind.Mmap);
-        reg.configure(base, region.RegionKind.Mmap, prot);
+        errdefer A.destroy(node);
+
+        node.* = .{ .rb = undefined, .reg = .{} };
+        node.reg.reset(region.RegionKind.Mmap);
+        node.reg.configure(base, region.RegionKind.Mmap, prot);
+
+        if (self.addr_space.findRegion(base)) |exist| {
+            if (exist.reg.contains(base)) {
+                _ = c.printf("[vm_mmap] base 0x%lx lies inside an existing region [0x%lx, 0x%lx)\n", @as(c_ulong, @intCast(base)), @as(c_ulong, @intCast(exist.reg.start)), @as(c_ulong, @intCast(exist.reg.end)));
+                return super.VmError.InvalidArgs;
+            }
+        }
+
+        self.addr_space.insertRegion(node, false) catch |e| {
+            const name = @errorName(e); // []const u8
+            _ = c.printf("[vm_mmap] insertRegion failed (%.*s) base=0x%lx\n", @as(c_int, @intCast(name.len)), name.ptr, @as(c_ulong, @intCast(base)));
+            return super.VmError.InvalidArgs;
+        };
+
         self.active_mmaps += 1;
-        return reg;
+        return &node.reg;
     }
 
     pub fn releaseMmapRegion(self: *Self, tracker: *region.Region) void {
         if (!tracker.used) return;
+
+        const node: *RegionNode = @alignCast(@fieldParentPtr("reg", tracker));
+
+        self.addr_space.removeRegion(node);
+        self.addr_space.alloc.destroy(node);
         if (self.active_mmaps > 0) self.active_mmaps -= 1;
-        const base_ptr = self.mmap_regions.items.ptr;
-        const idx: usize = @intCast(tracker - base_ptr);
-        _ = self.mmap_regions.swapRemove(idx);
     }
 
     pub fn findMmapRegion(self: *Self, addr: usize) ?*region.Region {
-        for (self.mmap_regions.items) |*reg| {
-            if (reg.contains(addr)) return reg;
+        const node = self.addr_space.findRegion(addr) orelse return null;
+        const reg = &node.reg;
+
+        if (reg.attr.kind == region.RegionKind.Mmap and reg.contains(addr)) {
+            return reg;
         }
         return null;
     }
 };
 
-// TODO: Replace this with proper integration to AddrSpace
-pub const PageMap = std.AutoHashMap(usize, MappedPage);
-const MappedPage = page.MappedPage;
-pub const RegionList = std.ArrayListUnmanaged(region.Region);
-
 pub const AddrSpace = @import("addr_space.zig").AddrSpace;
+pub const RegionNode = @import("addr_space.zig").RegionNode;
 
 const region = @import("region.zig");
 const page = @import("page.zig");

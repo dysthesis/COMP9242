@@ -348,7 +348,7 @@ pub export fn vm_register_stack_mapping(handle: *VmHandle, vaddr: usize, frame_r
         _ = c.printf("[vm_stack] failed to record mapping errno=%d vaddr=0x%lx\n", errno, @as(c_ulong, @intCast(vaddr)));
         @panic("unable to record stack mapping");
     };
-    state.mapped_count = state.page_map.count();
+    state.mapped_count = state.addr_space.num_mapped();
     state.stack_region.updateAccess(true, true, false);
     state.stack_region.recordMapping(vaddr, PAGE_SIZE_4K);
     if (state.stack_region.start < state.stack_low) {
