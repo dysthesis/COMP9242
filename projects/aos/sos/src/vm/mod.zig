@@ -295,14 +295,7 @@ fn pageBase(addr: usize) usize {
     return alignDown(addr, PAGE_SIZE_4K);
 }
 
-pub fn toSosRights(rights: sel4.seL4_CapRights_t) sos.seL4_CapRights_t {
-    var converted: sos.seL4_CapRights_t = undefined;
-    converted.words[0] = rights.words[0];
-    return converted;
-}
-
 // Interface that we export to C
-
 pub export fn vm_state_acquire(cl: *sos.client_t) callconv(.c) *VmHandle {
     bootstrapVmStates();
     const idx = vmStateIndex(cl);

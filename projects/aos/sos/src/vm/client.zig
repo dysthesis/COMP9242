@@ -124,7 +124,7 @@ pub const Client = struct {
 
         const src_cspace = sos.frame_table_cspace();
         const frame_cap = sos.frame_page(frame_ref);
-        const copy_err = sos.cspace_copy(&cspace, slot, src_cspace, frame_cap, super.toSosRights(sel4.seL4_AllRights));
+        const copy_err = sos.cspace_copy(&cspace, slot, src_cspace, frame_cap, sos.seL4_AllRights);
         if (copy_err != sel4.seL4_NoError) {
             _ = sos.cspace_free_slot(&cspace, slot);
             sos.free_frame(frame_ref);
@@ -135,7 +135,7 @@ pub const Client = struct {
         _ = c.printf("[vm_map] copied frame cap slot=%lu frame_ref=%lu\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
 
         const rights = region.rightsFromBooleans(readable, writable);
-        const rights_sos = super.toSosRights(rights);
+        const rights_sos = rights;
         var attrs = sel4.seL4_ARM_Default_VMAttributes;
         if (!executable) {
             attrs = attrs | sel4.seL4_ARM_ExecuteNever;
@@ -259,14 +259,14 @@ pub const Client = struct {
 
             const src_cspace = sos.frame_table_cspace();
             const frame_cap = sos.frame_page(frame_ref);
-            if (sos.cspace_copy(&cspace, slot, src_cspace, frame_cap, super.toSosRights(sel4.seL4_AllRights)) != sel4.seL4_NoError) {
+            if (sos.cspace_copy(&cspace, slot, src_cspace, frame_cap, sos.seL4_AllRights) != sel4.seL4_NoError) {
                 sos.cspace_free_slot(&cspace, slot);
                 sos.free_frame(frame_ref);
                 _ = c.printf("[vm_meta] cspace_copy failed\n");
                 return allocator.MetadataAllocError.OutOfMemory;
             }
 
-            const rights = super.toSosRights(region.rightsFromBooleans(true, true));
+            const rights = region.rightsFromBooleans(true, true);
             const attrs = sel4.seL4_ARM_Default_VMAttributes | sel4.seL4_ARM_ExecuteNever;
             const vaddr = self.metadata_base + self.metadata_mapped;
             if (sos.map_frame(&cspace, slot, sel4.seL4_CapInitThreadVSpace, vaddr, rights, attrs) != sel4.seL4_NoError) {

@@ -30,7 +30,7 @@ pub const Region = struct {
     /// The attributes of this region, including what kind it is
     attr: RegionAttr = .{ .kind = RegionKind.Normal, .data = 0 },
     /// The permissions to this region
-    perm: sel4.seL4_CapRights_t = std.mem.zeroes(sel4.seL4_CapRights_t),
+    perm: sos.seL4_CapRights_t = std.mem.zeroes(sos.seL4_CapRights_t),
     /// Whether the region slot is in use
     used: bool = false,
     /// Whether any mappings have been recorded yet
@@ -54,7 +54,7 @@ pub const Region = struct {
         self.start = 0;
         self.end = 0;
         self.attr = .{ .kind = kind, .data = 0 };
-        self.perm = std.mem.zeroes(sel4.seL4_CapRights_t);
+        self.perm = std.mem.zeroes(sos.seL4_CapRights_t);
         self.used = false;
         self.mapped = false;
     }
@@ -108,8 +108,8 @@ pub fn encodeProtFlags(readable: bool, writable: bool, executable: bool) c_int {
 }
 
 /// Convert protection booleans to seL4 cap rights.
-pub fn rightsFromBooleans(readable: bool, writable: bool) sel4.seL4_CapRights_t {
-    return sel4.seL4_CapRights_new(
+pub fn rightsFromBooleans(readable: bool, writable: bool) sos.seL4_CapRights_t {
+    return sos.seL4_CapRights_new(
         0,
         0,
         if (readable) 1 else 0,
@@ -118,7 +118,7 @@ pub fn rightsFromBooleans(readable: bool, writable: bool) sel4.seL4_CapRights_t 
 }
 
 /// Merge two sets of seL4 cap rights.
-pub fn mergeCapRights(a: sel4.seL4_CapRights_t, b: sel4.seL4_CapRights_t) sel4.seL4_CapRights_t {
+pub fn mergeCapRights(a: sos.seL4_CapRights_t, b: sos.seL4_CapRights_t) sos.seL4_CapRights_t {
     var merged = a;
     merged.words[0] = merged.words[0] | b.words[0];
     return merged;
