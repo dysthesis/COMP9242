@@ -53,10 +53,6 @@ pub const Client = struct {
             return entry;
         }
 
-        if (self.addr_space.num_mapped() >= super.MAX_MAPPED_PAGES) {
-            return super.VmError.Capacity;
-        }
-
         self.addr_space.put(vaddr, page.MappedPage{
             .frame_ref = frame_ref,
             .cap_slot = cap_slot,
@@ -70,9 +66,28 @@ pub const Client = struct {
         return self.addr_space.getPtr(vaddr).?;
     }
 
+    fn isLegalUserMapping(self: *Client, base: usize) bool {
+        // inside configured heap band and below the current break.
+        if (base >= super.HEAP_BASE and base < self.heap_break) return true;
+
+        // strictly between guard and top (guard page itself is illegal).
+        const min_stack = self.stack_guard + super.PAGE_SIZE_4K;
+        if (base >= min_stack and base < self.stack_top) return true;
+
+        // any address covered by a declared RegionKind.Mmap.
+        if (self.findMmapRegion(base) != null) return true;
+
+        // everything else is out of policy.
+        return false;
+    }
+
     pub fn mapAnonymousPage(self: *Self, handle: *super.VmHandle, vaddr: usize, tracker: *region.Region) super.VmError!void {
         if (!tracker.used) {
             return super.VmError.InvalidArgs;
+        }
+
+        if (!self.isLegalUserMapping(super.pageBase(vaddr))) {
+            return super.VmError.Bounds;
         }
 
         const caller = handle.getClient();
@@ -87,11 +102,6 @@ pub const Client = struct {
         if (self.findPage(vaddr) != null) {
             _ = c.printf("[vm_map] already mapped vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
             return;
-        }
-
-        if (self.addr_space.num_mapped() >= super.MAX_MAPPED_PAGES) {
-            _ = c.printf("[vm_map] capacity reached mapped_count=%lu max=%lu\n", @as(c_ulong, @intCast(self.addr_space.num_mapped())), @as(c_ulong, @intCast(super.MAX_MAPPED_PAGES)));
-            return super.VmError.Capacity;
         }
 
         const proc_vspace = sos.client_get_vspace(caller);
@@ -152,7 +162,7 @@ pub const Client = struct {
         _ = self.insertPage(vaddr, frame_ref, slot, &cspace, true, true) catch |err| {
             if (err == super.VmError.Capacity) {
                 const meta_used = self.metadata_cursor - self.metadata_base;
-                _ = c.printf("[vm_meta] capacity hit vaddr=0x%lx mapped_count=%lu max_mapped=%lu used_bytes=%lu limit_bytes=%lu pages=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(self.mapped_count)), @as(c_ulong, @intCast(super.MAX_MAPPED_PAGES)), @as(c_ulong, @intCast(meta_used)), @as(c_ulong, @intCast(allocator.METADATA_REGION_BYTES)), @as(c_ulong, @intCast(self.metadata_page_count)));
+                _ = c.printf("[vm_meta] capacity hit vaddr=0x%lx mapped_count=%lu used_bytes=%lu limit_bytes=%lu pages=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(self.mapped_count)), @as(c_ulong, @intCast(meta_used)), @as(c_ulong, @intCast(allocator.METADATA_REGION_BYTES)), @as(c_ulong, @intCast(self.metadata_page_count)));
             }
             _ = sos.cspace_delete(&cspace, slot);
             _ = sos.cspace_free_slot(&cspace, slot);

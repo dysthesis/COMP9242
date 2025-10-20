@@ -82,13 +82,10 @@ pub const STACK_TOP: usize = STACK_TOP_RAW & ~(PAGE_SIZE_4K - 1);
 pub const STACK_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const STACK_GUARD_BASE: usize = STACK_TOP - STACK_MAX_BYTES;
 pub const MMAP_LIMIT: usize = STACK_GUARD_BASE - PAGE_SIZE_4K;
-pub const MAX_MAPPED_PAGES: usize = 4096;
+// pub const MAX_MAPPED_PAGES: usize = 4096;
 pub const MAX_MMAP_REGIONS: usize = 64;
 
 comptime {
-    if (MAX_MAPPED_PAGES == 0 or (MAX_MAPPED_PAGES & (MAX_MAPPED_PAGES - 1)) != 0) {
-        @compileError("MAX_MAPPED_PAGES must be a non-zero power of two");
-    }
     if (STACK_MAX_BYTES <= PAGE_SIZE_4K) {
         @compileError("Stack size must exceed one page");
     }
@@ -128,44 +125,15 @@ pub fn vmErrorToErrno(err: VmError) c_int {
 
 pub fn brkImpl(handle: *VmHandle, requested: usize) VmError!usize {
     const state = handle.ensureVmState();
-    const caller_ptr: c_ulong = @intCast(@intFromPtr(handle.getClient()));
-    _ = c.printf("[vm_brk] enter caller=0x%lx requested=0x%lx heap_break=0x%lx mapped_end=0x%lx limit=0x%lx\n", caller_ptr, @as(c_ulong, @intCast(requested)), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(HEAP_LIMIT)));
 
-    if (requested == 0) {
-        _ = c.printf("[vm_brk] query current break=0x%lx\n", @as(c_ulong, @intCast(state.heap_break)));
-        return state.heap_break;
-    }
-    if (requested < HEAP_BASE or requested > HEAP_LIMIT) {
-        _ = c.printf("[vm_brk] bounds violation requested=0x%lx base=0x%lx limit=0x%lx\n", @as(c_ulong, @intCast(requested)), @as(c_ulong, @intCast(HEAP_BASE)), @as(c_ulong, @intCast(HEAP_LIMIT)));
-        return VmError.Bounds;
-    }
-    if (requested < state.heap_break) {
-        _ = c.printf("[vm_brk] shrink unsupported requested=0x%lx current=0x%lx\n", @as(c_ulong, @intCast(requested)), @as(c_ulong, @intCast(state.heap_break)));
-        return VmError.Unsupported;
-    }
+    if (requested == 0) return state.heap_break;
+    if (requested < HEAP_BASE or requested > HEAP_LIMIT) return VmError.Bounds;
+    if (requested < state.heap_break) return VmError.Unsupported;
 
-    const target_map_end = alignForward(requested, PAGE_SIZE_4K);
-    if (target_map_end > HEAP_LIMIT) {
-        _ = c.printf("[vm_brk] rounded target 0x%lx beyond limit 0x%lx\n", @as(c_ulong, @intCast(target_map_end)), @as(c_ulong, @intCast(HEAP_LIMIT)));
-        return VmError.Bounds;
-    }
-    _ = c.printf("[vm_brk] aligned target_map_end=0x%lx\n", @as(c_ulong, @intCast(target_map_end)));
-
-    var cursor = state.heap_mapped_end;
-    if (cursor < HEAP_BASE) cursor = HEAP_BASE;
-    while (cursor < target_map_end) : (cursor += PAGE_SIZE_4K) {
-        _ = c.printf("[vm_brk] mapping cursor=0x%lx target=0x%lx\n", @as(c_ulong, @intCast(cursor)), @as(c_ulong, @intCast(target_map_end)));
-        state.mapAnonymousPage(handle, cursor, &state.heap_region) catch |err| {
-            const err_code: c_int = vmErrorToErrno(err);
-            _ = c.printf("[vm_brk] mapAnonymousPage failed cursor=0x%lx errno=%d\n", @as(c_ulong, @intCast(cursor)), err_code);
-            return err;
-        };
-        _ = c.printf("[vm_brk] mapped cursor=0x%lx\n", @as(c_ulong, @intCast(cursor)));
-    }
-
-    state.heap_mapped_end = if (state.heap_region.end > HEAP_BASE) state.heap_region.end else state.heap_mapped_end;
     state.heap_break = requested;
-    _ = c.printf("[vm_brk] updated state heap_break=0x%lx heap_mapped_end=0x%lx\n", @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)));
+
+    _ = c.printf("[vm_brk] set break lazily to 0x%lx (mapping deferred)\n", @as(c_ulong, @intCast(state.heap_break)));
+
     return requested;
 }
 
@@ -286,12 +254,12 @@ fn alignForward(value: usize, alignment: usize) usize {
     return value + (alignment - remainder);
 }
 
-fn alignDown(value: usize, alignment: usize) usize {
+inline fn alignDown(value: usize, alignment: usize) usize {
     if (alignment == 0) return value;
     return value - (value % alignment);
 }
 
-fn pageBase(addr: usize) usize {
+pub inline fn pageBase(addr: usize) usize {
     return alignDown(addr, PAGE_SIZE_4K);
 }
 
@@ -338,7 +306,7 @@ pub export fn vm_state_release(cl: *sos.client_t) callconv(.c) void {
     }
     vm_handle_active[idx] = false;
     vm_handles[idx] = VmHandle{ .idx = idx, .generation = 0, .client = null };
-    _ = &vm_states[idx].teardown();
+    vm_states[idx].teardown();
 }
 
 pub export fn vm_register_stack_mapping(handle: *VmHandle, vaddr: usize, frame_ref: usize, cap_slot: sel4.seL4_CPtr) callconv(.c) void {
@@ -372,8 +340,8 @@ pub export fn vm_reset_state(handle: *VmHandle) callconv(.c) void {
     const idx = handle.idx;
     const cl = handle.getClient();
     _ = c.printf("[vm_state] reset idx=%lu client=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))));
-    _ = &vm_states[idx].teardown();
-    _ = &vm_states[idx].init(idx);
+    vm_states[idx].teardown();
+    vm_states[idx].init(idx);
 }
 
 pub export fn handle_vm_fault(
