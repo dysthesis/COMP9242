@@ -128,18 +128,28 @@ static struct {
 } user_process;
 
 /* Temporary helpers until a general VM subsystem is in place. */
-cspace_t *client_get_cspace(client_t *client) {
-  if (client != NULL && client == user_process.client) {
-    return &user_process.cspace;
-  }
-  return NULL;
-}
-
 seL4_CPtr client_get_vspace(client_t *client) {
-  if (client != NULL && client == user_process.client) {
+  printf("[client_get_vspace] client=%p user_client=%p id=%d/%d gen=%u/%u "
+         "vspace=%#lx\n",
+         (void *)client, (void *)user_process.client, client ? client->id : -1,
+         user_process.client ? user_process.client->id : -1,
+         client ? client->gen : 0,
+         user_process.client ? user_process.client->gen : 0,
+         (unsigned long)user_process.vspace);
+
+  if (client && user_process.client && client->id == user_process.client->id &&
+      client->gen == user_process.client->gen) {
     return user_process.vspace;
   }
   return seL4_CapNull;
+}
+
+cspace_t *client_get_cspace(client_t *client) {
+  if (client && user_process.client && client->id == user_process.client->id &&
+      client->gen == user_process.client->gen) {
+    return &user_process.cspace;
+  }
+  return NULL;
 }
 
 // ZIG FUNCTION STUBS
@@ -210,7 +220,8 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
       if (vm == NULL) {
         vm = vm_state_lookup(caller);
         if (vm == NULL) {
-          ZF_LOGE("VM state missing for caller badge=0x%lx", (unsigned long)badge);
+          ZF_LOGE("VM state missing for caller badge=0x%lx",
+                  (unsigned long)badge);
           have_reply = false;
           continue;
         }
@@ -230,7 +241,8 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
       sos_ipc_msg_t ipc_msg;
       if (sos_deserialise_ipc_msg(&message, &ipc_msg) == 0) {
         // inspect the IPC message received if we can
-        printf("[sos] syscall_loop(fault): badge -> %lu\n", (unsigned long)badge);
+        printf("[sos] syscall_loop(fault): badge -> %lu\n",
+               (unsigned long)badge);
         printf("[sos] syscall_loop(fault): sysno -> %lu\n",
                (unsigned long)(sos_sysno_t)ipc_msg.sysno);
         printf("[sos] syscall_loop(fault): arg -> %lu\n",
@@ -262,7 +274,8 @@ static int stack_write(seL4_Word *mapped_stack, int index, uintptr_t val) {
 static void cleanup_stack_frames(void) {
   while (user_process.stack_frame_count > 0) {
     user_process.stack_frame_count--;
-    frame_ref_t frame = user_process.stack_frames[user_process.stack_frame_count];
+    frame_ref_t frame =
+        user_process.stack_frames[user_process.stack_frame_count];
     seL4_CPtr slot = user_process.stack_slots[user_process.stack_frame_count];
 
     if (slot != seL4_CapNull) {
@@ -309,9 +322,8 @@ static int map_process_stack_page(uintptr_t vaddr) {
     return -1;
   }
 
-  seL4_Error err =
-      cspace_copy(&cspace, slot, frame_table_cspace(), frame_page(frame),
-                  seL4_AllRights);
+  seL4_Error err = cspace_copy(&cspace, slot, frame_table_cspace(),
+                               frame_page(frame), seL4_AllRights);
   if (err != seL4_NoError) {
     cspace_free_slot(&cspace, slot);
     free_frame(frame);
@@ -333,7 +345,8 @@ static int map_process_stack_page(uintptr_t vaddr) {
   if (user_process.client == NULL || user_process.client->vm_state == NULL) {
     ZF_LOGE("Missing VM handle while recording stack mapping");
   } else {
-    vm_register_stack_mapping(user_process.client->vm_state, vaddr, frame, slot);
+    vm_register_stack_mapping(user_process.client->vm_state, vaddr, frame,
+                              slot);
   }
 
   user_process.stack_frames[user_process.stack_frame_count] = frame;
@@ -503,6 +516,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
   }
   user_process.client = client;
   user_process.badge = client_badge;
+  client->vm_state = vm_state_acquire(client);
 
   /* Create a simple 1 level CSpace */
   err = cspace_create_one_level(&cspace, &user_process.cspace);
@@ -589,10 +603,9 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
    * NOTE this will use the unbadged ep unlike above, you might want to mint it
    * with a badge so you can identify which thread faulted in your fault handler
    */
-  err = seL4_TCB_SetSchedParams(user_process.tcb, seL4_CapInitThreadTCB,
-                                seL4_MinPrio, APP_PRIORITY,
-                                user_process.sched_context,
-                                user_process.fault_ep_slot);
+  err = seL4_TCB_SetSchedParams(
+      user_process.tcb, seL4_CapInitThreadTCB, seL4_MinPrio, APP_PRIORITY,
+      user_process.sched_context, user_process.fault_ep_slot);
   if (err != seL4_NoError) {
     ZF_LOGE("Unable to set scheduling params");
     goto out;

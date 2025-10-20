@@ -4,15 +4,29 @@ pub const AddrSpace = struct {
     pages: PageMap,
     alloc: std.mem.Allocator,
     vspace: sel4.seL4_CPtr = sel4.seL4_CapInitThreadVSpace,
+    cspace: *sos.cspace_t,
+    root: *page_table.PTNode,
 
     pub const Self = @This();
 
     /// Initialise a new address space
-    pub fn init(alloc: std.mem.Allocator) Self {
+    pub fn init(
+        alloc: std.mem.Allocator,
+        cspace_ptr: *sos.cspace_t,
+        vspace_root_cap: sel4.seL4_CPtr,
+    ) !Self {
+        _ = c.printf("[addr_space] entered AddrSpace.init...\n");
+        _ = c.printf("[addr_space] initialising page table...\n");
+        const root = try alloc.create(page_table.PTNode);
+        root.* = page_table.PTNode.init(alloc, .L0, vspace_root_cap, null);
+        _ = c.printf("[addr_space] page table initialised!\n");
         return .{
             .regions = RegionMap.init(),
             .pages = PageMap.init(alloc),
             .alloc = alloc,
+            .vspace = vspace_root_cap,
+            .cspace = cspace_ptr,
+            .root = root,
         };
     }
 
@@ -55,6 +69,37 @@ pub const AddrSpace = struct {
 
     pub inline fn findFreeGap(self: *const Self, size: usize, bottom: usize, top: usize) ?usize {
         return self.regions.findFree(size, bottom, top);
+    }
+
+    fn ensureChild(
+        self: *Self,
+        parent: *page_table.PTNode,
+        idx: u16,
+        want_level: page_table.Level,
+        vaddr: usize,
+    ) !*page_table.PTNode {
+        if (parent.children.get(idx)) |node| return node;
+
+        const slot = sos.cspace_alloc_slot(self.cspace);
+        if (slot == sel4.seL4_CapNull) return error.OutOfSlots;
+
+        try page_table.retype_page_table_object(slot, @intFromEnum(want_level));
+
+        // Map this page table at the address implied by vaddr (helper aligns internally)
+        try page_table.map_page_table_into_vspace(self.vspace, slot, parent.level, vaddr);
+
+        const child = try self.alloc.create(page_table.PTNode);
+        child.* = page_table.PTNode.init(self.alloc, want_level, slot, parent);
+        try parent.children.put(idx, child);
+        return child;
+    }
+
+    pub fn ensurePath(self: *Self, vaddr: usize) !*page_table.PTNode {
+        var n = self.root;
+        n = try self.ensureChild(n, page_table.l0Index(vaddr), .L1, vaddr);
+        n = try self.ensureChild(n, page_table.l1Index(vaddr), .L2, vaddr);
+        n = try self.ensureChild(n, page_table.l2Index(vaddr), .L3, vaddr);
+        return n;
     }
 };
 
@@ -269,6 +314,9 @@ const RbNodeNil = rbtree.tree.nil;
 
 const std = @import("std");
 const page = @import("page.zig");
+const page_table = @import("page_table.zig");
 
 const cimports = @import("cimports");
 const sel4 = cimports.sel4;
+const sos = cimports.sos;
+const c = cimports.c;

@@ -194,7 +194,8 @@ pub const Client = struct {
         return self.metadata_alloc_handle;
     }
 
-    pub fn init(self: *Self, idx: usize) void {
+    pub fn init(self: *Self, idx: usize, cl: *sos.client_t) !void {
+        _ = c.printf("[vm_client] entered Client.init...\n");
         self.initialised = true;
         self.heap_break = super.HEAP_BASE;
         self.heap_mapped_end = super.HEAP_BASE;
@@ -205,19 +206,36 @@ pub const Client = struct {
         self.mapped_count = 0;
         self.active_mmaps = 0;
 
+        _ = c.printf("[vm_client] setting up heap...\n");
         self.heap_region.reset(region.RegionKind.Heap);
         self.heap_region.configure(super.HEAP_BASE, region.RegionKind.Heap, super.DEFAULT_HEAP_PROT);
+        _ = c.printf("[vm_client] heap ready!\n");
 
+        _ = c.printf("[vm_client] setting up stack...\n");
         self.stack_region.reset(region.RegionKind.Stack);
         self.stack_region.configure(super.STACK_TOP, region.RegionKind.Stack, super.DEFAULT_STACK_PROT);
+        _ = c.printf("[vm_client] stack ready!\n");
 
         self.metadata_base = allocator.METADATA_REGION_START + idx * allocator.METADATA_REGION_BYTES;
         self.metadata_cursor = self.metadata_base;
         self.metadata_mapped = 0;
         self.metadata_page_count = 0;
         self.metadata_allocator.init(self);
+        _ = c.printf("[vm_client] setting up allocator...\n");
         self.metadata_alloc_handle = self.metadata_allocator.allocator();
-        self.addr_space = AddrSpace.init(self.metadataAllocator());
+        _ = c.printf("[vm_client] allocator ready!\n");
+
+        _ = c.printf("[vm_client] setting up process vspace...\n");
+        const proc_vspace: sel4.seL4_CPtr = sos.client_get_vspace(cl);
+        if (proc_vspace == 0) {
+            _ = c.printf("[vm_client] error: client_get_vspace for client with ID %d and generation %d returned %d\n", cl.id, cl.gen, proc_vspace);
+            return error.ClientContext;
+        }
+        _ = c.printf("[vm_client] process vspace ready!\n");
+
+        _ = c.printf("[vm_client] initialising client address space...\n");
+        self.addr_space = try AddrSpace.init(self.metadataAllocator(), &cspace, proc_vspace);
+        _ = c.printf("[vm_client] address space ready!\n");
     }
 
     fn releaseAllPages(self: *Self) void {
@@ -365,5 +383,7 @@ const cimports = @import("cimports");
 const sel4 = cimports.sel4;
 const c = cimports.c;
 const sos = cimports.sos;
+
+extern fn sos_metadata_base_runtime() usize;
 
 extern var cspace: sos.cspace_t;

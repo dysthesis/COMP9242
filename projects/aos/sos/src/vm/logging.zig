@@ -4,7 +4,7 @@ pub const VmLogger = struct {
 
     /// Writer for the logs
     fn writer(comptime fmt: [*:0]const u8, args: anytype) void {
-        _ = c.printf(fmt, args);
+        _ = @call(.auto, c.printf, .{fmt} ++ args);
     }
 
     /// Map capability rights to a printable string representation

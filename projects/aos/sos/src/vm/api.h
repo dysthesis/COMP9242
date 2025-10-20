@@ -1,8 +1,8 @@
 #pragma once
 
+#include <sel4/sel4.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <sel4/sel4.h>
 
 #include "frame_table.h"
 #include "ipc.h"
@@ -20,3 +20,5 @@ void vm_reset_state(struct vm_handle *handle);
 
 bool handle_vm_fault(struct vm_handle *handle, seL4_Word badge,
                      const seL4_MessageInfo_t *message);
+
+uintptr_t sos_metadata_base_runtime(void);

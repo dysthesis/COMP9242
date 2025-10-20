@@ -141,6 +141,8 @@ in {
         else
           echo "zls note: run ../init-build.sh in a build directory to populate generated headers" >&2
         fi
+
+        ${lib.getExe pkgs.unstable.glow} NOTES.md
       '';
   };
 }
