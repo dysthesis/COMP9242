@@ -73,9 +73,9 @@ pub const nil: *RbNode = &nil_val;
 
 /// Constrct a red-black tree
 pub fn RbTree(
-    K: type,
-    key: fn (*RbNode) callconv(.@"inline") K,
-    cmp: fn (K, K) callconv(.@"inline") std.math.Order,
+    comptime K: type,
+    comptime key: fn (*RbNode) K,
+    comptime cmp: fn (K, K) std.math.Order,
 ) type {
     return struct {
         root: *RbNode,

@@ -126,116 +126,6 @@ pub fn vmErrorToErrno(err: VmError) c_int {
     };
 }
 
-fn mapAnonymousPage(handle: *VmHandle, state: *client.Client, vaddr: usize, tracker: *region.Region) VmError!void {
-    if (!tracker.used) {
-        return VmError.InvalidArgs;
-    }
-
-    const caller = handle.getClient();
-
-    const prot_flags = tracker.prot();
-    const readable = (prot_flags & sos.PROT_READ) != 0;
-    const writable = (prot_flags & sos.PROT_WRITE) != 0;
-    const executable = (prot_flags & sos.PROT_EXEC) != 0;
-
-    _ = c.printf("[vm_map] enter caller=0x%lx vaddr=0x%lx read=%d write=%d exec=%d mapped_count=%lu\n", @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(vaddr)), @as(c_int, if (readable) 1 else 0), @as(c_int, if (writable) 1 else 0), @as(c_int, if (executable) 1 else 0), @as(c_ulong, @intCast(state.mapped_count)));
-
-    if (state.findPage(vaddr) != null) {
-        _ = c.printf("[vm_map] already mapped vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
-        return;
-    }
-
-    if (state.page_map.count() >= MAX_MAPPED_PAGES) {
-        _ = c.printf("[vm_map] capacity reached mapped_count=%lu max=%lu\n", @as(c_ulong, @intCast(state.page_map.count())), @as(c_ulong, @intCast(MAX_MAPPED_PAGES)));
-        return VmError.Capacity;
-    }
-
-    const proc_vspace = sos.client_get_vspace(caller);
-    if (proc_vspace == 0) {
-        return VmError.ClientContext;
-    }
-
-    const frame_ref = sos.alloc_frame();
-    if (frame_ref == 0) {
-        _ = c.printf("[vm_map] alloc_frame failed caller=0x%lx\n", @as(c_ulong, @intCast(@intFromPtr(caller))));
-        return VmError.OutOfFrames;
-    }
-    _ = c.printf("[vm_map] alloc_frame ok frame_ref=%lu\n", @as(c_ulong, @intCast(frame_ref)));
-
-    const frame_raw = sos.frame_data(frame_ref);
-    const frame_bytes = @as([*]u8, @ptrCast(frame_raw));
-    @memset(frame_bytes[0..PAGE_SIZE_4K], 0);
-    _ = c.printf("[vm_map] cleared frame_data addr=0x%lx size=%lu\n", @as(c_ulong, @intCast(@intFromPtr(frame_raw))), @as(c_ulong, @intCast(PAGE_SIZE_4K)));
-
-    const slot = sos.cspace_alloc_slot(&cspace);
-    if (slot == sel4.seL4_CapNull) {
-        sos.free_frame(frame_ref);
-        _ = c.printf("[vm_map] cspace_alloc_slot failed frame_ref=%lu\n", @as(c_ulong, @intCast(frame_ref)));
-        return VmError.OutOfSlots;
-    }
-    _ = c.printf("[vm_map] allocated slot=%lu owner_cspace=0x%lx\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(@intFromPtr(&cspace))));
-    _ = c.printf("[vm_map] allocated slot=%lu for frame_ref=%lu\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
-
-    const src_cspace = sos.frame_table_cspace();
-    const frame_cap = sos.frame_page(frame_ref);
-    const copy_err = sos.cspace_copy(&cspace, slot, src_cspace, frame_cap, toSosRights(sel4.seL4_AllRights));
-    if (copy_err != sel4.seL4_NoError) {
-        _ = sos.cspace_free_slot(&cspace, slot);
-        sos.free_frame(frame_ref);
-        const copy_err_i32: c_int = @intCast(copy_err);
-        _ = c.printf("[vm_map] cspace_copy failed err=%d slot=%lu frame_ref=%lu\n", copy_err_i32, @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
-        return VmError.MapFailed;
-    }
-    _ = c.printf("[vm_map] copied frame cap slot=%lu frame_ref=%lu\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
-
-    const rights = region.rightsFromBooleans(readable, writable);
-    const rights_sos = toSosRights(rights);
-    var attrs = sel4.seL4_ARM_Default_VMAttributes;
-    if (!executable) {
-        attrs = attrs | sel4.seL4_ARM_ExecuteNever;
-    }
-    const map_err = sos.map_frame(&cspace, slot, proc_vspace, vaddr, rights_sos, attrs);
-    if (map_err != sel4.seL4_NoError) {
-        _ = sos.cspace_delete(&cspace, slot);
-        _ = sos.cspace_free_slot(&cspace, slot);
-        sos.free_frame(frame_ref);
-        const map_err_i32: c_int = @intCast(map_err);
-        _ = c.printf("[vm_map] map_frame failed err=%d slot=%lu frame_ref=%lu vaddr=0x%lx\n", map_err_i32, @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
-        return VmError.MapFailed;
-    }
-    _ = c.printf("[vm_map] map_frame success slot=%lu frame_ref=%lu vaddr=0x%lx\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
-
-    _ = insertPage(state, vaddr, frame_ref, slot, &cspace, true, true) catch |err| {
-        if (err == VmError.Capacity) {
-            const meta_used = state.metadata_cursor - state.metadata_base;
-            _ = c.printf("[vm_meta] capacity hit vaddr=0x%lx mapped_count=%lu max_mapped=%lu used_bytes=%lu limit_bytes=%lu pages=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(state.mapped_count)), @as(c_ulong, @intCast(MAX_MAPPED_PAGES)), @as(c_ulong, @intCast(meta_used)), @as(c_ulong, @intCast(allocator.METADATA_REGION_BYTES)), @as(c_ulong, @intCast(state.metadata_page_count)));
-        }
-        _ = sos.cspace_delete(&cspace, slot);
-        _ = sos.cspace_free_slot(&cspace, slot);
-        sos.free_frame(frame_ref);
-        return err;
-    };
-    state.mapped_count = state.page_map.count();
-    _ = c.printf("[vm_map] recorded mapping vaddr=0x%lx frame_ref=%lu slot=%lu new_mapped_count=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(state.mapped_count)));
-
-    tracker.updateAccess(readable, writable, executable);
-    tracker.recordMapping(vaddr, PAGE_SIZE_4K);
-
-    switch (tracker.attr.kind) {
-        .Stack => {
-            if (tracker.start < state.stack_low) {
-                state.stack_low = tracker.start;
-            }
-        },
-        .Heap => {
-            if (tracker.end > state.heap_mapped_end) {
-                state.heap_mapped_end = tracker.end;
-            }
-        },
-        else => {},
-    }
-}
-
 pub fn brkImpl(handle: *VmHandle, requested: usize) VmError!usize {
     const state = handle.ensureVmState();
     const caller_ptr: c_ulong = @intCast(@intFromPtr(handle.getClient()));
@@ -265,7 +155,7 @@ pub fn brkImpl(handle: *VmHandle, requested: usize) VmError!usize {
     if (cursor < HEAP_BASE) cursor = HEAP_BASE;
     while (cursor < target_map_end) : (cursor += PAGE_SIZE_4K) {
         _ = c.printf("[vm_brk] mapping cursor=0x%lx target=0x%lx\n", @as(c_ulong, @intCast(cursor)), @as(c_ulong, @intCast(target_map_end)));
-        mapAnonymousPage(handle, state, cursor, &state.heap_region) catch |err| {
+        state.mapAnonymousPage(handle, cursor, &state.heap_region) catch |err| {
             const err_code: c_int = vmErrorToErrno(err);
             _ = c.printf("[vm_brk] mapAnonymousPage failed cursor=0x%lx errno=%d\n", @as(c_ulong, @intCast(cursor)), err_code);
             return err;
@@ -329,7 +219,7 @@ pub fn mmapImpl(handle: *VmHandle, addr: usize, length: usize, prot: c_int, flag
     _ = c.printf("[vm_mmap] base=0x%lx end=0x%lx\n", @as(c_ulong, @intCast(base)), @as(c_ulong, @intCast(end_addr)));
     while (cursor < end_addr) : (cursor += PAGE_SIZE_4K) {
         _ = c.printf("[vm_mmap] mapping cursor=0x%lx\n", @as(c_ulong, @intCast(cursor)));
-        mapAnonymousPage(handle, state, cursor, tracker) catch |err| {
+        state.mapAnonymousPage(handle, cursor, tracker) catch |err| {
             const err_code: c_int = vmErrorToErrno(err);
             _ = c.printf("[vm_mmap] mapAnonymousPage failed cursor=0x%lx errno=%d\n", @as(c_ulong, @intCast(cursor)), err_code);
             map_failed = true;
@@ -361,7 +251,7 @@ fn handleVmFaultInternal(handle: *VmHandle, fault_addr: usize, want_write: bool,
     const min_stack = state.stack_guard + PAGE_SIZE_4K;
     if (base >= min_stack and base < state.stack_top) {
         _ = c.printf("[vm_fault] growing stack at 0x%lx (low=0x%lx guard=0x%lx top=0x%lx)\n", @as(c_ulong, @intCast(base)), @as(c_ulong, @intCast(state.stack_low)), @as(c_ulong, @intCast(state.stack_guard)), @as(c_ulong, @intCast(state.stack_top)));
-        try mapAnonymousPage(handle, state, base, &state.stack_region);
+        try state.mapAnonymousPage(handle, base, &state.stack_region);
         return;
     }
 
@@ -371,12 +261,12 @@ fn handleVmFaultInternal(handle: *VmHandle, fault_addr: usize, want_write: bool,
     }
 
     if (base >= HEAP_BASE and base < state.heap_break) {
-        try mapAnonymousPage(handle, state, base, &state.heap_region);
+        try state.mapAnonymousPage(handle, base, &state.heap_region);
         return;
     }
 
     if (findMmapRegion(state, base)) |tracker| {
-        try mapAnonymousPage(handle, state, base, tracker);
+        try state.mapAnonymousPage(handle, base, tracker);
         return;
     }
 
@@ -403,45 +293,6 @@ fn alignDown(value: usize, alignment: usize) usize {
 
 fn pageBase(addr: usize) usize {
     return alignDown(addr, PAGE_SIZE_4K);
-}
-
-fn insertPage(
-    state: *client.Client,
-    vaddr: usize,
-    frame_ref: usize,
-    cap_slot: sel4.seL4_CPtr,
-    cap_owner: ?*sos.cspace_t,
-    owns_frame: bool,
-    owns_cap: bool,
-) VmError!*page.MappedPage {
-    if (owns_cap and cap_owner == null) {
-        _ = c.printf("[vm_map] insertPage missing cap_owner for vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
-        return VmError.InvalidArgs;
-    }
-    if (state.page_map.getPtr(vaddr)) |entry| {
-        entry.frame_ref = frame_ref;
-        entry.cap_slot = cap_slot;
-        entry.cap_owner = cap_owner;
-        entry.owns_frame = owns_frame;
-        entry.owns_cap = owns_cap;
-        return entry;
-    }
-
-    if (state.page_map.count() >= MAX_MAPPED_PAGES) {
-        return VmError.Capacity;
-    }
-
-    state.page_map.put(vaddr, page.MappedPage{
-        .frame_ref = frame_ref,
-        .cap_slot = cap_slot,
-        .cap_owner = cap_owner,
-        .owns_frame = owns_frame,
-        .owns_cap = owns_cap,
-    }) catch {
-        return VmError.Capacity;
-    };
-    state.mapped_count = state.page_map.count();
-    return state.page_map.getPtr(vaddr).?;
 }
 
 fn leaseMmapRegion(state: *client.Client, base: usize, prot: c_int) VmError!*region.Region {
@@ -528,7 +379,7 @@ pub export fn vm_state_release(cl: *sos.client_t) callconv(.c) void {
 
 pub export fn vm_register_stack_mapping(handle: *VmHandle, vaddr: usize, frame_ref: usize, cap_slot: sel4.seL4_CPtr) callconv(.c) void {
     const state = handle.ensureVmState();
-    _ = insertPage(state, vaddr, frame_ref, cap_slot, null, false, false) catch |err| {
+    _ = state.insertPage(vaddr, frame_ref, cap_slot, null, false, false) catch |err| {
         const errno = vmErrorToErrno(err);
         _ = c.printf("[vm_stack] failed to record mapping errno=%d vaddr=0x%lx\n", errno, @as(c_ulong, @intCast(vaddr)));
         @panic("unable to record stack mapping");
