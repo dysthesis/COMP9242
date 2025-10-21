@@ -66,6 +66,7 @@ add_executable(
     src/utils.c
     src/threads.c
     src/debugger.c
+    src/ut_shim.c
 )
 target_include_directories(sos PRIVATE "include" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(

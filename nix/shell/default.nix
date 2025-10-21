@@ -122,6 +122,7 @@ in {
     CMAKE_EXPORT_COMPILE_COMMANDS = "ON";
     CROSS_COMPILER_PREFIX = "${pkgs'.stdenv.cc.targetPrefix}";
     CROSS_COMPILE = "$CROSS_COMPILER_PREFIX";
+    DIRENV_LOG_FORMAT = "";
     CFLAGS = [
       "-fPIC"
       "-fno-stack-protector"

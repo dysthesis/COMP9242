@@ -148,7 +148,9 @@ pub const Client = struct {
         if (!executable) {
             attrs = attrs | sel4.seL4_ARM_ExecuteNever;
         }
+
         const map_err = sos.map_frame(&cspace, slot, proc_vspace, vaddr, rights_sos, attrs);
+
         if (map_err != sel4.seL4_NoError) {
             _ = sos.cspace_delete(&cspace, slot);
             _ = sos.cspace_free_slot(&cspace, slot);
@@ -170,6 +172,8 @@ pub const Client = struct {
             return err;
         };
         self.mapped_count = self.addr_space.num_mapped();
+        try self.addr_space.recordLeafMap(vaddr);
+
         _ = c.printf("[vm_map] recorded mapping vaddr=0x%lx frame_ref=%lu slot=%lu new_mapped_count=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(self.mapped_count)));
 
         tracker.updateAccess(readable, writable, executable);
@@ -241,7 +245,9 @@ pub const Client = struct {
     fn releaseAllPages(self: *Self) void {
         var it = self.addr_space.iterator();
         while (it.next()) |kv| {
-            kv.value_ptr.release();
+            const vaddr = kv.key_ptr.*;
+            kv.value_ptr.release(); // unmap frame cap and free frame
+            self.addr_space.recordLeafUnmap(vaddr);
         }
         self.addr_space.clearRetainingCapacity();
         self.mapped_count = 0;

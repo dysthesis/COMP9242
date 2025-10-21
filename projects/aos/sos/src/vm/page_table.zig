@@ -8,6 +8,7 @@ pub const PTNode = struct {
     children: std.AutoHashMap(u16, *PTNode),
     /// Number of mapped leaf pages in this subtree
     live_leaves: usize = 0,
+    refcnt: usize = 0,
 
     pub fn init(alloc: std.mem.Allocator, level: Level, cap_slot: sel4.seL4_CPtr, parent: ?*PTNode) PTNode {
         return .{
@@ -68,7 +69,7 @@ fn ptObjectTypeAndBits() struct { typ: sel4.seL4_Word, bits: sel4.seL4_Word } {
 }
 
 /// Retype one page-table object into `slot`.
-pub fn retype_page_table_object(slot: sel4.seL4_CPtr, want_level: u8) RetypeError!void {
+pub fn retypePageTableObject(slot: sel4.seL4_CPtr, want_level: u8) RetypeError!void {
     if (want_level == 0) return RetypeError.BadArgs;
 
     const pt = ptObjectTypeAndBits();
@@ -79,8 +80,7 @@ pub fn retype_page_table_object(slot: sel4.seL4_CPtr, want_level: u8) RetypeErro
     }
 
     // NOTE: Do NOT ut_free() after a successful retype, the memory is now a kernel object.
-
-    const ut_cap: sel4.seL4_CPtr = ut_ptr.?.cap;
+    const ut_cap: sel4.seL4_CPtr = sos.ut_get_cap(ut_ptr.?);
 
     const err = sos.cspace_untyped_retype(
         &cspace,
@@ -102,12 +102,12 @@ pub const MapPtError = error{
     MapFailed,
 };
 
-inline fn levelShift(lvl: Level) usize {
+inline fn levelShift(lvl: Level) std.math.Log2Int(usize) {
     return switch (lvl) {
         .L0 => L0_SHIFT,
         .L1 => L1_SHIFT,
         .L2 => L2_SHIFT,
-        .L3 => L3_SHIFT, // leaf, no children under L3
+        .L3 => L3_SHIFT,
     };
 }
 

@@ -257,6 +257,7 @@ fn addCommonIncludePaths(b: *std.Build, m: *std.Build.Module) void {
         "projects/aos/libsel4cspace/include",
         "projects/aos/libaos/include",
         "projects/picotcp-bsd",
+        "projects/aos/sos/src",
         "libnfs/lib/.include",
         "libnfs/rquota",
         "libnfs/portmap",

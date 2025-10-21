@@ -83,7 +83,7 @@ pub const AddrSpace = struct {
         const slot = sos.cspace_alloc_slot(self.cspace);
         if (slot == sel4.seL4_CapNull) return error.OutOfSlots;
 
-        try page_table.retype_page_table_object(slot, @intFromEnum(want_level));
+        try page_table.retypePageTableObject(slot, @intFromEnum(want_level));
 
         // Map this page table at the address implied by vaddr (helper aligns internally)
         try page_table.map_page_table_into_vspace(self.vspace, slot, parent.level, vaddr);
@@ -91,6 +91,7 @@ pub const AddrSpace = struct {
         const child = try self.alloc.create(page_table.PTNode);
         child.* = page_table.PTNode.init(self.alloc, want_level, slot, parent);
         try parent.children.put(idx, child);
+        parent.refcnt += 1;
         return child;
     }
 
@@ -101,7 +102,106 @@ pub const AddrSpace = struct {
         n = try self.ensureChild(n, page_table.l2Index(vaddr), .L3, vaddr);
         return n;
     }
+
+    pub fn walkPath(self: *Self, vaddr: usize) ?[4]*page_table.PTNode {
+        var path: [4]*page_table.PTNode = undefined;
+        var n = self.root;
+        path[0] = n;
+
+        const l0_idx = page_table.l0Index(vaddr);
+        const l1_idx = page_table.l1Index(vaddr);
+        const l2_idx = page_table.l2Index(vaddr);
+        // const l3_idx = page_table.l3Index(vaddr);
+
+        if (n.children.get(l0_idx)) |l1| {
+            path[1] = l1;
+            if (l1.children.get(l1_idx)) |l2| {
+                path[2] = l2;
+                if (l2.children.get(l2_idx)) |l3| {
+                    path[3] = l3;
+                    return path;
+                }
+            }
+        }
+        return null;
+    }
+
+    fn bumpLiveLeaves(node: *page_table.PTNode) void {
+        var cur: ?*page_table.PTNode = node;
+        while (cur) |n| {
+            n.live_leaves += 1;
+            cur = n.parent;
+        }
+    }
+
+    fn decLiveLeaves(node: *page_table.PTNode) void {
+        var cur: ?*page_table.PTNode = node;
+        while (cur) |n| {
+            if (n.live_leaves > 0) n.live_leaves -= 1;
+            cur = n.parent;
+        }
+    }
+
+    /// Remove empty page-table nodes bottom-up along the path to `vaddr`.
+    fn pruneEmpty(self: *Self, vaddr: usize, path: *const [4]*page_table.PTNode) void {
+        const idx: [4]u16 = .{
+            page_table.l0Index(vaddr),
+            page_table.l1Index(vaddr),
+            page_table.l2Index(vaddr),
+            page_table.l3Index(vaddr),
+        };
+
+        var level: usize = 3;
+        while (level > 0) : (level -= 1) {
+            const child = path.*[level];
+            if (child.live_leaves != 0) break;
+            if (child.children.count() != 0) break;
+
+            const parent = path.*[level - 1];
+
+            _ = sos.cspace_delete(self.cspace, child.cap_slot);
+            sos.cspace_free_slot(self.cspace, child.cap_slot);
+            _ = parent.children.remove(idx[level - 1]);
+            self.alloc.destroy(child);
+        }
+    }
+
+    /// Call after a successful leaf mapping at `vaddr`.
+    pub fn recordLeafMap(self: *AddrSpace, vaddr: usize) super.VmError!void {
+        if (self.walkPath(vaddr)) |path| {
+            var i: usize = 3;
+            while (true) {
+                path[i].live_leaves += 1;
+                if (i == 0) break;
+                i -= 1;
+            }
+        }
+    }
+
+    /// Call when unmapping a leaf at `vaddr` (e.g., teardown).
+    pub fn recordLeafUnmap(self: *Self, vaddr: usize) void {
+        const p = self.walkPath(vaddr) orelse return;
+        const l3: *page_table.PTNode = p[3];
+        decLiveLeaves(l3);
+        self.pruneEmpty(vaddr, &p);
+    }
 };
+
+inline fn mapAddrSpaceErr(e: anyerror) super.VmError {
+    return switch (e) {
+        error.OutOfMemory => super.VmError.Capacity,
+
+        error.OutOfSlots => super.VmError.OutOfSlots,
+
+        error.OutOfUntyped => super.VmError.Capacity,
+        error.RetypeFailed => super.VmError.MapFailed,
+        error.BadArgs => super.VmError.InvalidArgs,
+
+        error.MapFailed => super.VmError.MapFailed,
+
+        else => super.VmError.MapFailed,
+    };
+}
 
 pub const PageMap = std.AutoHashMap(usize, page.MappedPage);
 

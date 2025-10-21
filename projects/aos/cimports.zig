@@ -29,6 +29,7 @@ pub const sos = @cImport({
     @cInclude("frame_table.h");
     @cInclude("vmem_layout.h");
     @cInclude("ut.h");
+    @cInclude("ut_shim.h");
     @cInclude("utils.h");
 });
 
