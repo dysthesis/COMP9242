@@ -54,33 +54,74 @@ pub const RetypeError = error{
     BadArgs, // nonsense level, etc.
 };
 
-fn ptObjectTypeAndBits() struct { typ: sel4.seL4_Word, bits: sel4.seL4_Word } {
-    const typ =
-        if (@hasDecl(sel4, "seL4_ARM_PageTableObject"))
-            sel4.seL4_ARM_PageTableObject
-        else
-            @field(sel4, "seL4_PageTableObject");
-    const bits =
-        if (@hasDecl(sel4, "seL4_PageTableBits"))
-            sel4.seL4_PageTableBits
-        else
-            @field(sel4, "seL4_ARM_PageTableBits");
-    return .{ .typ = typ, .bits = bits };
+fn ptObjectTypeAndBits(level: Level) struct { typ: sel4.seL4_Word, bits: sel4.seL4_Word } {
+    // I sure love C FFI (and C in general)! /s
+
+    // Check if the libsel4 we're using has the stuff we need
+    const hasPUD = @hasDecl(sel4, "seL4_ARM_PageUpperDirectoryObject");
+    const hasPD = @hasDecl(sel4, "seL4_ARM_PageDirectoryObject");
+
+    if (!hasPUD and !hasPD) {
+        // What do we call the page table bits?
+        const bits =
+            if (@hasDecl(sel4, "seL4_ARM_PageTableBits"))
+                sel4.seL4_ARM_PageTableBits
+            else
+                sel4.seL4_PageTableBits;
+        return .{
+            .typ = sel4.seL4_ARM_PageTableObject,
+            .bits = bits,
+        };
+    } else if (!hasPUD and hasPD) {
+        return switch (level) {
+            .L0 => @panic("L0 has no child!"),
+            .L1 => .{
+                .typ = sel4.seL4_ARM_PageDirectoryObject,
+                .bits = if (@hasDecl(sel4, "seL4_PDBits"))
+                    sel4.seL4_PDBits
+                else if (@hasDecl(sel4, "seL4_ARM_PageTableBits"))
+                    sel4.seL4_PageTableBits
+                else
+                    sel4.seL4_PageTableBits,
+            },
+            .L2, .L3 => .{
+                .typ = sel4.seL4_ARM_PageTableObject,
+                .bits = if (@hasDecl(sel4, "seL4_ARM_PageTableBits"))
+                    sel4.seL4_ARM_PageTableBits
+                else
+                    sel4.seL4_PageTableBits,
+            },
+        };
+    } else if (hasPUD and !hasPD) {
+        return switch (level) {
+            .L0 => @panic("L0 has no child"),
+            .L1 => .{ .typ = sel4.seL4_ARM_PageUpperDirectoryObject, .bits = sel4.seL4_PUDBits },
+            .L2, .L3 => .{ .typ = sel4.seL4_ARM_PageTableObject, .bits = if (@hasDecl(sel4, "seL4_ARM_PageTableBits"))
+                sel4.seL4_ARM_PageTableBits
+            else
+                sel4.seL4_PageTableBits },
+        };
+    } else {
+        return switch (level) {
+            .L0 => @panic("L0 has no child"),
+            .L1 => .{ .typ = sel4.seL4_ARM_PageUpperDirectoryObject, .bits = sel4.seL4_PUDBits },
+            .L2 => .{ .typ = sel4.seL4_ARM_PageDirectoryObject, .bits = if (@hasDecl(sel4, "seL4_PDBits")) sel4.seL4_PDBits else (if (@hasDecl(sel4, "seL4_ARM_PageTableBits")) sel4.seL4_ARM_PageTableBits else sel4.seL4_PageTableBits) },
+            .L3 => .{ .typ = sel4.seL4_ARM_PageTableObject, .bits = if (@hasDecl(sel4, "seL4_ARM_PageTableBits")) sel4.seL4_ARM_PageTableBits else sel4.seL4_PageTableBits },
+        };
+    }
 }
 
 /// Retype one page-table object into `slot`.
-pub fn retypePageTableObject(slot: sel4.seL4_CPtr, want_level: u8) RetypeError!void {
-    if (want_level == 0) return RetypeError.BadArgs;
+pub fn retypePageTableObject(slot: sel4.seL4_CPtr, level: Level) RetypeError!void {
+    if (level == .L0) return RetypeError.BadArgs;
 
-    const pt = ptObjectTypeAndBits();
+    const pt = ptObjectTypeAndBits(level);
 
-    const ut_ptr = sos.ut_alloc(@intCast(pt.bits), &cspace);
-    if (ut_ptr == null) {
+    const ut_ptr = sos.ut_alloc(@intCast(pt.bits), &cspace) orelse
         return RetypeError.OutOfUntyped;
-    }
 
     // NOTE: Do NOT ut_free() after a successful retype, the memory is now a kernel object.
-    const ut_cap: sel4.seL4_CPtr = sos.ut_get_cap(ut_ptr.?);
+    const ut_cap: sel4.seL4_CPtr = sos.ut_get_cap(ut_ptr);
 
     const err = sos.cspace_untyped_retype(
         &cspace,
@@ -91,11 +132,32 @@ pub fn retypePageTableObject(slot: sel4.seL4_CPtr, want_level: u8) RetypeError!v
     );
 
     if (err != sel4.seL4_NoError) {
-        sos.ut_free(ut_ptr.?);
+        sos.ut_free(ut_ptr);
         return RetypeError.RetypeFailed;
     }
 }
 
+pub fn mapChildToVSpace(
+    vspace_root: sel4.seL4_CPtr,
+    child_cap: sel4.seL4_CPtr,
+    parent_level: Level,
+    vaddr: usize,
+) MapPtError!void {
+    if (parent_level == .L3) return MapPtError.BadLevel;
+
+    const child = childLevel(parent_level);
+    const span_shift = levelShift(child);
+    const span = (@as(usize, 1) << span_shift) * 512; // span covered by the child table
+    const base = vaddr & ~(span - 1);
+
+    const attrs = sel4.seL4_ARM_Default_VMAttributes;
+    const err = ptMap(child, child_cap, vspace_root, @intCast(base), attrs);
+    if (err != sel4.seL4_NoError) {
+        const level = sel4.seL4_MappingFailedLookupLevel();
+        _ = c.printf("[ptMap] from mapChildToVSpace -> failed with parent=%d vaddr=0x%lx base=0x%lx missing_level=L%lu err=%d", @as(c_int, @intFromEnum(parent_level)), @as(c_ulong, @intCast(vaddr)), @as(c_ulong, base), level, @as(c_int, @intCast(err)));
+        return MapPtError.MapFailed;
+    }
+}
 pub const MapPtError = error{
     InvalidArgs,
     BadLevel,
@@ -113,20 +175,33 @@ inline fn levelShift(lvl: Level) std.math.Log2Int(usize) {
 
 // Small shim so this builds across libsel4 versions.
 inline fn ptMap(
+    child_level: Level,
     pt_cap: sel4.seL4_CPtr,
-    root_or_parent: sel4.seL4_CPtr,
+    vspace_root: sel4.seL4_CPtr,
     vaddr: sel4.seL4_Word,
     attrs: sel4.seL4_ARM_VMAttributes,
 ) sel4.seL4_Error {
-    if (@hasDecl(sel4, "seL4_ARM_PageTable_Map")) {
-        return sel4.seL4_ARM_PageTable_Map(pt_cap, root_or_parent, vaddr, attrs);
-    } else {
-        // Some headers expose an arch-agnostic alias.
-        return @field(sel4, "seL4_PageTable_Map")(pt_cap, root_or_parent, vaddr, attrs);
+    switch (child_level) {
+        .L0 => unreachable, // L0 is the vspace root
+        .L1 => if (@hasDecl(sel4, "seL4_ARM_PageUpperDirectory_Map"))
+            return sel4.seL4_ARM_PageUpperDirectory_Map(pt_cap, vspace_root, vaddr, attrs),
+
+        .L2 => if (@hasDecl(sel4, "seL4_ARM_PageDirectory_Map"))
+            return sel4.seL4_ARM_PageDirectory_Map(pt_cap, vspace_root, vaddr, attrs),
+        .L3 => {
+            if (@hasDecl(sel4, "seL4_ARM_PageTable_Map")) {
+                return sel4.seL4_ARM_PageTable_Map(pt_cap, vspace_root, vaddr, attrs);
+            } else {
+                // Some headers expose an arch-agnostic alias.
+                return @field(sel4, "seL4_PageTable_Map")(pt_cap, vspace_root, vaddr, attrs);
+            }
+        },
     }
+
+    return @field(sel4, "seL4_PageTable_Map")(pt_cap, vspace_root, vaddr, attrs);
 }
 
-inline fn childLevel(parent: Level) Level {
+pub inline fn childLevel(parent: Level) Level {
     return switch (parent) {
         .L0 => .L1,
         .L1 => .L2,
@@ -135,23 +210,30 @@ inline fn childLevel(parent: Level) Level {
     };
 }
 
-/// Map a freshly retyped PageTable `pt_cap` under `parent_level` at child index `idx`.
-pub fn map_page_table_into_vspace(
-    vspace_root: sel4.seL4_CPtr,
-    pt_cap: sel4.seL4_CPtr,
-    parent_level: Level,
-    vaddr: usize,
-) MapPtError!void {
-    if (parent_level == .L3) return MapPtError.BadLevel;
-    const child = childLevel(parent_level);
-    const base: usize = vaddr & ~((@as(usize, 1) << levelShift(child)) - 1); // align to child range
-    const attrs = sel4.seL4_ARM_Default_VMAttributes;
+pub inline fn parentLevel(child: Level) Level {
+    return switch (child) {
+        .L1 => .L0,
+        .L2 => .L1,
+        .L3 => .L2,
+        .L0 => unreachable,
+    };
+}
 
-    const err = ptMap(pt_cap, vspace_root, @intCast(base), attrs);
-    if (err != sel4.seL4_NoError) return MapPtError.MapFailed;
+/// Convert the value returned by seL4_MappingFailedLookupLevel() into the child table to create.
+pub fn missingChildLevel(lvl: sel4.seL4_Word) ?Level {
+    // Newer libsel4 returns the level index (1..3).
+    if (lvl == 1 or lvl == 2 or lvl == 3) {
+        return @enumFromInt(lvl);
+    }
+    // Older libsel4 returns "number of unresolved bits" constants per arch.
+    if (@hasDecl(sel4, "SEL4_MAPPING_LOOKUP_NO_PUD") and lvl == sel4.SEL4_MAPPING_LOOKUP_NO_PUD) return .L1;
+    if (@hasDecl(sel4, "SEL4_MAPPING_LOOKUP_NO_PD") and lvl == sel4.SEL4_MAPPING_LOOKUP_NO_PD) return .L2;
+    if (@hasDecl(sel4, "SEL4_MAPPING_LOOKUP_NO_PT") and lvl == sel4.SEL4_MAPPING_LOOKUP_NO_PT) return .L3;
+    return null;
 }
 
 const std = @import("std");
 const cimports = @import("cimports");
 const sel4 = cimports.sel4;
 const sos = cimports.sos;
+const c = cimports.c;

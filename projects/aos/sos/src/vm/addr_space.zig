@@ -83,10 +83,10 @@ pub const AddrSpace = struct {
         const slot = sos.cspace_alloc_slot(self.cspace);
         if (slot == sel4.seL4_CapNull) return error.OutOfSlots;
 
-        try page_table.retypePageTableObject(slot, @intFromEnum(want_level));
+        try page_table.retypePageTableObject(slot, want_level);
 
         // Map this page table at the address implied by vaddr (helper aligns internally)
-        try page_table.map_page_table_into_vspace(self.vspace, slot, parent.level, vaddr);
+        try page_table.mapChildToVSpace(self.vspace, slot, parent.level, vaddr);
 
         const child = try self.alloc.create(page_table.PTNode);
         child.* = page_table.PTNode.init(self.alloc, want_level, slot, parent);
@@ -167,7 +167,7 @@ pub const AddrSpace = struct {
     }
 
     /// Call after a successful leaf mapping at `vaddr`.
-    pub fn recordLeafMap(self: *AddrSpace, vaddr: usize) super.VmError!void {
+    pub fn recordLeafMap(self: *AddrSpace, vaddr: usize) void {
         if (self.walkPath(vaddr)) |path| {
             var i: usize = 3;
             while (true) {
@@ -185,7 +185,74 @@ pub const AddrSpace = struct {
         decLiveLeaves(l3);
         self.pruneEmpty(vaddr, &p);
     }
+
+    pub fn mapFrame(
+        self: *Self,
+        page_cap: sel4.seL4_CPtr,
+        vaddr: usize,
+        rights: sos.seL4_CapRights_t,
+        attrs: sel4.seL4_ARM_VMAttributes,
+    ) super.VmError!void {
+        var tries: u32 = 0;
+
+        while (true) {
+            _ = c.printf("[vm_map] attempting to map frame, cap=%lu vaddr=0x%lx rights=%s attr=0x%lx", page_cap, @as(c_ulong, vaddr), &logging.rightsStr(rights), @as(c_ulong, attrs));
+
+            const err = pageMap(page_cap, self.vspace, vaddr, rights, attrs);
+            if (err == sel4.seL4_NoError) break;
+
+            if (err != sel4.seL4_FailedLookup or tries >= 3) {
+                const lvl: c_ulong = sel4.seL4_MappingFailedLookupLevel();
+                _ = c.printf("[map failed] vaddr=0x%lx err=%d missing_level=L%lu\n", @as(c_ulong, vaddr), @as(c_int, @intCast(err)), lvl);
+                return super.VmError.MapFailed;
+            }
+
+            tries += 1;
+
+            const lvl_word = sel4.seL4_MappingFailedLookupLevel();
+            const missing_child = page_table.missingChildLevel(lvl_word) orelse {
+                _ = c.printf("[vm_map] unknown missing level code=%lu\n", @as(c_ulong, lvl_word));
+                return super.VmError.MapFailed;
+            };
+            const parent = page_table.parentLevel(missing_child);
+
+            // Allocate a cslot for the new child page table
+            const slot = sos.cspace_alloc_slot(self.cspace);
+            if (slot == sel4.seL4_CapNull) return super.VmError.OutOfSlots;
+
+            // Retype the object for the child level
+            page_table.retypePageTableObject(slot, missing_child) catch |e| {
+                sos.cspace_free_slot(self.cspace, slot);
+                return mapAddrSpaceErr(e);
+            };
+
+            // Map the child at the correctly aligned base that covers vaddr.
+            page_table.mapChildToVSpace(self.vspace, slot, parent, vaddr) catch |e| {
+                _ = sos.cspace_delete(self.cspace, slot);
+                sos.cspace_free_slot(self.cspace, slot);
+                return mapAddrSpaceErr(e);
+            };
+
+            // retry the leaf map now that the missing level exists
+        }
+
+        self.recordLeafMap(vaddr);
+    }
 };
+
+inline fn pageMap(
+    page_cap: sel4.seL4_CPtr,
+    root: sel4.seL4_CPtr,
+    vaddr: usize,
+    rights: sos.seL4_CapRights_t,
+    attrs: sel4.seL4_ARM_VMAttributes,
+) sel4.seL4_Error {
+    if (@hasDecl(sel4, "seL4_ARM_Page_Map")) {
+        return sos.seL4_ARM_Page_Map(page_cap, root, vaddr, rights, attrs);
+    } else {
+        return @field(sel4, "seL4_Page_Map")(page_cap, root, vaddr, rights, attrs);
+    }
+}
 
 inline fn mapAddrSpaceErr(e: anyerror) super.VmError {
     return switch (e) {
@@ -415,6 +482,7 @@ const RbNodeNil = rbtree.tree.nil;
 const std = @import("std");
 const page = @import("page.zig");
 const page_table = @import("page_table.zig");
+const logging = @import("logging.zig");
 
 const cimports = @import("cimports");
 const sel4 = cimports.sel4;

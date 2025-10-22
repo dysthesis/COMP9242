@@ -143,22 +143,18 @@ pub const Client = struct {
         _ = c.printf("[vm_map] copied frame cap slot=%lu frame_ref=%lu\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
 
         const rights = region.rightsFromBooleans(readable, writable);
-        const rights_sos = rights;
         var attrs = sel4.seL4_ARM_Default_VMAttributes;
         if (!executable) {
             attrs = attrs | sel4.seL4_ARM_ExecuteNever;
         }
 
-        const map_err = sos.map_frame(&cspace, slot, proc_vspace, vaddr, rights_sos, attrs);
-
-        if (map_err != sel4.seL4_NoError) {
+        self.addr_space.mapFrame(slot, vaddr, rights, attrs) catch |err| {
             _ = sos.cspace_delete(&cspace, slot);
             _ = sos.cspace_free_slot(&cspace, slot);
             sos.free_frame(frame_ref);
-            const map_err_i32: c_int = @intCast(map_err);
-            _ = c.printf("[vm_map] map_frame failed err=%d slot=%lu frame_ref=%lu vaddr=0x%lx\n", map_err_i32, @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
+            _ = c.printf("[vm_map] map_frame failed err=%d slot=%lu frame_ref=%lu vaddr=0x%lx\n", super.vmErrorToErrno(err), @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
             return super.VmError.MapFailed;
-        }
+        };
         _ = c.printf("[vm_map] map_frame success slot=%lu frame_ref=%lu vaddr=0x%lx\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
 
         _ = self.insertPage(vaddr, frame_ref, slot, &cspace, true, true) catch |err| {
@@ -172,7 +168,7 @@ pub const Client = struct {
             return err;
         };
         self.mapped_count = self.addr_space.num_mapped();
-        try self.addr_space.recordLeafMap(vaddr);
+        // self.addr_space.recordLeafMap(vaddr);
 
         _ = c.printf("[vm_map] recorded mapping vaddr=0x%lx frame_ref=%lu slot=%lu new_mapped_count=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(self.mapped_count)));
 
