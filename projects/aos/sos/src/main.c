@@ -640,7 +640,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
   }
 
   /* load the elf image from the cpio file */
-  err = elf_load(&cspace, user_process.vspace, &elf_file);
+  err = elf_load(&cspace, user_process.vspace, &elf_file, client->vm_state);
   if (err) {
     ZF_LOGE("Failed to load elf image");
     goto out;

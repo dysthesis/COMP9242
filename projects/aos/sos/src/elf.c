@@ -21,6 +21,7 @@
 #include "ut.h"
 #include "mapping.h"
 #include "elfload.h"
+#include "vm/api.h"
 
 /*
  * Convert ELF permissions into seL4 permissions.
@@ -72,7 +73,8 @@ static inline seL4_CapRights_t get_sel4_rights_from_elf(unsigned long permission
  *
  */
 static int load_segment_into_vspace(cspace_t *cspace, seL4_CPtr loadee, const char *src, size_t segment_size,
-                                    size_t file_size, uintptr_t dst, seL4_CapRights_t permissions)
+                                    size_t file_size, uintptr_t dst, seL4_CapRights_t permissions,
+                                    struct vm_handle *vm_handle, unsigned long elf_flags)
 {
     assert(file_size <= segment_size);
 
@@ -123,6 +125,20 @@ static int load_segment_into_vspace(cspace_t *cspace, seL4_CPtr loadee, const ch
         } else if (err != seL4_NoError) {
             ZF_LOGE("Failed to map into loadee at %p, error %u", (void *) loadee_vaddr, err);
             return -1;
+        } else {
+            /* Successful new mapping - register it with the VM subsystem */
+            if (vm_handle != NULL) {
+                bool readable = (elf_flags & PF_R) || (elf_flags & PF_X);
+                bool writable = (elf_flags & PF_W);
+                bool executable = (elf_flags & PF_X);
+
+                int vm_err = vm_register_elf_mapping(vm_handle, loadee_vaddr, frame,
+                                                      loadee_frame, readable, writable, executable);
+                if (vm_err < 0) {
+                    ZF_LOGE("Failed to register ELF mapping at %p with VM subsystem", (void *) loadee_vaddr);
+                    return -1;
+                }
+            }
         }
 
         /* finally copy the data */
@@ -154,7 +170,7 @@ static int load_segment_into_vspace(cspace_t *cspace, seL4_CPtr loadee, const ch
     return 0;
 }
 
-int elf_load(cspace_t *cspace, seL4_CPtr loadee_vspace, elf_t *elf_file)
+int elf_load(cspace_t *cspace, seL4_CPtr loadee_vspace, elf_t *elf_file, struct vm_handle *vm_handle)
 {
 
     int num_headers = elf_getNumProgramHeaders(elf_file);
@@ -175,7 +191,7 @@ int elf_load(cspace_t *cspace, seL4_CPtr loadee_vspace, elf_t *elf_file)
         /* Copy it across into the vspace. */
         ZF_LOGD(" * Loading segment %p-->%p\n", (void *) vaddr, (void *)(vaddr + segment_size));
         int err = load_segment_into_vspace(cspace, loadee_vspace, source_addr, segment_size, file_size, vaddr,
-                                           get_sel4_rights_from_elf(flags));
+                                           get_sel4_rights_from_elf(flags), vm_handle, flags);
         if (err) {
             ZF_LOGE("Elf loading failed!");
             return -1;

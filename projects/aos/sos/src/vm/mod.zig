@@ -352,6 +352,43 @@ pub export fn vm_report_initial_stack(handle: *VmHandle, mapped_bottom: usize) c
     }
 }
 
+/// Register an ELF segment mapping in the VM subsystem
+/// This should be called after successfully mapping ELF segments to track them
+pub export fn vm_register_elf_mapping(
+    handle: *VmHandle,
+    vaddr: usize,
+    frame_ref: usize,
+    cap_slot: sel4.seL4_CPtr,
+    readable: bool,
+    writable: bool,
+    executable: bool,
+) callconv(.c) c_int {
+    _ = c.printf(
+        "[vm_elf] registering ELF mapping vaddr=0x%lx frame_ref=%lu cap_slot=%lu r=%d w=%d x=%d\n",
+        @as(c_ulong, @intCast(vaddr)),
+        @as(c_ulong, @intCast(frame_ref)),
+        @as(c_ulong, @intCast(cap_slot)),
+        @as(c_int, if (readable) 1 else 0),
+        @as(c_int, if (writable) 1 else 0),
+        @as(c_int, if (executable) 1 else 0),
+    );
+
+    const state = handle.ensureVmState();
+
+    // Track this mapping with ownership (VM will clean up on process exit)
+    _ = state.insertPage(vaddr, frame_ref, cap_slot, &cspace, true, true) catch |err| {
+        const errno = vmErrorToErrno(err);
+        _ = c.printf("[vm_elf] failed to record ELF mapping errno=%d vaddr=0x%lx\n", errno, @as(c_ulong, @intCast(vaddr)));
+        return -errno;
+    };
+
+    state.mapped_count = state.addr_space.num_mapped();
+    state.addr_space.recordLeafMap(vaddr);
+
+    _ = c.printf("[vm_elf] successfully registered ELF mapping vaddr=0x%lx mapped_count=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(state.mapped_count)));
+    return 0;
+}
+
 pub export fn vm_reset_state(handle: *VmHandle) callconv(.c) void {
     handle.validate();
     bootstrapVmStates();

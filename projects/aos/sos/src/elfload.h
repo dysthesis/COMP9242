@@ -16,4 +16,6 @@
 #include <elf/elf.h>
 #include <elf.h>
 
-int elf_load(cspace_t *cspace, seL4_CPtr loadee_vspace, elf_t *elf_file);
+struct vm_handle; /* Forward declaration */
+
+int elf_load(cspace_t *cspace, seL4_CPtr loadee_vspace, elf_t *elf_file, struct vm_handle *vm_handle);
