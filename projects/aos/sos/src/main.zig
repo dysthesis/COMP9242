@@ -218,6 +218,7 @@ fn handleOpen(ctx: *ServerContext, args: anytype) SyscallResponse {
     const max_copy = @min(buf_len, PAGE_SIZE_4K);
     const raw_len = c.strnlen(@as([*c]const u8, @ptrCast(shared_ptr)), max_copy);
     const name_len: usize = @intCast(raw_len);
+
     if (name_len == max_copy) {
         return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.ENAMETOOLONG)) } };
     }
@@ -517,7 +518,7 @@ fn handleBrk(ctx: *ServerContext, args: anytype) SyscallResponse {
         return SyscallResponse{ .Brk = .{ .result = -@as(i64, sos.EINVAL) } };
     };
     const requested: usize = @intCast(args.new_break);
-    const result = vm.brkImpl(handle, requested) catch |err| {
+    const result = handle.brk(requested) catch |err| {
         const errno = vm.vmErrorToErrno(err);
         _ = c.printf("[vm_brk] handleBrk error errno=%d\n", errno);
         return SyscallResponse{ .Brk = .{ .result = -@as(i64, errno) } };
@@ -540,7 +541,7 @@ fn handleMmap(ctx: *ServerContext, args: anytype) SyscallResponse {
     const fd: c_int = @intCast(wordToI64(args.fd));
     const offset: usize = @intCast(args.offset);
 
-    const base = vm.mmapImpl(handle, addr, length, prot, flags, fd, offset) catch |err| {
+    const base = handle.mmap(addr, length, prot, flags, fd, offset) catch |err| {
         const errno = vm.vmErrorToErrno(err);
         return SyscallResponse{ .Mmap = .{ .result = -@as(i64, errno) } };
     };
