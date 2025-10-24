@@ -389,6 +389,30 @@ pub export fn vm_register_elf_mapping(
     return 0;
 }
 
+/// Access a user buffer directly for read/write operations
+/// Returns a pointer to the frame data for a given user virtual address
+/// Returns NULL if the page is not mapped
+pub export fn vm_get_user_page_data(
+    handle: *VmHandle,
+    user_vaddr: usize,
+) callconv(.c) ?[*]u8 {
+    const state = handle.ensureVmState();
+    const page_base = pageBase(user_vaddr);
+
+    const mapped_page = state.findPage(page_base) orelse {
+        _ = c.printf("[vm_access] page not mapped at vaddr=0x%lx\n", @as(c_ulong, @intCast(user_vaddr)));
+        return null;
+    };
+
+    if (mapped_page.frame_ref == 0) {
+        _ = c.printf("[vm_access] invalid frame_ref at vaddr=0x%lx\n", @as(c_ulong, @intCast(user_vaddr)));
+        return null;
+    }
+
+    const frame_data_ptr = sos.frame_data(mapped_page.frame_ref);
+    return @as([*]u8, @ptrCast(frame_data_ptr));
+}
+
 pub export fn vm_reset_state(handle: *VmHandle) callconv(.c) void {
     handle.validate();
     bootstrapVmStates();

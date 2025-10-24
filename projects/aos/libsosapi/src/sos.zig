@@ -144,6 +144,7 @@ pub export fn sos_read(file: c_int, buf: [*c]u8, nbyte: usize) callconv(.c) c_in
     }
 
     const buf_ptr: [*]u8 = @ptrCast(buf);
+    const buf_addr: usize = @intFromPtr(buf_ptr);
     const limit = if (nbyte > INT_MAX_USIZE) INT_MAX_USIZE else nbyte;
 
     var total: usize = 0;
@@ -157,7 +158,7 @@ pub export fn sos_read(file: c_int, buf: [*c]u8, nbyte: usize) callconv(.c) c_in
         const syscall = Syscall{
             .Read = .{
                 .arg = signedIntToWord(file),
-                .buf_addr = PROCESS_SHBUF_WORD,
+                .buf_addr = @as(sel4.seL4_Word, @intCast(buf_addr + total)),
                 .buf_size = @as(sel4.seL4_Word, @intCast(req)),
             },
         };
@@ -177,9 +178,6 @@ pub export fn sos_read(file: c_int, buf: [*c]u8, nbyte: usize) callconv(.c) c_in
         }
 
         const chunk: usize = @intCast(res);
-        const source = sharedBuffer()[0..chunk];
-        std.mem.copyForwards(u8, buf_ptr[total..][0..chunk], source);
-
         total += chunk;
         if (chunk < req) {
             break;
@@ -200,7 +198,7 @@ pub export fn sos_write(file: c_int, buf: [*c]const u8, nbyte: usize) callconv(.
     }
 
     const buf_ptr: [*]const u8 = @ptrCast(buf);
-    const shbuf = sharedBuffer();
+    const buf_addr: usize = @intFromPtr(buf_ptr);
     const limit = if (nbyte > INT_MAX_USIZE) INT_MAX_USIZE else nbyte;
 
     var total: usize = 0;
@@ -211,12 +209,10 @@ pub export fn sos_write(file: c_int, buf: [*c]const u8, nbyte: usize) callconv(.
         }
         if (req == 0) break;
 
-        std.mem.copyForwards(u8, shbuf[0..req], buf_ptr[total..][0..req]);
-
         const syscall = Syscall{
             .Write = .{
                 .arg = signedIntToWord(file),
-                .buf_addr = PROCESS_SHBUF_WORD,
+                .buf_addr = @as(sel4.seL4_Word, @intCast(buf_addr + total)),
                 .buf_size = @as(sel4.seL4_Word, @intCast(req)),
             },
         };

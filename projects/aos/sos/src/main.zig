@@ -89,6 +89,38 @@ const ServerContext = struct {
     reply_ut: [*c]*sos.ut_t,
 };
 
+/// Copy data from kernel buffer to user buffer, handling page boundaries
+fn copyToUserBuffer(vm_handle: *vm.VmHandle, user_vaddr: usize, src_data: [*]const u8, length: usize) bool {
+    var offset: usize = 0;
+    while (offset < length) {
+        const cur_vaddr = user_vaddr + offset;
+        const page_offset = cur_vaddr & (PAGE_SIZE_4K - 1);
+        const remaining_in_page = PAGE_SIZE_4K - page_offset;
+        const to_copy = @min(remaining_in_page, length - offset);
+
+        const page_data = vm.vm_get_user_page_data(vm_handle, cur_vaddr) orelse return false;
+        std.mem.copyForwards(u8, page_data[page_offset..][0..to_copy], src_data[offset..][0..to_copy]);
+        offset += to_copy;
+    }
+    return true;
+}
+
+/// Copy data from user buffer to kernel buffer, handling page boundaries
+fn copyFromUserBuffer(vm_handle: *vm.VmHandle, dst_data: [*]u8, user_vaddr: usize, length: usize) bool {
+    var offset: usize = 0;
+    while (offset < length) {
+        const cur_vaddr = user_vaddr + offset;
+        const page_offset = cur_vaddr & (PAGE_SIZE_4K - 1);
+        const remaining_in_page = PAGE_SIZE_4K - page_offset;
+        const to_copy = @min(remaining_in_page, length - offset);
+
+        const page_data = vm.vm_get_user_page_data(vm_handle, cur_vaddr) orelse return false;
+        std.mem.copyForwards(u8, dst_data[offset..][0..to_copy], page_data[page_offset..][0..to_copy]);
+        offset += to_copy;
+    }
+    return true;
+}
+
 /// Handle a singular syscall
 pub export fn handle_syscall(
     /// The caller's badge
@@ -339,23 +371,28 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
         return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EBADF)) } };
     }
 
-    if (args.buf_addr != PROCESS_SHBUF_UVA) {
-        return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EINVAL)) } };
-    }
-
+    const user_buf_addr: usize = @intCast(args.buf_addr);
     const req: usize = @intCast(args.buf_size);
-    if (req == 0 or req > PAGE_SIZE_4K) {
-        return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EMSGSIZE)) } };
+    if (req == 0) {
+        return SyscallResponse{ .Read = .{ .result = 0 } };
     }
 
-    const dst_ptr = sharedBufPtr(u8, caller);
-    const dst_any: *anyopaque = @ptrCast(dst_ptr);
+    const vm_handle = ctx.vm_handle orelse {
+        return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EINVAL)) } };
+    };
+
     const ops_ptr = entry.ops;
     if (ops_ptr == null or ops_ptr.*.read == null) {
         return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.ENOSYS)) } };
     }
     const read_fn = ops_ptr.*.read.?;
-    const result = read_fn(entry.dev_id, dst_any, req);
+
+    // Use temporary buffer for reading
+    var temp_buf: [PAGE_SIZE_4K]u8 = undefined;
+    const read_size = @min(req, PAGE_SIZE_4K);
+    const temp_any: *anyopaque = @ptrCast(&temp_buf[0]);
+    const result = read_fn(entry.dev_id, temp_any, read_size);
+
     if (result == -sos.EWOULDBLOCK) {
         if (pending_console_read != null) {
             return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EBUSY)) } };
@@ -375,7 +412,7 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
             .client = caller,
             .client_id = client_id,
             .fd_index = fd_index,
-            .requested = req,
+            .requested = read_size,
             .ops = ops_ptr,
             .dev_id = entry.dev_id,
             .reply = old_reply_cap,
@@ -388,6 +425,13 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
             pending.tryComplete();
         }
         return null;
+    }
+
+    if (result > 0) {
+        const bytes_read: usize = @intCast(result);
+        if (copyToUserBuffer(vm_handle, user_buf_addr, &temp_buf, bytes_read) == false) {
+            return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EFAULT)) } };
+        }
     }
 
     const n = resultToCInt(result);
@@ -421,25 +465,31 @@ fn handleWrite(ctx: *ServerContext, args: anytype) SyscallResponse {
         return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EBADF)) } };
     }
 
-    if (args.buf_addr != PROCESS_SHBUF_UVA) {
-        return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EINVAL)) } };
-    }
-
+    const user_buf_addr: usize = @intCast(args.buf_addr);
     const req: usize = @intCast(args.buf_size);
-    if (req == 0 or req > PAGE_SIZE_4K) {
-        return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EMSGSIZE)) } };
+    if (req == 0) {
+        return SyscallResponse{ .Write = .{ .result = 0 } };
     }
 
-    const raw_src = sharedBufPtr(u8, caller);
-    const src_ptr: [*]const u8 = @ptrCast(raw_src);
-    const src_mut: [*]u8 = @constCast(src_ptr);
-    const src_any: *anyopaque = @ptrCast(src_mut);
+    const vm_handle = ctx.vm_handle orelse {
+        return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EINVAL)) } };
+    };
+
     const ops_ptr = entry.ops;
     if (ops_ptr == null or ops_ptr.*.write == null) {
         return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.ENOSYS)) } };
     }
     const write_fn = ops_ptr.*.write.?;
-    const result = write_fn(entry.dev_id, src_any, req);
+
+    // Copy from user buffer to temporary buffer
+    var temp_buf: [PAGE_SIZE_4K]u8 = undefined;
+    const write_size = @min(req, PAGE_SIZE_4K);
+    if (copyFromUserBuffer(vm_handle, &temp_buf, user_buf_addr, write_size) == false) {
+        return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EFAULT)) } };
+    }
+
+    const src_any: *anyopaque = @ptrCast(&temp_buf[0]);
+    const result = write_fn(entry.dev_id, src_any, write_size);
     const n: c_int = @intCast(result);
     return SyscallResponse{ .Write = .{ .result = @as(c_int, (n)) } };
 }

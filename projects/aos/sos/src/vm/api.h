@@ -21,6 +21,8 @@ int vm_register_elf_mapping(struct vm_handle *handle, uintptr_t vaddr,
                             frame_ref_t frame_ref, seL4_CPtr cap_slot,
                             bool readable, bool writable, bool executable);
 
+uint8_t *vm_get_user_page_data(struct vm_handle *handle, uintptr_t user_vaddr);
+
 void vm_reset_state(struct vm_handle *handle);
 
 bool handle_vm_fault(struct vm_handle *handle, seL4_Word badge,
