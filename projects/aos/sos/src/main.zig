@@ -4,7 +4,6 @@ const PROCESS_SHBUF_UVA = sos.PROCESS_SHBUF_UVA;
 const PAGE_SIZE_4K: usize = sos.PAGE_SIZE_4K;
 const console_name = "console";
 const console_name_ptr: [*c]const u8 = @ptrCast(&console_name[0]);
-const console_object_ptr: ?*anyopaque = @ptrCast(&sos.global_console);
 
 const ServerContext = struct {
     badge: sel4.seL4_Word,
@@ -14,38 +13,6 @@ const ServerContext = struct {
     reply: [*c]sel4.seL4_CPtr,
     reply_ut: [*c]*sos.ut_t,
 };
-
-/// Copy data from kernel buffer to user buffer
-fn copyToUserBuffer(vm_handle: *vm.VmHandle, user_vaddr: usize, src_data: [*]const u8, length: usize) bool {
-    var offset: usize = 0;
-    while (offset < length) {
-        const cur_vaddr = user_vaddr + offset;
-        const page_offset = cur_vaddr & (PAGE_SIZE_4K - 1);
-        const remaining_in_page = PAGE_SIZE_4K - page_offset;
-        const to_copy = @min(remaining_in_page, length - offset);
-
-        const page_data = vm.vm_get_user_page_data(vm_handle, cur_vaddr) orelse return false;
-        std.mem.copyForwards(u8, page_data[page_offset..][0..to_copy], src_data[offset..][0..to_copy]);
-        offset += to_copy;
-    }
-    return true;
-}
-
-/// Copy data from user buffer to kernel buffer
-fn copyFromUserBuffer(vm_handle: *vm.VmHandle, dst_data: [*]u8, user_vaddr: usize, length: usize) bool {
-    var offset: usize = 0;
-    while (offset < length) {
-        const cur_vaddr = user_vaddr + offset;
-        const page_offset = cur_vaddr & (PAGE_SIZE_4K - 1);
-        const remaining_in_page = PAGE_SIZE_4K - page_offset;
-        const to_copy = @min(remaining_in_page, length - offset);
-
-        const page_data = vm.vm_get_user_page_data(vm_handle, cur_vaddr) orelse return false;
-        std.mem.copyForwards(u8, dst_data[offset..][0..to_copy], page_data[page_offset..][0..to_copy]);
-        offset += to_copy;
-    }
-    return true;
-}
 
 /// Handle a singular syscall
 pub export fn handle_syscall(
@@ -304,7 +271,7 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
         return SyscallResponse{ .Read = .{ .result = 0 } };
     }
 
-    const vm_handle = ctx.vm_handle orelse {
+    const handle = ctx.vm_handle orelse {
         return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EINVAL)) } };
     };
 
@@ -356,7 +323,7 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
 
     if (result > 0) {
         const bytes_read: usize = @intCast(result);
-        if (copyToUserBuffer(vm_handle, user_buf_addr, &temp_buf, bytes_read) == false) {
+        if (handle.copyToUserBuffer(user_buf_addr, &temp_buf, bytes_read) == false) {
             return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EFAULT)) } };
         }
     }
@@ -398,7 +365,7 @@ fn handleWrite(ctx: *ServerContext, args: anytype) SyscallResponse {
         return SyscallResponse{ .Write = .{ .result = 0 } };
     }
 
-    const vm_handle = ctx.vm_handle orelse {
+    const handle = ctx.vm_handle orelse {
         return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EINVAL)) } };
     };
 
@@ -411,7 +378,7 @@ fn handleWrite(ctx: *ServerContext, args: anytype) SyscallResponse {
     // Copy from user buffer to temporary buffer
     var temp_buf: [PAGE_SIZE_4K]u8 = undefined;
     const write_size = @min(req, PAGE_SIZE_4K);
-    if (copyFromUserBuffer(vm_handle, &temp_buf, user_buf_addr, write_size) == false) {
+    if (handle.copyFromUserBuffer(&temp_buf, user_buf_addr, write_size) == false) {
         return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EFAULT)) } };
     }
 
@@ -523,57 +490,6 @@ fn encodeCInt(value: c_int) sel4.seL4_Word {
     return encodeI64(@as(i64, value));
 }
 
-fn setupConsoleFd(fd: *sos.sos_fd_entry_t, ops: *const sos.file_ops_t, readable: bool, writable: bool, dev_id: c_int) void {
-    fd.* = empty_fd;
-    fd.used = true;
-    fd.readable = readable;
-    fd.writable = writable;
-    fd.kind = sos.FD_DEV_CONSOLE;
-    fd.obj = console_object_ptr;
-    fd.ops = ops;
-    fd.dev_id = dev_id;
-}
-
-fn ensureStdio(state: *SosClientIoState) void {
-    if (!state.initialised) {
-        initStdio(state);
-    }
-}
-
-fn initStdio(state: *SosClientIoState) void {
-    state.* = SosClientIoState{};
-    const ops = sos.vfs_lookup_ops(console_name_ptr) orelse {
-        std.debug.panic("console device not registered", .{});
-    };
-    if (ops.*.open == null or ops.*.read == null or ops.*.write == null) {
-        std.debug.panic("console device missing required operations", .{});
-    }
-
-    var id: c_int = 0;
-
-    if (ops.*.open.?(console_name_ptr, c.O_RDONLY, &id) < 0) {
-        std.debug.panic("console stdin open failed", .{});
-    }
-    setupConsoleFd(&state.fds[0], ops, true, false, id);
-
-    if (ops.*.open.?(console_name_ptr, c.O_WRONLY, &id) < 0) {
-        std.debug.panic("console stdout open failed", .{});
-    }
-    setupConsoleFd(&state.fds[1], ops, false, true, id);
-
-    if (ops.*.open.?(console_name_ptr, c.O_WRONLY, &id) < 0) {
-        std.debug.panic("console stderr open failed", .{});
-    }
-    setupConsoleFd(&state.fds[2], ops, false, true, id);
-
-    state.initialised = true;
-}
-
-pub export fn sos_console_data_ready() callconv(.c) void {
-    const pending = console.pending_console_read orelse return;
-    pending.tryComplete();
-}
-
 const std = @import("std");
 const libipc = @import("libipc");
 const Syscall = libipc.Syscall;
@@ -598,3 +514,6 @@ const SosClientIoState = file.SosClientIoState;
 
 const console = @import("console.zig");
 const PendingConsoleRead = console.PendingConsoleRead;
+const ensureStdio = console.ensureStdio;
+const setupConsoleFd = console.setupConsoleFd;
+const console_object_ptr = console.console_object_ptr;

@@ -9,6 +9,37 @@ pub const VmHandle = struct {
     client: ?*sos.client_t,
 
     pub const Self = @This();
+    /// Copy data from kernel buffer to user buffer
+    pub fn copyToUserBuffer(self: *Self, user_vaddr: usize, src_data: [*]const u8, length: usize) bool {
+        var offset: usize = 0;
+        while (offset < length) {
+            const cur_vaddr = user_vaddr + offset;
+            const page_offset = cur_vaddr & (PAGE_SIZE_4K - 1);
+            const remaining_in_page = PAGE_SIZE_4K - page_offset;
+            const to_copy = @min(remaining_in_page, length - offset);
+
+            const page_data = vm_get_user_page_data(self, cur_vaddr) orelse return false;
+            std.mem.copyForwards(u8, page_data[page_offset..][0..to_copy], src_data[offset..][0..to_copy]);
+            offset += to_copy;
+        }
+        return true;
+    }
+
+    /// Copy data from user buffer to kernel buffer
+    pub fn copyFromUserBuffer(self: *Self, dst_data: [*]u8, user_vaddr: usize, length: usize) bool {
+        var offset: usize = 0;
+        while (offset < length) {
+            const cur_vaddr = user_vaddr + offset;
+            const page_offset = cur_vaddr & (PAGE_SIZE_4K - 1);
+            const remaining_in_page = PAGE_SIZE_4K - page_offset;
+            const to_copy = @min(remaining_in_page, length - offset);
+
+            const page_data = vm_get_user_page_data(self, cur_vaddr) orelse return false;
+            std.mem.copyForwards(u8, dst_data[offset..][0..to_copy], page_data[page_offset..][0..to_copy]);
+            offset += to_copy;
+        }
+        return true;
+    }
 
     pub fn validate(self: *Self) void {
         const idx = self.idx;

@@ -3,7 +3,7 @@ const ring_capacity: usize = @intCast(sos.CONSOLE_RING_SIZE);
 extern fn sos_console_data_ready() callconv(.c) void;
 
 const console_name: [:0]const u8 = "console";
-const console_name_ptr: [*c]const u8 = @ptrCast(console_name.ptr);
+pub const console_name_ptr: [*c]const u8 = @ptrCast(console_name.ptr);
 
 pub const empty_fd: sos.sos_fd_entry_t = std.mem.zeroes(sos.sos_fd_entry_t);
 const empty_fd_table = [_]sos.sos_fd_entry_t{empty_fd} ** SOS_MAX_OPEN_FILES;
