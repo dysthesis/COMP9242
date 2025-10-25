@@ -47,9 +47,11 @@ pub const Client = struct {
         if (self.addr_space.getPtr(vaddr)) |entry| {
             entry.frame_ref = frame_ref;
             entry.cap_slot = cap_slot;
-            entry.cap_owner = cap_owner;
-            entry.owns_frame = owns_frame;
-            entry.owns_cap = owns_cap;
+            if (cap_owner) |owner| {
+                entry.cap_owner = owner;
+            }
+            entry.owns_frame = entry.owns_frame or owns_frame;
+            entry.owns_cap = entry.owns_cap or owns_cap;
             return entry;
         }
 

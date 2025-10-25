@@ -13,6 +13,7 @@ pub const VmError = error{
     MapFailed,
     Capacity,
     InvalidArgs,
+    AlreadyMapped,
 };
 
 const MAX_CLIENTS: usize = sos.MAX_CLIENTS;
@@ -62,6 +63,7 @@ pub fn vmErrorToErrno(err: VmError) c_int {
         VmError.MapFailed => sos.EIO,
         VmError.Capacity => sos.ENOMEM,
         VmError.InvalidArgs => sos.EINVAL,
+        VmError.AlreadyMapped => sos.EEXIST,
     };
 }
 

@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <utils/util.h>
+#include <errno.h>
 
 #include <aos/debug.h>
 #include <aos/sel4_zf_logif.h>
@@ -331,15 +332,35 @@ static int map_process_stack_page(uintptr_t vaddr) {
     return -1;
   }
 
-  seL4_CapRights_t rights = seL4_CapRights_new(0, 0, 1, 1);
-  err = map_frame(&cspace, slot, user_process.vspace, vaddr, rights,
-                  seL4_ARM_Default_VMAttributes);
-  if (err != seL4_NoError) {
-    cspace_delete(&cspace, slot);
-    cspace_free_slot(&cspace, slot);
-    free_frame(frame);
-    ZF_LOGE("Unable to map stack frame for user app");
-    return -1;
+  struct vm_handle *vm_handle =
+      (user_process.client && user_process.client->vm_state)
+          ? user_process.client->vm_state
+          : NULL;
+  if (vm_handle != NULL) {
+    int vm_err = vm_map_owned_frame(vm_handle, vaddr, frame, slot,
+                                    true, true, false, false, false);
+    if (vm_err < 0) {
+      if (vm_err == -EEXIST) {
+        ZF_LOGE("Stack frame already mapped at %p", (void *)vaddr);
+      } else {
+        ZF_LOGE("VM stack map failed for %p errno=%d", (void *)vaddr, -vm_err);
+      }
+      cspace_delete(&cspace, slot);
+      cspace_free_slot(&cspace, slot);
+      free_frame(frame);
+      return -1;
+    }
+  } else {
+    seL4_CapRights_t rights = seL4_CapRights_new(0, 0, 1, 1);
+    err = map_frame(&cspace, slot, user_process.vspace, vaddr, rights,
+                    seL4_ARM_Default_VMAttributes);
+    if (err != seL4_NoError) {
+      cspace_delete(&cspace, slot);
+      cspace_free_slot(&cspace, slot);
+      free_frame(frame);
+      ZF_LOGE("Unable to map stack frame for user app");
+      return -1;
+    }
   }
 
   if (user_process.client == NULL || user_process.client->vm_state == NULL) {
@@ -647,12 +668,22 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
   }
 
   /* Map in the IPC buffer for the thread */
-  err = map_frame(&cspace, user_process.ipc_buffer, user_process.vspace,
-                  PROCESS_IPC_BUFFER, seL4_AllRights,
-                  seL4_ARM_Default_VMAttributes);
-  if (err != 0) {
-    ZF_LOGE("Unable to map IPC buffer for user app");
-    goto out;
+  if (client->vm_state != NULL) {
+    int vm_err = vm_map_owned_frame(client->vm_state, PROCESS_IPC_BUFFER, 0,
+                                    user_process.ipc_buffer, true, true, false,
+                                    false, false);
+    if (vm_err < 0) {
+      ZF_LOGE("VM map failed for IPC buffer errno=%d", -vm_err);
+      goto out;
+    }
+  } else {
+    err = map_frame(&cspace, user_process.ipc_buffer, user_process.vspace,
+                    PROCESS_IPC_BUFFER, seL4_AllRights,
+                    seL4_ARM_Default_VMAttributes);
+    if (err != 0) {
+      ZF_LOGE("Unable to map IPC buffer for user app");
+      goto out;
+    }
   }
 
   /* Start the new process */

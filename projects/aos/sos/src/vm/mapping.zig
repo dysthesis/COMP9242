@@ -32,6 +32,9 @@ pub fn map_owned_frame(
     };
 
     const err = pageMap(page_cap, as.vspace, vaddr, rights, attrs);
+    if (err == sel4.seL4_DeleteFirst) {
+        return super.VmError.AlreadyMapped;
+    }
     if (err != sel4.seL4_NoError) {
         const lvl: c_ulong = sel4.seL4_MappingFailedLookupLevel();
         _ = c.printf("[map failed] vaddr=0x%lx err=%d missing_level=L%lu\n", @as(c_ulong, vaddr), @as(c_int, @intCast(err)), lvl);
