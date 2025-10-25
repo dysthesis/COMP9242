@@ -14,14 +14,8 @@ const sos_types = cimports.sos_types;
 pub export var sos_errno: c_int = 0;
 
 const MAX_IO_BUF: usize = 0x1000;
-const PROCESS_SHBUF_ADDR: usize = 0xC0000000;
-const PROCESS_SHBUF_WORD: sel4.seL4_Word = @intCast(PROCESS_SHBUF_ADDR);
 const SOS_IPC_EP_CAP: sel4.seL4_CPtr = 0x1;
 const INT_MAX_USIZE: usize = @intCast(std.math.maxInt(c_int));
-
-fn sharedBuffer() [*]u8 {
-    return @as([*]u8, @ptrFromInt(PROCESS_SHBUF_ADDR));
-}
 
 fn setErrno(code: c_int) c_int {
     sos_errno = code;
@@ -102,13 +96,12 @@ pub export fn sos_open(path: [*c]const u8, mode: c_int) callconv(.c) c_int {
     }
 
     const copy_len = len + 1;
-    const shbuf = sharedBuffer();
-    std.mem.copyForwards(u8, shbuf[0..copy_len], path_bytes[0..copy_len]);
+    const user_addr: usize = @intFromPtr(path_bytes);
 
     const syscall = Syscall{
         .Open = .{
             .arg = signedIntToWord(mode),
-            .buf_addr = PROCESS_SHBUF_WORD,
+            .buf_addr = @as(sel4.seL4_Word, @intCast(user_addr)),
             .buf_size = @as(sel4.seL4_Word, @intCast(copy_len)),
         },
     };

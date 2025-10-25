@@ -34,17 +34,8 @@ client_t *client_create(seL4_CPtr vspace_root, seL4_Word *out_badge,
   c->gen = (uint8_t)gen;
   c->vspace = vspace_root;
 
-  uintptr_t kva = SOS_SHBUF_BASE + (uintptr_t)id * PAGE_SIZE_4K;
-  if (sos_alloc_shared_page(sos_cspace, vspace_root, PROCESS_SHBUF_UVA, kva,
-                            &c->shbuf) != 0) {
-    free_ids[free_top++] = id;
-    free(c);
-    return NULL;
-  }
-
   c->vm_state = vm_state_acquire(c);
   if (c->vm_state == NULL) {
-    sos_free_shared_page(sos_cspace, &c->shbuf);
     free_ids[free_top++] = id;
     free(c);
     return NULL;
@@ -77,7 +68,6 @@ void client_destroy(client_t *client, cspace_t *sos_cspace) {
 
   vm_state_release(client);
   client->vm_state = NULL;
-  sos_free_shared_page(sos_cspace, &client->shbuf);
 
   free_ids[free_top++] = id;
   free(client);

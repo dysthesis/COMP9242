@@ -58,36 +58,12 @@ static inline unsigned badge_gen(seL4_Word b) {
   return (b >> ID_BITS) & ((1u << GEN_BITS) - 1);
 }
 
-typedef struct SharedPage shared_page_t;
-
-/*
- * Allocates a shared page between SOS and the client.
- *
- * On success this returns 0 and initialises `*shared_page` with a descriptor.
- * On failure a negative errno is returned and `*shared_page` is set to NULL.
- */
-int sos_alloc_shared_page(cspace_t *sos_cspace, seL4_CPtr client_vspace_root,
-                          uintptr_t u_va, uintptr_t k_va,
-                          shared_page_t **shared_page);
-
-/*
- * Deallocate and tear down a shared page. On return `*shared_page` will be NULL.
- */
-void sos_free_shared_page(cspace_t *sos_cspace, shared_page_t **shared_page);
-
-frame_ref_t sos_shared_page_frame(const shared_page_t *shared_page);
-seL4_CPtr sos_shared_page_kernel_cap(const shared_page_t *shared_page);
-seL4_CPtr sos_shared_page_client_cap(const shared_page_t *shared_page);
-uintptr_t sos_shared_page_kernel_va(const shared_page_t *shared_page);
-uintptr_t sos_shared_page_client_va(const shared_page_t *shared_page);
-
 struct vm_handle;
 
 typedef struct client {
   unsigned id;         // slot ID
   uint8_t gen;         // generation
   seL4_CPtr vspace;    // client's VSpace root capability (in SOS's CSpace)
-  shared_page_t *shbuf; // the shared page for IPC
   struct vm_handle *vm_state; // opaque VM bookkeeping handle
 } client_t;
 

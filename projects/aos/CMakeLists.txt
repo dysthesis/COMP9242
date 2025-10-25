@@ -30,7 +30,6 @@ set(ZIG_LIBS
     ziglib_sosapi
     ziglib_clock
     ziglib_ipc
-    ziglib_ipc_server
     ziglib_file
 )
 set(ZIG_APPS

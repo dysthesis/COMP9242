@@ -9,4 +9,4 @@ target_include_directories(
   # FIXME: this is suboptimal, as this directly links the SOS executable, and thus coupling them together.
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../sos/src
 )
-target_link_libraries(ipc PUBLIC muslc sel4cspace ziglib_ipc ziglib_ipc_server)
+target_link_libraries(ipc PUBLIC muslc sel4cspace ziglib_ipc)

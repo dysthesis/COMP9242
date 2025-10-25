@@ -165,46 +165,6 @@ static void test_frame_table(void) {
   }
 }
 
-static void test_shared_frame(cspace_t *cspace) {
-  const uintptr_t k_va = SOS_SCRATCH;
-  const uintptr_t u_va = SOS_SCRATCH + PAGE_SIZE_4K;
-
-  shared_page_t *shared_page = NULL;
-  int err = sos_alloc_shared_page(cspace, seL4_CapInitThreadVSpace, u_va, k_va,
-                                  &shared_page);
-  assert(err == 0);
-  assert(shared_page != NULL);
-  assert(sos_shared_page_kernel_cap(shared_page) != seL4_CapNull);
-  assert(sos_shared_page_client_cap(shared_page) != seL4_CapNull);
-
-  const uintptr_t kernel_va = sos_shared_page_kernel_va(shared_page);
-  const uintptr_t user_va = sos_shared_page_client_va(shared_page);
-
-  volatile uint8_t *k_ptr = (volatile uint8_t *)kernel_va;
-  volatile uint8_t *u_ptr = (volatile uint8_t *)user_va;
-
-  for (size_t i = 0; i < PAGE_SIZE_4K; i++) {
-    assert(k_ptr[i] == 0);
-    assert(u_ptr[i] == 0);
-  }
-
-  k_ptr[0] = 0xAA;
-  k_ptr[PAGE_SIZE_4K - 1] = 0x55;
-  assert(u_ptr[0] == 0xAA);
-  assert(u_ptr[PAGE_SIZE_4K - 1] == 0x55);
-
-  u_ptr[1] = 0x11;
-  u_ptr[PAGE_SIZE_4K - 2] = 0x22;
-  assert(k_ptr[1] == 0x11);
-  assert(k_ptr[PAGE_SIZE_4K - 2] == 0x22);
-
-  frame_ref_t frame_ref = sos_shared_page_frame(shared_page);
-  assert(frame_ref != NULL_FRAME);
-
-  sos_free_shared_page(cspace, &shared_page);
-  assert(shared_page == NULL);
-}
-
 void run_tests(cspace_t *cspace) {
   /* test the cspace bitfield data structure */
   test_bf();
@@ -243,7 +203,4 @@ void run_tests(cspace_t *cspace) {
   test_clock();
   ZF_LOGI("Clock test passed!");
 
-  /* test shared page allocation */
-  test_shared_frame(cspace);
-  ZF_LOGI("Shared frame test passed!");
 }

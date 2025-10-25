@@ -9,6 +9,8 @@ pub const PendingConsoleRead = struct {
     dev_id: c_int,
     reply: sel4.seL4_CPtr,
     reply_ut: *sos.ut_t,
+    vm_handle: *vm.VmHandle,
+    user_buf_addr: usize,
 
     pub fn cancel(self: PendingConsoleRead, err: c_int) void {
         pending_console_read = null;
@@ -50,14 +52,22 @@ pub const PendingConsoleRead = struct {
             return;
         };
 
-        const dst_ptr = sharedBufPtr(u8, self.client);
-        const dst_any: *anyopaque = @ptrCast(dst_ptr);
-        const result = read_fn(self.dev_id, dst_any, self.requested);
+        var temp_buf: [sos.PAGE_SIZE_4K]u8 = undefined;
+        const dst_any: *anyopaque = @ptrCast(&temp_buf[0]);
+        const read_len = @min(self.requested, sos.PAGE_SIZE_4K);
+        const result = read_fn(self.dev_id, dst_any, read_len);
         if (result == -sos.EWOULDBLOCK) {
             return;
         }
 
         pending_console_read = null;
+        if (result > 0) {
+            const copied = self.vm_handle.copyToUserBuffer(self.user_buf_addr, &temp_buf, @intCast(result));
+            if (!copied) {
+                self.complete(@as(isize, -sos.EFAULT));
+                return;
+            }
+        }
         self.complete(result);
     }
 };
@@ -125,9 +135,9 @@ const SyscallResponse = libipc.SyscallResponse;
 
 const helpers = @import("helpers.zig");
 const resultToCInt = helpers.resultToCInt;
-const sharedBufPtr = helpers.sharedBufPtr;
 
 const super = @import("main.zig");
+const vm = @import("vm/mod.zig");
 
 const file = @import("file.zig");
 const empty_fd = file.empty_fd;

@@ -1,6 +1,5 @@
 const MAX_CLIENTS: usize = sos.MAX_CLIENTS;
 pub const SOS_MAX_OPEN_FILES: usize = 32;
-const PROCESS_SHBUF_UVA = sos.PROCESS_SHBUF_UVA;
 const PAGE_SIZE_4K: usize = sos.PAGE_SIZE_4K;
 const console_name = "console";
 const console_name_ptr: [*c]const u8 = @ptrCast(&console_name[0]);
@@ -100,33 +99,35 @@ fn handleOpen(ctx: *ServerContext, args: anytype) SyscallResponse {
     const user_buf = args.buf_addr;
     const buf_len: usize = @intCast(args.buf_size);
 
-    if (user_buf != PROCESS_SHBUF_UVA) {
-        return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.EINVAL)) } };
-    }
     if (buf_len == 0 or buf_len > PAGE_SIZE_4K) {
         return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.EMSGSIZE)) } };
     }
 
-    const shared_ptr = sharedBufPtr(u8, caller);
-    const max_copy = @min(buf_len, PAGE_SIZE_4K);
-    const raw_len = c.strnlen(@as([*c]const u8, @ptrCast(shared_ptr)), max_copy);
-    const name_len: usize = @intCast(raw_len);
+    const handle = ctx.vm_handle orelse {
+        return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.EINVAL)) } };
+    };
 
-    if (name_len == max_copy) {
-        return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.ENAMETOOLONG)) } };
+    var name_storage: [PAGE_SIZE_4K]u8 = undefined;
+    if (handle.copyFromUserBuffer(&name_storage, @intCast(user_buf), buf_len) == false) {
+        return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.EFAULT)) } };
     }
+
+    const slice = name_storage[0..buf_len];
+    const nul_index = std.mem.indexOfScalar(u8, slice, 0) orelse {
+        return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.ENAMETOOLONG)) } };
+    };
+    const name_len: usize = nul_index;
+
     if (name_len == 0) {
         return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.EINVAL)) } };
     }
 
-    var filename: [PAGE_SIZE_4K]u8 = undefined;
-    std.mem.copyForwards(u8, filename[0..name_len], shared_ptr[0..name_len]);
-    filename[name_len] = 0;
-
-    const filename_ptr: [*c]const u8 = @ptrCast(&filename[0]);
+    name_storage[name_len] = 0;
+    const filename = name_storage[0..name_len];
+    const filename_ptr: [*c]const u8 = @ptrCast(&name_storage[0]);
 
     const expected = "console";
-    if (name_len != expected.len or !std.mem.eql(u8, filename[0..name_len], expected)) {
+    if (name_len != expected.len or !std.mem.eql(u8, filename, expected)) {
         return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.ENODEV)) } };
     }
 
@@ -311,6 +312,8 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
             .dev_id = entry.dev_id,
             .reply = old_reply_cap,
             .reply_ut = old_reply_ut,
+            .vm_handle = handle,
+            .user_buf_addr = user_buf_addr,
         };
 
         ctx.have_reply.* = false;
@@ -505,7 +508,6 @@ const vm = @import("vm/mod.zig");
 pub extern var cspace: sos.cspace_t;
 
 const helpers = @import("helpers.zig");
-const sharedBufPtr = helpers.sharedBufPtr;
 const resultToCInt = helpers.resultToCInt;
 
 const file = @import("file.zig");

@@ -253,8 +253,6 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
                (unsigned long)ipc_msg.buf_addr);
         printf("[sos] syscall_loop(fault): buf_size -> %lu\n",
                (unsigned long)ipc_msg.buf_size);
-        printf("[sos] syscall_loop(fault): shbuf-> %.*s\n", 10,
-               (const char *)(uintptr_t)PROCESS_SHBUF_UVA);
       }
       /* some kind of fault */
       debug_print_fault(message, APP_NAME);
