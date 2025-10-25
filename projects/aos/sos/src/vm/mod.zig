@@ -165,6 +165,23 @@ pub export fn vm_register_elf_mapping(
     return 0;
 }
 
+pub export fn vm_map_owned_frame(
+    vm_handle: *VmHandle,
+    vaddr: usize,
+    frame_ref: usize,
+    cap_slot: sel4.seL4_CPtr,
+    readable: bool,
+    writable: bool,
+    executable: bool,
+    owns_frame: bool,
+    owns_cap: bool,
+) callconv(.c) c_int {
+    vm_handle.mapOwnedFrame(vaddr, frame_ref, cap_slot, readable, writable, executable, owns_frame, owns_cap) catch |err| {
+        return -vmErrorToErrno(err);
+    };
+    return 0;
+}
+
 /// Access a user buffer directly for read/write operations
 /// Returns a pointer to the frame data for a given user virtual address
 /// Returns NULL if the page is not mapped

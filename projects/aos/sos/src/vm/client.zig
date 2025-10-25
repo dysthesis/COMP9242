@@ -190,6 +190,44 @@ pub const Client = struct {
         }
     }
 
+    pub fn mapOwnedFrame(
+        self: *Self,
+        vaddr: usize,
+        frame_ref: usize,
+        cap_slot: sel4.seL4_CPtr,
+        readable: bool,
+        writable: bool,
+        executable: bool,
+        owns_frame: bool,
+        owns_cap: bool,
+    ) super.VmError!void {
+        const rights = region.rightsFromBooleans(readable, writable);
+        var attrs = sel4.seL4_ARM_Default_VMAttributes;
+        if (!executable) {
+            attrs |= sel4.seL4_ARM_ExecuteNever;
+        }
+
+        try mapping.map_owned_frame(&self.addr_space, cap_slot, vaddr, rights, attrs);
+
+        _ = self.insertPage(vaddr, frame_ref, cap_slot, &super.cspace, owns_frame, owns_cap) catch |err| {
+            self.addr_space.recordLeafUnmap(vaddr);
+            const unmap_err = sel4.seL4_ARM_Page_Unmap(cap_slot);
+            if (unmap_err != sel4.seL4_NoError) {
+                _ = c.printf("[vm_map_owned] rollback Page_Unmap err=%d slot=%lu\n", @as(c_int, @intCast(unmap_err)), @as(c_ulong, @intCast(cap_slot)));
+            }
+            if (owns_cap) {
+                _ = sos.cspace_delete(&cspace, cap_slot);
+                sos.cspace_free_slot(&cspace, cap_slot);
+            }
+            if (owns_frame and frame_ref != 0) {
+                sos.free_frame(frame_ref);
+            }
+            return err;
+        };
+
+        self.mapped_count = self.addr_space.num_mapped();
+    }
+
     pub fn metadataAllocator(self: *Client) std.mem.Allocator {
         return self.metadata_alloc_handle;
     }
@@ -383,6 +421,7 @@ const page = @import("page.zig");
 const allocator = @import("allocator.zig");
 const super = @import("mod.zig");
 const std = @import("std");
+const mapping = @import("mapping.zig");
 
 const cimports = @import("cimports");
 const sel4 = cimports.sel4;

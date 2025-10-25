@@ -275,6 +275,21 @@ pub const VmHandle = struct {
         _ = c.printf("[vm_elf] successfully registered ELF mapping vaddr=0x%lx mapped_count=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(state.mapped_count)));
     }
 
+    pub fn mapOwnedFrame(
+        self: *Self,
+        vaddr: usize,
+        frame_ref: usize,
+        cap_slot: sel4.seL4_CPtr,
+        readable: bool,
+        writable: bool,
+        executable: bool,
+        owns_frame: bool,
+        owns_cap: bool,
+    ) VmError!void {
+        const state = self.ensureVmState();
+        try state.mapOwnedFrame(vaddr, frame_ref, cap_slot, readable, writable, executable, owns_frame, owns_cap);
+    }
+
     /// Get direct access to a user page's frame data
     pub fn getUserPageData(self: *Self, user_vaddr: usize) ?[*]u8 {
         const state = self.ensureVmState();

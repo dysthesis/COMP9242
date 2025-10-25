@@ -31,12 +31,8 @@ pub fn map_owned_frame(
         };
     };
 
-    const logger = logging.VmLogger{ .scope = "[vm_map]" };
-    logger.logMapAttempt("frame", @intCast(vaddr), rights, attrs);
-
     const err = pageMap(page_cap, as.vspace, vaddr, rights, attrs);
     if (err != sel4.seL4_NoError) {
-        logger.logMapFail("frame", @intCast(vaddr), err);
         const lvl: c_ulong = sel4.seL4_MappingFailedLookupLevel();
         _ = c.printf("[map failed] vaddr=0x%lx err=%d missing_level=L%lu\n", @as(c_ulong, vaddr), @as(c_int, @intCast(err)), lvl);
         return super.VmError.MapFailed;
@@ -62,4 +58,3 @@ const c = cimports.c;
 
 const super = @import("mod.zig");
 const AddrSpace = @import("addr_space.zig").AddrSpace;
-const logging = @import("logging.zig");
