@@ -1,84 +1,10 @@
 const MAX_CLIENTS: usize = sos.MAX_CLIENTS;
-const SOS_MAX_OPEN_FILES: usize = 32;
+pub const SOS_MAX_OPEN_FILES: usize = 32;
 const PROCESS_SHBUF_UVA = sos.PROCESS_SHBUF_UVA;
 const PAGE_SIZE_4K: usize = sos.PAGE_SIZE_4K;
 const console_name = "console";
 const console_name_ptr: [*c]const u8 = @ptrCast(&console_name[0]);
 const console_object_ptr: ?*anyopaque = @ptrCast(&sos.global_console);
-
-const empty_fd: sos.sos_fd_entry_t = std.mem.zeroes(sos.sos_fd_entry_t);
-const empty_fd_table = [_]sos.sos_fd_entry_t{empty_fd} ** SOS_MAX_OPEN_FILES;
-
-const SosClientIoState = struct {
-    initialised: bool = false,
-    fds: [SOS_MAX_OPEN_FILES]sos.sos_fd_entry_t = empty_fd_table,
-};
-
-var client_io_state: [MAX_CLIENTS]SosClientIoState = [_]SosClientIoState{SosClientIoState{}} ** MAX_CLIENTS;
-
-const PendingConsoleRead = struct {
-    client: *sos.client_t,
-    client_id: usize,
-    fd_index: usize,
-    requested: usize,
-    ops: *const sos.file_ops_t,
-    dev_id: c_int,
-    reply: sel4.seL4_CPtr,
-    reply_ut: *sos.ut_t,
-
-    fn cancel(self: PendingConsoleRead, err: c_int) void {
-        pending_console_read = null;
-        self.complete(@as(isize, err));
-    }
-
-    fn complete(self: PendingConsoleRead, result: isize) void {
-        const resp = SyscallResponse{ .Read = .{ .result = resultToCInt(result) } };
-        const msg = resp.serialise();
-        sel4.seL4_Send(self.reply, msg);
-        _ = sos.cspace_delete(&cspace, self.reply);
-        sos.cspace_free_slot(&cspace, self.reply);
-        sos.ut_free(self.reply_ut);
-    }
-    fn tryComplete(self: PendingConsoleRead) void {
-        if (self.client_id >= client_io_state.len) {
-            pending_console_read = null;
-            self.complete(@as(isize, -sos.EINVAL));
-            return;
-        }
-
-        var state = &client_io_state[self.client_id];
-        if (!state.initialised) {
-            pending_console_read = null;
-            self.complete(@as(isize, -sos.EBADF));
-            return;
-        }
-
-        const entry = &state.fds[self.fd_index];
-        if (!entry.used or !entry.readable or entry.ops != self.ops) {
-            pending_console_read = null;
-            self.complete(@as(isize, -sos.EBADF));
-            return;
-        }
-
-        const read_fn = self.ops.*.read orelse {
-            pending_console_read = null;
-            self.complete(@as(isize, -sos.ENOSYS));
-            return;
-        };
-
-        const dst_ptr = sharedBufPtr(u8, self.client);
-        const dst_any: *anyopaque = @ptrCast(dst_ptr);
-        const result = read_fn(self.dev_id, dst_any, self.requested);
-        if (result == -sos.EWOULDBLOCK) {
-            return;
-        }
-
-        pending_console_read = null;
-        self.complete(result);
-    }
-};
-
-var pending_console_read: ?PendingConsoleRead = null;
 
 const ServerContext = struct {
     badge: sel4.seL4_Word,
@@ -89,7 +15,7 @@ const ServerContext = struct {
     reply_ut: [*c]*sos.ut_t,
 };
 
-/// Copy data from kernel buffer to user buffer, handling page boundaries
+/// Copy data from kernel buffer to user buffer
 fn copyToUserBuffer(vm_handle: *vm.VmHandle, user_vaddr: usize, src_data: [*]const u8, length: usize) bool {
     var offset: usize = 0;
     while (offset < length) {
@@ -105,7 +31,7 @@ fn copyToUserBuffer(vm_handle: *vm.VmHandle, user_vaddr: usize, src_data: [*]con
     return true;
 }
 
-/// Copy data from user buffer to kernel buffer, handling page boundaries
+/// Copy data from user buffer to kernel buffer
 fn copyFromUserBuffer(vm_handle: *vm.VmHandle, dst_data: [*]u8, user_vaddr: usize, length: usize) bool {
     var offset: usize = 0;
     while (offset < length) {
@@ -200,7 +126,7 @@ fn handleOpen(ctx: *ServerContext, args: anytype) SyscallResponse {
         return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.EINVAL)) } };
     }
 
-    var state = &client_io_state[client_id];
+    var state = &file.client_io_state[client_id];
     ensureStdio(state);
 
     const mode: c_int = @intCast(args.arg);
@@ -297,7 +223,7 @@ fn handleClose(ctx: *ServerContext, args: anytype) SyscallResponse {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EINVAL)) } };
     }
 
-    var state = &client_io_state[client_id];
+    var state = &file.client_io_state[client_id];
     ensureStdio(state);
     if (!state.initialised) {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EBADF)) } };
@@ -322,7 +248,7 @@ fn handleClose(ctx: *ServerContext, args: anytype) SyscallResponse {
     }
 
     if (entry.kind == sos.FD_DEV_CONSOLE and entry.obj == console_object_ptr) {
-        if (pending_console_read) |pending| {
+        if (console.pending_console_read) |pending| {
             if (pending.client_id == client_id and pending.fd_index == fd_index) {
                 pending.cancel(-sos.ECANCELED);
             }
@@ -355,7 +281,7 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
         return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EINVAL)) } };
     }
 
-    var state = &client_io_state[client_id];
+    var state = &file.client_io_state[client_id];
     ensureStdio(state);
     if (!state.initialised) {
         return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EBADF)) } };
@@ -395,7 +321,7 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     const result = read_fn(entry.dev_id, temp_any, read_size);
 
     if (result == -sos.EWOULDBLOCK) {
-        if (pending_console_read != null) {
+        if (console.pending_console_read != null) {
             return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EBUSY)) } };
         }
 
@@ -409,7 +335,7 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
             return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.ENOMEM)) } };
         }
 
-        pending_console_read = PendingConsoleRead{
+        console.pending_console_read = PendingConsoleRead{
             .client = caller,
             .client_id = client_id,
             .fd_index = fd_index,
@@ -422,7 +348,7 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
 
         ctx.have_reply.* = false;
         ctx.reply_ut.* = new_reply_ut.?;
-        if (pending_console_read) |pending| {
+        if (console.pending_console_read) |pending| {
             pending.tryComplete();
         }
         return null;
@@ -449,7 +375,7 @@ fn handleWrite(ctx: *ServerContext, args: anytype) SyscallResponse {
         return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EINVAL)) } };
     }
 
-    var state = &client_io_state[client_id];
+    var state = &file.client_io_state[client_id];
     ensureStdio(state);
     if (!state.initialised) {
         return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EBADF)) } };
@@ -597,18 +523,6 @@ fn encodeCInt(value: c_int) sel4.seL4_Word {
     return encodeI64(@as(i64, value));
 }
 
-fn sharedBufPtr(comptime T: type, caller: *sos.client_t) [*]T {
-    const shbuf = caller.shbuf orelse {
-        std.debug.panic("caller missing shared buffer", .{});
-    };
-    const addr_value = sos.sos_shared_page_kernel_va(shbuf);
-    if (addr_value == 0) {
-        std.debug.panic("shared buffer has no kernel mapping", .{});
-    }
-    const addr: usize = @intCast(addr_value);
-    return @ptrFromInt(addr);
-}
-
 fn setupConsoleFd(fd: *sos.sos_fd_entry_t, ops: *const sos.file_ops_t, readable: bool, writable: bool, dev_id: c_int) void {
     fd.* = empty_fd;
     fd.used = true;
@@ -655,14 +569,8 @@ fn initStdio(state: *SosClientIoState) void {
     state.initialised = true;
 }
 
-fn resultToCInt(value: isize) c_int {
-    return std.math.cast(c_int, value) orelse {
-        return if (value < 0) @as(c_int, (-sos.EIO)) else std.math.maxInt(c_int);
-    };
-}
-
 pub export fn sos_console_data_ready() callconv(.c) void {
-    const pending = pending_console_read orelse return;
+    const pending = console.pending_console_read orelse return;
     pending.tryComplete();
 }
 
@@ -678,4 +586,15 @@ const sos = cimports.sos;
 
 const vm = @import("vm/mod.zig");
 
-extern var cspace: sos.cspace_t;
+pub extern var cspace: sos.cspace_t;
+
+const helpers = @import("helpers.zig");
+const sharedBufPtr = helpers.sharedBufPtr;
+const resultToCInt = helpers.resultToCInt;
+
+const file = @import("file.zig");
+const empty_fd = file.empty_fd;
+const SosClientIoState = file.SosClientIoState;
+
+const console = @import("console.zig");
+const PendingConsoleRead = console.PendingConsoleRead;

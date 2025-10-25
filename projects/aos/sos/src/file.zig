@@ -5,6 +5,16 @@ extern fn sos_console_data_ready() callconv(.c) void;
 const console_name: [:0]const u8 = "console";
 const console_name_ptr: [*c]const u8 = @ptrCast(console_name.ptr);
 
+pub const empty_fd: sos.sos_fd_entry_t = std.mem.zeroes(sos.sos_fd_entry_t);
+const empty_fd_table = [_]sos.sos_fd_entry_t{empty_fd} ** SOS_MAX_OPEN_FILES;
+
+pub const SosClientIoState = struct {
+    initialised: bool = false,
+    fds: [SOS_MAX_OPEN_FILES]sos.sos_fd_entry_t = empty_fd_table,
+};
+
+pub var client_io_state: [MAX_CLIENTS]SosClientIoState = [_]SosClientIoState{SosClientIoState{}} ** MAX_CLIENTS;
+
 pub export var global_console: sos.console_dev_t = .{
     .reader_in_use = false,
     .reader_owner_id = 0,
@@ -239,3 +249,7 @@ const std = @import("std");
 const cimports = @import("cimports");
 const c = cimports.c;
 const sos = cimports.sos;
+const MAX_CLIENTS: usize = sos.MAX_CLIENTS;
+
+const super = @import("main.zig");
+const SOS_MAX_OPEN_FILES = super.SOS_MAX_OPEN_FILES;
