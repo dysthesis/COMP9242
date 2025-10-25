@@ -114,8 +114,9 @@ static struct {
   client_t *client;
   seL4_Word badge;
 
-  ut_t *ipc_buffer_ut;
+  frame_ref_t ipc_buffer_frame;
   seL4_CPtr ipc_buffer;
+  bool ipc_buffer_vm_owned;
 
   ut_t *sched_context_ut;
   seL4_CPtr sched_context;
@@ -273,32 +274,59 @@ static int stack_write(seL4_Word *mapped_stack, int index, uintptr_t val) {
 }
 
 static void cleanup_stack_frames(void) {
-  while (user_process.stack_frame_count > 0) {
-    user_process.stack_frame_count--;
-    frame_ref_t frame =
-        user_process.stack_frames[user_process.stack_frame_count];
-    seL4_CPtr slot = user_process.stack_slots[user_process.stack_frame_count];
+  bool use_vm_reset =
+      user_process.client != NULL && user_process.client->vm_state != NULL;
 
-    if (slot != seL4_CapNull) {
-      seL4_Error err = seL4_ARM_Page_Unmap(slot);
-      if (err != seL4_NoError) {
-        ZF_LOGW("Failed to unmap stack slot %zu (err=%d)",
-                user_process.stack_frame_count, err);
-      }
-      err = cspace_delete(&cspace, slot);
-      if (err != seL4_NoError) {
-        ZF_LOGW("Failed to delete stack slot %zu (err=%d)",
-                user_process.stack_frame_count, err);
-      }
-      cspace_free_slot(&cspace, slot);
-      user_process.stack_slots[user_process.stack_frame_count] = seL4_CapNull;
-    }
+  if (use_vm_reset) {
+    vm_reset_state(user_process.client->vm_state);
+  } else {
+    while (user_process.stack_frame_count > 0) {
+      user_process.stack_frame_count--;
+      frame_ref_t frame =
+          user_process.stack_frames[user_process.stack_frame_count];
+      seL4_CPtr slot = user_process.stack_slots[user_process.stack_frame_count];
 
-    if (frame != NULL_FRAME) {
-      free_frame(frame);
-      user_process.stack_frames[user_process.stack_frame_count] = NULL_FRAME;
+      if (slot != seL4_CapNull) {
+        seL4_Error err = seL4_ARM_Page_Unmap(slot);
+        if (err != seL4_NoError) {
+          ZF_LOGW("Failed to unmap stack slot %zu (err=%d)",
+                  user_process.stack_frame_count, err);
+        }
+        err = cspace_delete(&cspace, slot);
+        if (err != seL4_NoError) {
+          ZF_LOGW("Failed to delete stack slot %zu (err=%d)",
+                  user_process.stack_frame_count, err);
+        }
+        cspace_free_slot(&cspace, slot);
+      }
+
+      if (frame != NULL_FRAME) {
+        free_frame(frame);
+      }
     }
   }
+
+  user_process.stack_frame_count = 0;
+  for (size_t i = 0; i < ARRAY_SIZE(user_process.stack_frames); i++) {
+    user_process.stack_frames[i] = NULL_FRAME;
+    user_process.stack_slots[i] = seL4_CapNull;
+  }
+}
+
+static void release_ipc_buffer_manual(void) {
+  if (user_process.ipc_buffer != seL4_CapNull) {
+    seL4_Error err = cspace_delete(&cspace, user_process.ipc_buffer);
+    if (err != seL4_NoError) {
+      ZF_LOGW("Failed to delete IPC buffer slot (err=%d)", err);
+    }
+    cspace_free_slot(&cspace, user_process.ipc_buffer);
+    user_process.ipc_buffer = seL4_CapNull;
+  }
+  if (user_process.ipc_buffer_frame != NULL_FRAME) {
+    free_frame(user_process.ipc_buffer_frame);
+    user_process.ipc_buffer_frame = NULL_FRAME;
+  }
+  user_process.ipc_buffer_vm_owned = false;
 }
 
 static int map_process_stack_page(uintptr_t vaddr) {
@@ -338,7 +366,7 @@ static int map_process_stack_page(uintptr_t vaddr) {
           : NULL;
   if (vm_handle != NULL) {
     int vm_err = vm_map_owned_frame(vm_handle, vaddr, frame, slot,
-                                    true, true, false, false, false);
+                                    true, true, false, true, true);
     if (vm_err < 0) {
       if (vm_err == -EEXIST) {
         ZF_LOGE("Stack frame already mapped at %p", (void *)vaddr);
@@ -546,13 +574,34 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
     goto out;
   }
 
-  /* Create an IPC buffer */
-  user_process.ipc_buffer_ut = alloc_retype(
-      &user_process.ipc_buffer, seL4_ARM_SmallPageObject, seL4_PageBits);
-  if (user_process.ipc_buffer_ut == NULL) {
-    ZF_LOGE("Failed to alloc ipc buffer ut");
+  /* Create an IPC buffer backing frame */
+  user_process.ipc_buffer_frame = alloc_frame();
+  if (user_process.ipc_buffer_frame == NULL_FRAME) {
+    ZF_LOGE("Failed to allocate IPC buffer frame");
     goto out;
   }
+  unsigned char *ipc_bytes = frame_data(user_process.ipc_buffer_frame);
+  memset(ipc_bytes, 0, PAGE_SIZE_4K);
+
+  user_process.ipc_buffer = cspace_alloc_slot(&cspace);
+  if (user_process.ipc_buffer == seL4_CapNull) {
+    ZF_LOGE("Failed to alloc slot for IPC buffer");
+    free_frame(user_process.ipc_buffer_frame);
+    user_process.ipc_buffer_frame = NULL_FRAME;
+    goto out;
+  }
+
+  err = cspace_copy(&cspace, user_process.ipc_buffer, frame_table_cspace(),
+                    frame_page(user_process.ipc_buffer_frame), seL4_AllRights);
+  if (err != seL4_NoError) {
+    cspace_free_slot(&cspace, user_process.ipc_buffer);
+    user_process.ipc_buffer = seL4_CapNull;
+    free_frame(user_process.ipc_buffer_frame);
+    user_process.ipc_buffer_frame = NULL_FRAME;
+    ZF_LOGE("Failed to copy IPC buffer cap");
+    goto out;
+  }
+  user_process.ipc_buffer_vm_owned = false;
 
   /* allocate a new slot in the target cspace which we will mint a badged
    * endpoint cap into -- the badge is used to identify the process, which will
@@ -669,19 +718,23 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
 
   /* Map in the IPC buffer for the thread */
   if (client->vm_state != NULL) {
-    int vm_err = vm_map_owned_frame(client->vm_state, PROCESS_IPC_BUFFER, 0,
+    int vm_err = vm_map_owned_frame(client->vm_state, PROCESS_IPC_BUFFER,
+                                    user_process.ipc_buffer_frame,
                                     user_process.ipc_buffer, true, true, false,
-                                    false, false);
+                                    true, true);
     if (vm_err < 0) {
       ZF_LOGE("VM map failed for IPC buffer errno=%d", -vm_err);
+      release_ipc_buffer_manual();
       goto out;
     }
+    user_process.ipc_buffer_vm_owned = true;
   } else {
     err = map_frame(&cspace, user_process.ipc_buffer, user_process.vspace,
                     PROCESS_IPC_BUFFER, seL4_AllRights,
                     seL4_ARM_Default_VMAttributes);
     if (err != 0) {
       ZF_LOGE("Unable to map IPC buffer for user app");
+      release_ipc_buffer_manual();
       goto out;
     }
   }
@@ -712,6 +765,9 @@ out:
   }
   if (!success) {
     cleanup_stack_frames();
+    if (!user_process.ipc_buffer_vm_owned) {
+      release_ipc_buffer_manual();
+    }
   }
   return success;
 }
