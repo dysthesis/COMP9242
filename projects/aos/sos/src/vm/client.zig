@@ -242,11 +242,14 @@ pub const Client = struct {
         var it = self.addr_space.iterator();
         while (it.next()) |kv| {
             const vaddr = kv.key_ptr.*;
-            kv.value_ptr.release(); // unmap frame cap and free frame
             self.addr_space.recordLeafUnmap(vaddr);
+            kv.value_ptr.release(); // unmap frame cap and free frame
         }
         self.addr_space.clearRetainingCapacity();
         self.mapped_count = 0;
+        if (self.addr_space.hasLivePagingNodes()) {
+            _ = c.printf("[vm_teardown] warning: paging nodes remain after release\n");
+        }
     }
 
     pub fn teardown(self: *Self) void {

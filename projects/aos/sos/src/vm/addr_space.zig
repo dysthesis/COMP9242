@@ -18,7 +18,7 @@ pub const AddrSpace = struct {
         _ = c.printf("[addr_space] entered AddrSpace.init...\n");
         _ = c.printf("[addr_space] initialising page table...\n");
         const root = try alloc.create(page_table.PTNode);
-        root.* = page_table.PTNode.init(alloc, .L0, vspace_root_cap, null);
+        root.* = page_table.PTNode.init(alloc, .L0, vspace_root_cap, null, null);
         _ = c.printf("[addr_space] page table initialised!\n");
         return .{
             .regions = RegionMap.init(),
@@ -33,6 +33,8 @@ pub const AddrSpace = struct {
     /// Destroy the address space
     pub fn deinit(self: *Self) void {
         self.pages.deinit();
+        self.root.children.deinit();
+        self.alloc.destroy(self.root);
     }
 
     pub inline fn getPtr(self: *Self, vaddr: usize) ?*page.MappedPage {
@@ -53,6 +55,10 @@ pub const AddrSpace = struct {
 
     pub inline fn clearRetainingCapacity(self: *Self) void {
         self.pages.clearRetainingCapacity();
+    }
+
+    pub inline fn hasLivePagingNodes(self: *const Self) bool {
+        return self.root.children.count() != 0;
     }
 
     pub inline fn insertRegion(self: *Self, node: *RegionNode, coalesce: bool) !void {
@@ -78,19 +84,35 @@ pub const AddrSpace = struct {
         want_level: page_table.Level,
         vaddr: usize,
     ) !*page_table.PTNode {
-        if (parent.children.get(idx)) |node| return node;
+        if (parent.children.get(idx)) |node| {
+            _ = c.printf("[ensureChild] found existing child parent_level=%d idx=%d want_level=%d\n", @as(c_int, @intFromEnum(parent.level)), @as(c_int, idx), @as(c_int, @intFromEnum(want_level)));
+            return node;
+        }
+        _ = c.printf("[ensureChild] creating new child parent_level=%d idx=%d want_level=%d vaddr=0x%lx\n", @as(c_int, @intFromEnum(parent.level)), @as(c_int, idx), @as(c_int, @intFromEnum(want_level)), @as(c_ulong, @intCast(vaddr)));
 
         const slot = sos.cspace_alloc_slot(self.cspace);
         if (slot == sel4.seL4_CapNull) return error.OutOfSlots;
 
-        try page_table.retypePageTableObject(slot, want_level);
+        const ut_ptr = try page_table.retypePageTableObject(slot, want_level);
 
         // Map this page table at the address implied by vaddr (helper aligns internally)
-        try page_table.mapChildToVSpace(self.vspace, slot, parent.level, vaddr);
+        page_table.mapChildToVSpace(self.vspace, slot, parent.level, vaddr) catch |e| {
+            _ = sos.cspace_delete(self.cspace, slot);
+            sos.cspace_free_slot(self.cspace, slot);
+            return mapAddrSpaceErr(e);
+        };
 
         const child = try self.alloc.create(page_table.PTNode);
-        child.* = page_table.PTNode.init(self.alloc, want_level, slot, parent);
-        try parent.children.put(idx, child);
+        child.* = page_table.PTNode.init(self.alloc, want_level, slot, parent, ut_ptr);
+
+        parent.children.put(idx, child) catch |e| {
+            page_table.unmapPagingObject(want_level, slot);
+            _ = sos.cspace_delete(self.cspace, slot);
+            sos.cspace_free_slot(self.cspace, slot);
+            sos.ut_free(ut_ptr);
+            self.alloc.destroy(child);
+            return mapAddrSpaceErr(e);
+        };
         parent.refcnt += 1;
         return child;
     }
@@ -159,8 +181,13 @@ pub const AddrSpace = struct {
 
             const parent = path.*[level - 1];
 
+            page_table.unmapPagingObject(child.level, child.cap_slot);
             _ = sos.cspace_delete(self.cspace, child.cap_slot);
             sos.cspace_free_slot(self.cspace, child.cap_slot);
+            if (child.ut) |ut_ptr| {
+                sos.ut_free(ut_ptr);
+            }
+            child.children.deinit();
             _ = parent.children.remove(idx[level - 1]);
             self.alloc.destroy(child);
         }
@@ -186,6 +213,19 @@ pub const AddrSpace = struct {
         self.pruneEmpty(vaddr, &p);
     }
 
+    fn ensureLevelPath(self: *Self, upto: page_table.Level, vaddr: usize) !void {
+        var node = self.root;
+
+        if (upto == .L0) return;
+        node = try self.ensureChild(node, page_table.l0Index(vaddr), .L1, vaddr);
+        if (upto == .L1) return;
+
+        node = try self.ensureChild(node, page_table.l1Index(vaddr), .L2, vaddr);
+        if (upto == .L2) return;
+
+        _ = try self.ensureChild(node, page_table.l2Index(vaddr), .L3, vaddr);
+    }
+
     pub fn mapFrame(
         self: *Self,
         page_cap: sel4.seL4_CPtr,
@@ -194,46 +234,29 @@ pub const AddrSpace = struct {
         attrs: sel4.seL4_ARM_VMAttributes,
     ) super.VmError!void {
         var tries: u32 = 0;
+        const err = pageMap(page_cap, self.vspace, vaddr, rights, attrs);
+        if (err != sel4.seL4_NoError) {
+            var map_err = err;
+            while (map_err == sel4.seL4_FailedLookup and tries < 4) : (tries += 1) {
+                const lvl_word = sel4.seL4_MappingFailedLookupLevel();
+                const missing = page_table.missingChildLevel(lvl_word) orelse {
+                    _ = c.printf("[vm_map] unknown missing level code=%lu\n", @as(c_ulong, lvl_word));
+                    break;
+                };
+                if (missing == .L0) break;
 
-        while (true) {
-            _ = c.printf("[vm_map] attempting to map frame, cap=%lu vaddr=0x%lx rights=%s attr=0x%lx", page_cap, @as(c_ulong, vaddr), &logging.rightsStr(rights), @as(c_ulong, attrs));
+                _ = self.ensureLevelPath(missing, vaddr) catch |e| {
+                    return mapAddrSpaceErr(e);
+                };
 
-            const err = pageMap(page_cap, self.vspace, vaddr, rights, attrs);
-            if (err == sel4.seL4_NoError) break;
-
-            if (err != sel4.seL4_FailedLookup or tries >= 3) {
-                const lvl: c_ulong = sel4.seL4_MappingFailedLookupLevel();
-                _ = c.printf("[map failed] vaddr=0x%lx err=%d missing_level=L%lu\n", @as(c_ulong, vaddr), @as(c_int, @intCast(err)), lvl);
-                return super.VmError.MapFailed;
+                map_err = pageMap(page_cap, self.vspace, vaddr, rights, attrs);
+                if (map_err == sel4.seL4_NoError) break;
             }
 
-            tries += 1;
-
-            const lvl_word = sel4.seL4_MappingFailedLookupLevel();
-            const missing_child = page_table.missingChildLevel(lvl_word) orelse {
-                _ = c.printf("[vm_map] unknown missing level code=%lu\n", @as(c_ulong, lvl_word));
+            if (map_err != sel4.seL4_NoError) {
+                _ = c.printf("[vm_map] leaf map failed vaddr=0x%lx err=%d\n", @as(c_ulong, @intCast(vaddr)), @as(c_int, @intCast(map_err)));
                 return super.VmError.MapFailed;
-            };
-            const parent = page_table.parentLevel(missing_child);
-
-            // Allocate a cslot for the new child page table
-            const slot = sos.cspace_alloc_slot(self.cspace);
-            if (slot == sel4.seL4_CapNull) return super.VmError.OutOfSlots;
-
-            // Retype the object for the child level
-            page_table.retypePageTableObject(slot, missing_child) catch |e| {
-                sos.cspace_free_slot(self.cspace, slot);
-                return mapAddrSpaceErr(e);
-            };
-
-            // Map the child at the correctly aligned base that covers vaddr.
-            page_table.mapChildToVSpace(self.vspace, slot, parent, vaddr) catch |e| {
-                _ = sos.cspace_delete(self.cspace, slot);
-                sos.cspace_free_slot(self.cspace, slot);
-                return mapAddrSpaceErr(e);
-            };
-
-            // retry the leaf map now that the missing level exists
+            }
         }
 
         self.recordLeafMap(vaddr);

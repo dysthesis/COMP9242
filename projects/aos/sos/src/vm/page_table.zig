@@ -4,17 +4,25 @@ pub const PTNode = struct {
     level: Level,
     cap_slot: sel4.seL4_CPtr,
     parent: ?*PTNode = null,
+    ut: ?*sos.ut_t = null,
     /// map child index to child node
     children: std.AutoHashMap(u16, *PTNode),
     /// Number of mapped leaf pages in this subtree
     live_leaves: usize = 0,
     refcnt: usize = 0,
 
-    pub fn init(alloc: std.mem.Allocator, level: Level, cap_slot: sel4.seL4_CPtr, parent: ?*PTNode) PTNode {
+    pub fn init(
+        alloc: std.mem.Allocator,
+        level: Level,
+        cap_slot: sel4.seL4_CPtr,
+        parent: ?*PTNode,
+        ut_ptr: ?*sos.ut_t,
+    ) PTNode {
         return .{
             .level = level,
             .cap_slot = cap_slot,
             .parent = parent,
+            .ut = ut_ptr,
             .children = std.AutoHashMap(u16, *PTNode).init(alloc),
             .live_leaves = 0,
         };
@@ -112,7 +120,7 @@ fn ptObjectTypeAndBits(level: Level) struct { typ: sel4.seL4_Word, bits: sel4.se
 }
 
 /// Retype one page-table object into `slot`.
-pub fn retypePageTableObject(slot: sel4.seL4_CPtr, level: Level) RetypeError!void {
+pub fn retypePageTableObject(slot: sel4.seL4_CPtr, level: Level) RetypeError!*sos.ut_t {
     if (level == .L0) return RetypeError.BadArgs;
 
     const pt = ptObjectTypeAndBits(level);
@@ -120,7 +128,6 @@ pub fn retypePageTableObject(slot: sel4.seL4_CPtr, level: Level) RetypeError!voi
     const ut_ptr = sos.ut_alloc(@intCast(pt.bits), &cspace) orelse
         return RetypeError.OutOfUntyped;
 
-    // NOTE: Do NOT ut_free() after a successful retype, the memory is now a kernel object.
     const ut_cap: sel4.seL4_CPtr = sos.ut_get_cap(ut_ptr);
 
     const err = sos.cspace_untyped_retype(
@@ -135,6 +142,8 @@ pub fn retypePageTableObject(slot: sel4.seL4_CPtr, level: Level) RetypeError!voi
         sos.ut_free(ut_ptr);
         return RetypeError.RetypeFailed;
     }
+
+    return ut_ptr;
 }
 
 pub fn mapChildToVSpace(
@@ -156,6 +165,21 @@ pub fn mapChildToVSpace(
         const level = sel4.seL4_MappingFailedLookupLevel();
         _ = c.printf("[ptMap] from mapChildToVSpace -> failed with parent=%d vaddr=0x%lx base=0x%lx missing_level=L%lu err=%d", @as(c_int, @intFromEnum(parent_level)), @as(c_ulong, @intCast(vaddr)), @as(c_ulong, base), level, @as(c_int, @intCast(err)));
         return MapPtError.MapFailed;
+    }
+}
+
+pub fn unmapPagingObject(level: Level, cap: sel4.seL4_CPtr) void {
+    _ = level;
+    if (@hasDecl(sel4, "seL4_ARM_PageTable_Unmap")) {
+        const err = sel4.seL4_ARM_PageTable_Unmap(cap);
+        if (err != sel4.seL4_NoError) {
+            _ = c.printf("[pt_unmap] PageTable_Unmap failed cap=%lu err=%d\n", @as(c_ulong, @intCast(cap)), @as(c_int, @intCast(err)));
+        }
+    } else {
+        const err = @field(sel4, "seL4_PageTable_Unmap")(cap);
+        if (err != sel4.seL4_NoError) {
+            _ = c.printf("[pt_unmap] PageTable_Unmap failed cap=%lu err=%d\n", @as(c_ulong, @intCast(cap)), @as(c_int, @intCast(err)));
+        }
     }
 }
 pub const MapPtError = error{
