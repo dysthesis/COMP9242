@@ -151,22 +151,6 @@ pub export fn vm_report_initial_stack(vm_handle: *VmHandle, mapped_bottom: usize
 
 /// Register an ELF segment mapping in the VM subsystem
 /// This should be called after successfully mapping ELF segments to track them
-pub export fn vm_register_elf_mapping(
-    vm_handle: *VmHandle,
-    vaddr: usize,
-    frame_ref: usize,
-    cap_slot: sel4.seL4_CPtr,
-    readable: bool,
-    writable: bool,
-    executable: bool,
-) callconv(.c) c_int {
-    vm_handle.registerElfMapping(vaddr, frame_ref, cap_slot, readable, writable, executable) catch |err| {
-        const errno = vmErrorToErrno(err);
-        return -errno;
-    };
-    return 0;
-}
-
 pub export fn vm_map_owned_frame(
     vm_handle: *VmHandle,
     vaddr: usize,

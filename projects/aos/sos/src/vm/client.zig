@@ -150,12 +150,12 @@ pub const Client = struct {
             attrs = attrs | sel4.seL4_ARM_ExecuteNever;
         }
 
-        self.addr_space.mapFrame(slot, vaddr, rights, attrs) catch |err| {
+        mapping.map_owned_frame(&self.addr_space, slot, vaddr, rights, attrs) catch |err| {
             _ = sos.cspace_delete(&cspace, slot);
             _ = sos.cspace_free_slot(&cspace, slot);
             sos.free_frame(frame_ref);
             _ = c.printf("[vm_map] map_frame failed err=%d slot=%lu frame_ref=%lu vaddr=0x%lx\n", super.vmErrorToErrno(err), @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
-            return super.VmError.MapFailed;
+            return err;
         };
         _ = c.printf("[vm_map] map_frame success slot=%lu frame_ref=%lu vaddr=0x%lx\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
 
