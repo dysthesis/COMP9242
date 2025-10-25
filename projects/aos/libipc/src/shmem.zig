@@ -108,6 +108,7 @@ pub const SharedPage = extern struct {
         };
 
         const k_target: sel4.seL4_Word = @intCast(k_va);
+        // NOTE: This maps into SOS for bookkeeping only. VM tracking is handled separately when the page is exposed to clients.
         if (sos.map_frame(
             sos_cspace,
             k_cap,
@@ -147,6 +148,9 @@ pub const SharedPage = extern struct {
         };
 
         const u_target: sel4.seL4_Word = @intCast(u_va);
+        // TODO: once vm_handle plumbing is available here, switch to
+        // vm_map_owned_frame so the client-side mapping participates in the
+        // unified VM accounting.
         if (sos.map_frame(
             sos_cspace,
             u_cap,

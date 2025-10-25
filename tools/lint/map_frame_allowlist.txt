@@ -1,0 +1,13 @@
+projects/aos/libipc/src/shmem.zig
+projects/aos/libsel4cspace/src/cspace.c
+projects/aos/sos/src/bootstrap.c
+projects/aos/sos/src/debugger.c
+projects/aos/sos/src/dma.c
+projects/aos/sos/src/elf.c
+projects/aos/sos/src/frame_table.c
+projects/aos/sos/src/main.c
+projects/aos/sos/src/mapping.c
+projects/aos/sos/src/mapping.h
+projects/aos/sos/src/threads.c
+projects/aos/sos/src/vm/client.zig
+tools/lint/check_map_frame.py

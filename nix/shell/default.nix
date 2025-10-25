@@ -108,6 +108,10 @@ in {
           ]))
         unstable.tinymist
 
+        unstable.black
+        unstable.basedpyright
+        unstable.astral
+
         # Zig toolchain
         zigWrapper
         zlsWrapper
