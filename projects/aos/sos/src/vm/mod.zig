@@ -17,6 +17,7 @@ pub const VmError = error{
 };
 
 const MAX_CLIENTS: usize = sos.MAX_CLIENTS;
+pub const Address = @import("address.zig").Address;
 pub const PAGE_SIZE_4K: usize = sos.PAGE_SIZE_4K;
 pub const HEAP_BASE: usize = 0x40000000;
 pub const MMAP_BASE: usize = 0x80000000;
@@ -74,19 +75,15 @@ fn vmStateIndex(caller: *sos.client_t) usize {
 }
 
 pub fn alignForward(value: usize, alignment: usize) usize {
-    if (alignment == 0) return value;
-    const remainder = value % alignment;
-    if (remainder == 0) return value;
-    return value + (alignment - remainder);
+    return Address.init(value).alignUp(alignment).raw();
 }
 
 pub inline fn alignDown(value: usize, alignment: usize) usize {
-    if (alignment == 0) return value;
-    return value - (value % alignment);
+    return Address.init(value).alignDown(alignment).raw();
 }
 
 pub inline fn pageBase(addr: usize) usize {
-    return alignDown(addr, PAGE_SIZE_4K);
+    return Address.init(addr).pageBase(PAGE_SIZE_4K).raw();
 }
 
 pub export fn vm_state_acquire(cl: *sos.client_t) callconv(.c) *VmHandle {

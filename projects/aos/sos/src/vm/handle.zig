@@ -177,7 +177,8 @@ pub const VmHandle = struct {
         _ = want_write;
         _ = is_fetch;
         const state = self.ensureVmState();
-        const base = pageBase(fault_addr);
+        const base_addr = Address.init(fault_addr).pageBase(PAGE_SIZE_4K);
+        const base = base_addr.raw();
 
         if (state.findPage(base) != null) {
             return;
@@ -259,9 +260,9 @@ pub const VmHandle = struct {
     /// Get direct access to a user page's frame data
     pub fn getUserPageData(self: *Self, user_vaddr: usize) ?[*]u8 {
         const state = self.ensureVmState();
-        const page_base = pageBase(user_vaddr);
+        const page_base = Address.init(user_vaddr).pageBase(PAGE_SIZE_4K);
 
-        const mapped_page = state.findPage(page_base) orelse {
+        const mapped_page = state.findPage(page_base.raw()) orelse {
             _ = c.printf("[vm_access] page not mapped at vaddr=0x%lx\n", @as(c_ulong, @intCast(user_vaddr)));
             return null;
         };
@@ -308,6 +309,7 @@ const sel4 = cimports.sel4;
 pub const client = @import("client.zig");
 
 const super = @import("mod.zig");
+const Address = super.Address;
 const vm_get_user_page_data = super.vm_get_user_page_data;
 const bootstrapVmStates = super.bootstrapVmStates;
 const VmError = super.VmError;
@@ -315,7 +317,6 @@ const HEAP_BASE = super.HEAP_BASE;
 const HEAP_LIMIT = super.HEAP_LIMIT;
 pub const MMAP_LIMIT = super.MMAP_BASE;
 const alignForward = super.alignForward;
-const pageBase = super.pageBase;
 const vmErrorToErrno = super.vmErrorToErrno;
 
 const std = @import("std");

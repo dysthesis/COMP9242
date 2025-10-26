@@ -68,16 +68,17 @@ pub const Client = struct {
         return self.addr_space.getPtr(vaddr).?;
     }
 
-    fn isLegalUserMapping(self: *Client, base: usize) bool {
+    fn isLegalUserMapping(self: *Client, base: Address) bool {
+        const addr = base.raw();
         // inside configured heap band and below the current break.
-        if (base >= super.HEAP_BASE and base < self.heap_break) return true;
+        if (addr >= super.HEAP_BASE and addr < self.heap_break) return true;
 
         // strictly between guard and top (guard page itself is illegal).
         const min_stack = self.stack_guard + super.PAGE_SIZE_4K;
-        if (base >= min_stack and base < self.stack_top) return true;
+        if (addr >= min_stack and addr < self.stack_top) return true;
 
         // any address covered by a declared RegionKind.Mmap.
-        if (self.findMmapRegion(base) != null) return true;
+        if (self.findMmapRegion(addr) != null) return true;
 
         // everything else is out of policy.
         return false;
@@ -88,7 +89,8 @@ pub const Client = struct {
             return super.VmError.InvalidArgs;
         }
 
-        if (!self.isLegalUserMapping(super.pageBase(vaddr))) {
+        const addr = Address.init(vaddr);
+        if (!self.isLegalUserMapping(addr.pageBase(super.PAGE_SIZE_4K))) {
             return super.VmError.Bounds;
         }
 
@@ -422,6 +424,7 @@ const region = @import("region.zig");
 const page = @import("page.zig");
 const allocator = @import("allocator.zig");
 const super = @import("mod.zig");
+const Address = super.Address;
 const std = @import("std");
 const mapping = @import("mapping.zig");
 
