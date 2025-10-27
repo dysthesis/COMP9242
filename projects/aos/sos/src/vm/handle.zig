@@ -4,7 +4,79 @@ pub const VmHandle = struct {
     generation: u8,
     client: ?*sos.client_t,
 
+    pub const Access = enum { readOnly, writeOnly };
+    pub const UserSlice = struct {
+        ptr: [*]u8,
+        len: usize,
+    };
+
     pub const Self = @This();
+
+    /// Run the function `f` with the given user memory slice
+    pub fn withUserSlice(
+        self: *Self,
+        /// Address of the user slice to include
+        user_addr: usize,
+        /// Size of the user slice
+        len: usize,
+        /// Permissions
+        access: Access,
+        /// A function to provide access to
+        f: fn ([*]u8, usize) anyerror!usize,
+    ) !usize {
+        var done: usize = 0;
+        while (done < len) {
+            const slice = try self.mapUserSlice(user_addr + done, len - done, access);
+            // we failed to map anything of substance, try again
+            if (slice.len == 0) break;
+            const moved = try f(slice.ptr, slice.len);
+            // we failed to run anything with the slice and the function pointer, try again.
+            if (moved == 0) break;
+            done += moved;
+            // we consumed less than we have, not good
+            if (moved < slice.len) break;
+        }
+        return done;
+    }
+
+    /// Map a userland slice into SOS' memory
+    fn mapUserSlice(self: *Self, user_addr: usize, want_len: usize, access: Access) VmError!UserSlice {
+        // Nothing to do if caller asked for zero bytes
+        if (want_len == 0) return UserSlice{ .ptr = @as([*]u8, @ptrFromInt(0)), .len = 0 };
+
+        const state = self.ensureVmState();
+
+        const page_base = Address.init(user_addr).pageBase(PAGE_SIZE_4K).raw();
+        const page_off = user_addr - page_base;
+
+        // Ensure the page exists, or fault
+        var rec = state.findPage(page_base);
+        if (rec == null) {
+            // Is this legal?
+            try self.handleFault(page_base, access == .writeOnly, false);
+            rec = state.findPage(page_base);
+            if (rec == null) return VmError.Bounds;
+        }
+        const page = rec.?;
+
+        // Enforce access control
+        if (access == .readOnly and !page.readable) return VmError.Unsupported;
+        if (access == .writeOnly and !page.writable) return VmError.Unsupported;
+
+        if (page.frame_ref == 0) return VmError.MapFailed;
+
+        const base: [*]u8 = @as([*]u8, @ptrCast(sos.frame_data(page.frame_ref)));
+
+        // Clip to the end of this page
+        const avail = PAGE_SIZE_4K - page_off;
+        const n = if (want_len < avail) want_len else avail;
+
+        return UserSlice{
+            .ptr = base + page_off,
+            .len = n,
+        };
+    }
+
     /// Copy data from kernel buffer to user buffer
     pub fn copyToUserBuffer(self: *Self, user_vaddr: usize, src_data: [*]const u8, length: usize) bool {
         var offset: usize = 0;

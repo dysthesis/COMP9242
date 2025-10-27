@@ -283,6 +283,7 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     const read_fn = ops_ptr.*.read.?;
 
     // Use temporary buffer for reading
+    // TODO: Get rid of this arbitrary limitation; ideally, we want to eliminate the use of a temp buf entirely
     var temp_buf: [PAGE_SIZE_4K]u8 = undefined;
     const read_size = @min(req, PAGE_SIZE_4K);
     const temp_any: *anyopaque = @ptrCast(&temp_buf[0]);
