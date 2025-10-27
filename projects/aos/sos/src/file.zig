@@ -146,7 +146,7 @@ const ConsoleDevice = struct {
     }
 
     /// Write data to the network console.
-    fn write(self: *ConsoleDevice, buf: ?*anyopaque, len: usize) isize {
+    fn write(self: *ConsoleDevice, buf: ?*const anyopaque, len: usize) isize {
         if (buf == null or len == 0) {
             return 0;
         }
@@ -160,7 +160,7 @@ const ConsoleDevice = struct {
         const max_c_len = @as(usize, @intCast(std.math.maxInt(c_int)));
         const usable_len = @min(len, max_c_len);
         const len_int = std.math.cast(c_int, usable_len) orelse return -sos.EINVAL;
-        const data_ptr: [*c]u8 = @ptrCast(buf.?);
+        const data_ptr: [*c]const u8 = @ptrCast(buf.?);
         const sent = sos.network_console_send(netcon, data_ptr, len_int);
         return @as(isize, @intCast(sent));
     }
@@ -217,7 +217,7 @@ pub export fn console_close(id: c_int) callconv(.c) c_int {
 
 pub export fn console_write(
     _: c_int,
-    buf: ?*anyopaque,
+    buf: ?*const anyopaque,
     len: usize,
 ) callconv(.c) isize {
     return console_device.write(buf, len);

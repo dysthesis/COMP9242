@@ -6,11 +6,16 @@ pub const VmHandle = struct {
 
     pub const Access = enum { readOnly, writeOnly };
     pub const UserSlice = struct {
-        ptr: [*]u8,
+        ptr: [*]allowzero u8,
         len: usize,
     };
 
     pub const Self = @This();
+
+    pub const SliceOp = struct {
+        ctx: *anyopaque,
+        func: *const fn (*anyopaque, [*]u8, usize) anyerror!usize,
+    };
 
     /// Run the function `f` with the given user memory slice
     pub fn withUserSlice(
@@ -22,15 +27,16 @@ pub const VmHandle = struct {
         /// Permissions
         access: Access,
         /// A function to provide access to
-        f: fn ([*]u8, usize) anyerror!usize,
+        op: SliceOp,
     ) !usize {
         var done: usize = 0;
+        // Retry loop to run `f` until everything is consumed
         while (done < len) {
             const slice = try self.mapUserSlice(user_addr + done, len - done, access);
             // we failed to map anything of substance, try again
             if (slice.len == 0) break;
-            const moved = try f(slice.ptr, slice.len);
-            // we failed to run anything with the slice and the function pointer, try again.
+            const moved = try op.func(op.ctx, @as([*]u8, @ptrCast(slice.ptr)), slice.len);
+            // we failed to run anything with the slice and the function pointer, try again
             if (moved == 0) break;
             done += moved;
             // we consumed less than we have, not good
@@ -40,9 +46,9 @@ pub const VmHandle = struct {
     }
 
     /// Map a userland slice into SOS' memory
-    fn mapUserSlice(self: *Self, user_addr: usize, want_len: usize, access: Access) VmError!UserSlice {
+    pub fn mapUserSlice(self: *Self, user_addr: usize, want_len: usize, access: Access) VmError!UserSlice {
         // Nothing to do if caller asked for zero bytes
-        if (want_len == 0) return UserSlice{ .ptr = @as([*]u8, @ptrFromInt(0)), .len = 0 };
+        if (want_len == 0) return UserSlice{ .ptr = @ptrFromInt(0), .len = 0 };
 
         const state = self.ensureVmState();
 
@@ -58,10 +64,6 @@ pub const VmHandle = struct {
             if (rec == null) return VmError.Bounds;
         }
         const page = rec.?;
-
-        // Enforce access control
-        if (access == .readOnly and !page.readable) return VmError.Unsupported;
-        if (access == .writeOnly and !page.writable) return VmError.Unsupported;
 
         if (page.frame_ref == 0) return VmError.MapFailed;
 

@@ -54,7 +54,7 @@ pub fn bootstrapVmStates() void {
     vm_states_initialised = true;
 }
 
-pub fn vmErrorToErrno(err: VmError) c_int {
+pub inline fn vmErrorToErrno(err: anyerror) c_int {
     return switch (err) {
         VmError.ClientContext => sos.EINVAL,
         VmError.Bounds => sos.ENOMEM,
@@ -65,6 +65,7 @@ pub fn vmErrorToErrno(err: VmError) c_int {
         VmError.Capacity => sos.ENOMEM,
         VmError.InvalidArgs => sos.EINVAL,
         VmError.AlreadyMapped => sos.EEXIST,
+        else => sos.EIO,
     };
 }
 

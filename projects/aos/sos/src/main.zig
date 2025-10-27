@@ -240,75 +240,99 @@ fn handleClose(ctx: *ServerContext, args: anytype) SyscallResponse {
 }
 
 fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
-    const caller = ctx.caller orelse {
-        return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EINVAL)) } };
-    };
-
+    const caller = ctx.caller orelse return .{ .Read = .{ .result = -sos.EINVAL } };
     const client_id: usize = @intCast(caller.id);
-    if (client_id >= MAX_CLIENTS) {
-        return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EINVAL)) } };
-    }
+    if (client_id >= MAX_CLIENTS) return .{ .Read = .{ .result = -sos.EINVAL } };
 
     var state = &file.client_io_state[client_id];
     ensureStdio(state);
-    if (!state.initialised) {
-        return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EBADF)) } };
-    }
+    if (!state.initialised) return .{ .Read = .{ .result = -sos.EBADF } };
 
     const fd_raw: c_int = @intCast(args.arg);
-    if (fd_raw < 0 or fd_raw >= SOS_MAX_OPEN_FILES) {
-        return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EBADF)) } };
-    }
+    if (fd_raw < 0 or fd_raw >= SOS_MAX_OPEN_FILES) return .{ .Read = .{ .result = -sos.EBADF } };
 
     const fd_index: usize = @intCast(fd_raw);
     const entry = &state.fds[fd_index];
-    if (!entry.used or !entry.readable) {
-        return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EBADF)) } };
-    }
+    if (!entry.used or !entry.readable) return .{ .Read = .{ .result = -sos.EBADF } };
 
     const user_buf_addr: usize = @intCast(args.buf_addr);
     const req: usize = @intCast(args.buf_size);
-    if (req == 0) {
-        return SyscallResponse{ .Read = .{ .result = 0 } };
-    }
+    if (req == 0) return .{ .Read = .{ .result = 0 } };
 
-    const handle = ctx.vm_handle orelse {
-        return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EINVAL)) } };
-    };
+    const handle = ctx.vm_handle orelse return .{ .Read = .{ .result = -sos.EINVAL } };
 
     const ops_ptr = entry.ops;
-    if (ops_ptr == null or ops_ptr.*.read == null) {
-        return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.ENOSYS)) } };
-    }
+    if (ops_ptr == null or ops_ptr.*.read == null) return .{ .Read = .{ .result = -sos.ENOSYS } };
     const read_fn = ops_ptr.*.read.?;
 
-    // Use temporary buffer for reading
-    // TODO: Get rid of this arbitrary limitation; ideally, we want to eliminate the use of a temp buf entirely
-    var temp_buf: [PAGE_SIZE_4K]u8 = undefined;
-    const read_size = @min(req, PAGE_SIZE_4K);
-    const temp_any: *anyopaque = @ptrCast(&temp_buf[0]);
-    const result = read_fn(entry.dev_id, temp_any, read_size);
+    const ReadCtx = struct {
+        dev_id: c_int,
+        read_fn: *const fn (c_int, ?*anyopaque, usize) callconv(.c) isize,
+        would_block: bool = false,
+        errno: c_int = 0,
+        pub const Self = @This();
+        pub fn op(ctx_opaque: *anyopaque, p: [*]u8, n: usize) anyerror!usize {
+            const rctx: *Self = @ptrCast(@alignCast(ctx_opaque));
+            const anyptr: *anyopaque = @ptrCast(p);
+            const r: isize = rctx.read_fn(rctx.dev_id, anyptr, n);
 
-    if (result == -sos.EWOULDBLOCK) {
+            if (r == -sos.EWOULDBLOCK) {
+                rctx.would_block = true;
+                return 0;
+            }
+            if (r < 0) {
+                rctx.errno = @intCast(-r);
+                return error.DeviceError;
+            }
+            return @intCast(r);
+        }
+    };
+
+    var read_ctx = ReadCtx{
+        .dev_id = entry.dev_id,
+        .read_fn = read_fn,
+        .would_block = false,
+        .errno = 0,
+    };
+
+    const moved_or_err = handle.withUserSlice(
+        user_buf_addr,
+        req,
+        .writeOnly,
+        .{ .ctx = &read_ctx, .func = ReadCtx.op },
+    );
+    var moved: usize = 0;
+
+    // Run the reader with the given user slice
+    moved = moved_or_err catch |err| {
+        if (err == error.DeviceError) {
+            return .{ .Read = .{ .result = -read_ctx.errno } };
+        }
+
+        const errno: c_int = vm.vmErrorToErrno(err);
+
+        return .{ .Read = .{ .result = -errno } };
+    };
+
+    if (moved == 0 and read_ctx.would_block) {
         if (console.pending_console_read != null) {
-            return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EBUSY)) } };
+            return .{ .Read = .{ .result = -sos.EBUSY } };
         }
 
         const old_reply_cap = ctx.reply.*;
         const old_reply_ut = ctx.reply_ut.*;
-
         const new_reply_ut = sos.alloc_retype(ctx.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
         if (new_reply_ut == null) {
             ctx.reply.* = old_reply_cap;
             ctx.reply_ut.* = old_reply_ut;
-            return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.ENOMEM)) } };
+            return .{ .Read = .{ .result = -sos.ENOMEM } };
         }
 
         console.pending_console_read = PendingConsoleRead{
             .client = caller,
             .client_id = client_id,
             .fd_index = fd_index,
-            .requested = read_size,
+            .requested = req,
             .ops = ops_ptr,
             .dev_id = entry.dev_id,
             .reply = old_reply_cap,
@@ -319,77 +343,74 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
 
         ctx.have_reply.* = false;
         ctx.reply_ut.* = new_reply_ut.?;
-        if (console.pending_console_read) |pending| {
-            pending.tryComplete();
-        }
+        if (console.pending_console_read) |pending| pending.tryComplete();
         return null;
     }
 
-    if (result > 0) {
-        const bytes_read: usize = @intCast(result);
-        if (handle.copyToUserBuffer(user_buf_addr, &temp_buf, bytes_read) == false) {
-            return SyscallResponse{ .Read = .{ .result = @as(c_int, (-sos.EFAULT)) } };
-        }
-    }
-
-    const n = resultToCInt(result);
-    return SyscallResponse{ .Read = .{ .result = n } };
+    // Either we read some bytes, or EOF
+    return .{ .Read = .{ .result = @intCast(moved) } };
 }
 
 fn handleWrite(ctx: *ServerContext, args: anytype) SyscallResponse {
-    const caller = ctx.caller orelse {
-        return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EINVAL)) } };
-    };
-
+    const caller = ctx.caller orelse return .{ .Write = .{ .result = -sos.EINVAL } };
     const client_id: usize = @intCast(caller.id);
-    if (client_id >= MAX_CLIENTS) {
-        return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EINVAL)) } };
-    }
+    if (client_id >= MAX_CLIENTS) return .{ .Write = .{ .result = -sos.EINVAL } };
 
     var state = &file.client_io_state[client_id];
     ensureStdio(state);
-    if (!state.initialised) {
-        return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EBADF)) } };
-    }
+    if (!state.initialised) return .{ .Write = .{ .result = -sos.EBADF } };
 
     const fd_raw: c_int = @intCast(args.arg);
-    if (fd_raw < 0 or fd_raw >= SOS_MAX_OPEN_FILES) {
-        return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EBADF)) } };
-    }
+    if (fd_raw < 0 or fd_raw >= SOS_MAX_OPEN_FILES) return .{ .Write = .{ .result = -sos.EBADF } };
 
-    const fd_index: usize = @intCast(fd_raw);
-    const entry = &state.fds[fd_index];
-    if (!entry.used or !entry.writable) {
-        return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EBADF)) } };
-    }
+    const entry = &state.fds[@intCast(fd_raw)];
+    if (!entry.used or !entry.writable) return .{ .Write = .{ .result = -sos.EBADF } };
 
     const user_buf_addr: usize = @intCast(args.buf_addr);
     const req: usize = @intCast(args.buf_size);
-    if (req == 0) {
-        return SyscallResponse{ .Write = .{ .result = 0 } };
-    }
+    if (req == 0) return .{ .Write = .{ .result = 0 } };
 
-    const handle = ctx.vm_handle orelse {
-        return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EINVAL)) } };
+    const handle = ctx.vm_handle orelse return .{ .Write = .{ .result = -sos.EINVAL } };
+
+    const write_fn = entry.ops.?.*.write orelse return .{ .Write = .{ .result = -sos.ENOSYS } };
+
+    const WriteCtx = struct {
+        dev_id: c_int,
+        write_fn: *const fn (c_int, ?*const anyopaque, usize) callconv(.c) isize,
+        errno: c_int = 0,
+        pub const Self = @This();
+        pub fn op(ctx_opaque: *anyopaque, p: [*]u8, n: usize) anyerror!usize {
+            const self: *Self = @ptrCast(@alignCast(ctx_opaque));
+            const ro: [*]const u8 = p; // treat mapped bytes as const
+            const any_ro: *const anyopaque = @ptrCast(ro);
+            const r: isize = self.write_fn(self.dev_id, any_ro, n);
+            if (r < 0) {
+                self.errno = @intCast(-r);
+                return error.DeviceError;
+            }
+            return @intCast(r);
+        }
     };
 
-    const ops_ptr = entry.ops;
-    if (ops_ptr == null or ops_ptr.*.write == null) {
-        return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.ENOSYS)) } };
-    }
-    const write_fn = ops_ptr.*.write.?;
+    var wctx = WriteCtx{ .dev_id = entry.dev_id, .write_fn = write_fn };
+    const moved_or_err = handle.withUserSlice(user_buf_addr, req, .readOnly, .{ .ctx = &wctx, .func = WriteCtx.op });
 
-    // Copy from user buffer to temporary buffer
-    var temp_buf: [PAGE_SIZE_4K]u8 = undefined;
-    const write_size = @min(req, PAGE_SIZE_4K);
-    if (handle.copyFromUserBuffer(&temp_buf, user_buf_addr, write_size) == false) {
-        return SyscallResponse{ .Write = .{ .result = @as(c_int, (-sos.EFAULT)) } };
-    }
+    const moved: usize = moved_or_err catch |err| {
+        if (err == error.DeviceError) return .{ .Write = .{ .result = -wctx.errno } };
+        const errno: c_int = switch (err) {
+            vm.VmError.ClientContext => sos.EINVAL,
+            vm.VmError.Bounds => sos.ENOMEM,
+            vm.VmError.Unsupported => sos.ENOSYS,
+            vm.VmError.OutOfFrames, vm.VmError.OutOfSlots, vm.VmError.Capacity => sos.ENOMEM,
+            vm.VmError.MapFailed => sos.EIO,
+            vm.VmError.InvalidArgs => sos.EINVAL,
+            vm.VmError.AlreadyMapped => sos.EEXIST,
+            else => sos.EIO,
+        };
+        return .{ .Write = .{ .result = -errno } };
+    };
 
-    const src_any: *anyopaque = @ptrCast(&temp_buf[0]);
-    const result = write_fn(entry.dev_id, src_any, write_size);
-    const n: c_int = @intCast(result);
-    return SyscallResponse{ .Write = .{ .result = @as(c_int, (n)) } };
+    return .{ .Write = .{ .result = @intCast(moved) } };
 }
 
 fn handleTimestamp(ctx: *ServerContext) SyscallResponse {
