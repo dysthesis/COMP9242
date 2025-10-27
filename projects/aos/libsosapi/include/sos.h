@@ -23,9 +23,6 @@
 #define SOS_IPC_EP_CAP (0x1)
 #define TIMER_IPC_EP_CAP (0x2)
 
-#define PROCESS_SHBUF_UVA (0xC0000000)
-static inline void *sos_shbuf_ptr(void) { return (void *)PROCESS_SHBUF_UVA; }
-
 /* Limits */
 #define PROCESS_MAX_FILES 16
 #define MAX_IO_BUF 0x1000

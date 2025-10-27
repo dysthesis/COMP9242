@@ -28,6 +28,15 @@ pub fn build(b: *std.Build) void {
         b.path("build/projects/aos/libaos/libaos.a");
     _ = cmake_aos;
 
+    const librbtree = b.addModule("librbtree", .{
+        .root_source_file = b.path("projects/aos/librbtree/src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    addCommonIncludePaths(b, librbtree);
+    addExePatch(b, librbtree, .{ .lto = false });
+
     const cimports = b.addModule("table-helper", .{
         .root_source_file = b.path("projects/aos/cimports.zig"),
         .target = target,
@@ -48,6 +57,7 @@ pub fn build(b: *std.Build) void {
     libipc_module.addIncludePath(b.path("projects/aos/libipc/include"));
     libipc_module.addIncludePath(b.path("projects/aos/sos/src"));
     libipc_module.addImport("cimports", cimports);
+    libipc_module.addImport("rbtree", librbtree);
     addExePatch(b, libipc_module, .{ .lto = false });
 
     const libipc = b.addLibrary(.{
@@ -58,26 +68,6 @@ pub fn build(b: *std.Build) void {
     libipc.link_gc_sections = false;
     b.installArtifact(libipc);
 
-    const libipc_server_module = b.addModule("libipc_server", .{
-        .root_source_file = b.path("projects/aos/libipc/src/server.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_c = sanitize_c,
-    });
-    addCommonIncludePaths(b, libipc_server_module);
-    libipc_server_module.addIncludePath(b.path("projects/aos/libipc/include"));
-    libipc_server_module.addIncludePath(b.path("projects/aos/sos/src"));
-    libipc_server_module.addImport("cimports", cimports);
-    addExePatch(b, libipc_server_module, .{ .lto = false });
-
-    const libipc_server = b.addLibrary(.{
-        .linkage = .static,
-        .name = "ziglib_ipc_server",
-        .root_module = libipc_server_module,
-    });
-    libipc_server.link_gc_sections = false;
-    b.installArtifact(libipc_server);
-
     const libsosapi_module = b.addModule("libsosapi", .{
         .root_source_file = b.path("projects/aos/libsosapi/src/sos.zig"),
         .target = target,
@@ -87,6 +77,7 @@ pub fn build(b: *std.Build) void {
     addCommonIncludePaths(b, libsosapi_module);
 
     libsosapi_module.addImport("cimports", cimports);
+    libsosapi_module.addImport("rbtree", librbtree);
     libsosapi_module.addImport("libipc", libipc_module);
     libsosapi_module.addIncludePath(b.path("projects/aos/libsosapi/include"));
     addExePatch(b, libsosapi_module, .{ .lto = false });
@@ -108,6 +99,7 @@ pub fn build(b: *std.Build) void {
     addCommonIncludePaths(b, libclock_module);
 
     libclock_module.addImport("cimports", cimports);
+    libclock_module.addImport("rbtree", librbtree);
     libclock_module.addIncludePath(b.path("projects/aos/libclock/include"));
     libclock_module.addIncludePath(b.path("projects/aos/libclock/src"));
     addExePatch(b, libclock_module, .{ .lto = false });
@@ -149,6 +141,7 @@ pub fn build(b: *std.Build) void {
         });
         addCommonIncludePaths(b, m);
         m.addImport("cimports", cimports);
+        m.addImport("rbtree", librbtree);
         m.addIncludePath(b.path("projects/aos/libipc/include"));
         const l = b.addLibrary(.{
             .linkage = .static,
@@ -170,6 +163,7 @@ pub fn build(b: *std.Build) void {
         addCommonIncludePaths(b, m);
         addExePatch(b, m, .{ .lto = false });
         m.addImport("cimports", cimports);
+        m.addImport("rbtree", librbtree);
         m.addImport("libipc", libipc_module);
         m.addIncludePath(src);
         const l = b.addLibrary(.{
@@ -192,6 +186,7 @@ pub fn build(b: *std.Build) void {
         });
         addCommonIncludePaths(b, m);
         m.addImport("cimports", cimports);
+        m.addImport("rbtree", librbtree);
         m.addImport("libipc", libipc_module);
         m.addIncludePath(src);
         const l = b.addLibrary(.{
@@ -241,6 +236,7 @@ fn addCommonIncludePaths(b: *std.Build, m: *std.Build.Module) void {
         "projects/aos/libsel4cspace/include",
         "projects/aos/libaos/include",
         "projects/picotcp-bsd",
+        "projects/aos/sos/src",
         "libnfs/lib/.include",
         "libnfs/rquota",
         "libnfs/portmap",

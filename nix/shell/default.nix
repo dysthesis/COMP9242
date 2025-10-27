@@ -108,10 +108,15 @@ in {
           ]))
         unstable.tinymist
 
+        unstable.black
+        unstable.basedpyright
+        unstable.astral
+
         # Zig toolchain
         zigWrapper
         zlsWrapper
         unstable.zlint
+        unstable.binsider
       ]
       ++ (with pkgs'.gcc11Stdenv; [
         gcc11
@@ -121,6 +126,7 @@ in {
     CMAKE_EXPORT_COMPILE_COMMANDS = "ON";
     CROSS_COMPILER_PREFIX = "${pkgs'.stdenv.cc.targetPrefix}";
     CROSS_COMPILE = "$CROSS_COMPILER_PREFIX";
+    DIRENV_LOG_FORMAT = "";
     CFLAGS = [
       "-fPIC"
       "-fno-stack-protector"
@@ -140,6 +146,8 @@ in {
         else
           echo "zls note: run ../init-build.sh in a build directory to populate generated headers" >&2
         fi
+
+        ${lib.getExe pkgs.unstable.glow} NOTES.md
       '';
   };
 }

@@ -10,23 +10,25 @@
  * @TAG(DATA61_GPL)
  */
 
-/* 
- * Initialise the network console by setting up the udp socket 
- * to communicate with your local "serial" interface. 
+/*
+ * Initialise the network console by setting up the udp socket
+ * to communicate with your local "serial" interface.
  * Note that this function will fail if called before the network has
- * initialised. 
+ * initialised.
  */
 struct network_console *network_console_init(void);
 
-/* 
+/*
  * Send data over the network to appear on your local "serial" interface.
  * Returns the length of data sent, which may be less than len, or -1 on error.
  */
-int network_console_send(struct network_console *network_console, char *data, int len);
+int network_console_send(struct network_console *network_console,
+                         const char *data, int len);
 
-/* 
- * Register a handler function to be called when the network receives 
- * incoming data from the "serial" interface. 
+/*
+ * Register a handler function to be called when the network receives
+ * incoming data from the "serial" interface.
  */
-int network_console_register_handler(struct network_console *network_console,
-                        void (*handler)(struct network_console *network_console, char c));
+int network_console_register_handler(
+    struct network_console *network_console,
+    void (*handler)(struct network_console *network_console, char c));

@@ -1,8 +1,10 @@
 #include "cspace/cspace.h"
+#include "vm/api.h"
 #include <ipc.h>
 #include <sel4/sel4.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <vmem_layout.h>
 
 void client_table_init(void) {
@@ -32,9 +34,8 @@ client_t *client_create(seL4_CPtr vspace_root, seL4_Word *out_badge,
   c->gen = (uint8_t)gen;
   c->vspace = vspace_root;
 
-  uintptr_t kva = SOS_SHBUF_BASE + (uintptr_t)id * PAGE_SIZE_4K;
-  if (sos_alloc_shared_page(sos_cspace, vspace_root, PROCESS_SHBUF_UVA, kva,
-                            &c->shbuf) != 0) {
+  c->vm_state = vm_state_acquire(c);
+  if (c->vm_state == NULL) {
     free_ids[free_top++] = id;
     free(c);
     return NULL;
@@ -43,11 +44,10 @@ client_t *client_create(seL4_CPtr vspace_root, seL4_Word *out_badge,
   clients[id] = c;
 
   if (out_badge)
-    *out_badge = badge_make(
-        id, gen,
-        /* we're not using flags for now, but this might be handy to
-           differentiate IPC messages later on */
-        0);
+    *out_badge = badge_make(id, gen,
+                            /* we're not using flags for now, but this might be
+                               handy to differentiate IPC messages later on */
+                            0);
   return c;
 }
 
@@ -66,7 +66,8 @@ void client_destroy(client_t *client, cspace_t *sos_cspace) {
   unsigned id = client->id;
   clients[id] = NULL;
 
-  sos_free_shared_page(sos_cspace, &client->shbuf);
+  vm_state_release(client);
+  client->vm_state = NULL;
 
   free_ids[free_top++] = id;
   free(client);

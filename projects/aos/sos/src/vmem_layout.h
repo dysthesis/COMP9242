@@ -26,32 +26,11 @@
 #define SOS_UT_TABLE (0x8000000000)
 #define SOS_FRAME_TABLE (0x8100000000)
 #define SOS_FRAME_DATA (0x8200000000)
+#define SOS_METADATA_BASE (0x8300000000ULL)
+#define SOS_METADATA_REGION_BYTES (1ul << 20)
 
 /* Constants for how SOS will layout the address space of any processes it loads
  * up */
-#define PROCESS_STACK_TOP (0x90000000)
+#define PROCESS_STACK_TOP (seL4_UserTop)
 #define PROCESS_IPC_BUFFER (0xA0000000)
 #define PROCESS_VMEM_START (0xC0000000)
-
-/* Reserve 4KiB (page size) * MAX_CLIENTS for shared pages */
-#include <ipc.h>
-#include <sel4/sel4.h>
-#include <stdint.h>
-
-#define SOS_SHBUF_END (SOS_SCRATCH - (1ul << seL4_PageBits))
-
-#define SOS_SHBUF_PAGES ((uintptr_t)MAX_CLIENTS)
-#define SOS_SHBUF_PAGE_BYTES (1ul << seL4_PageBits)
-#define SOS_SHBUF_SIZE (SOS_SHBUF_PAGES * SOS_SHBUF_PAGE_BYTES)
-
-#define SOS_SHBUF_BASE (SOS_SHBUF_END - SOS_SHBUF_SIZE)
-#define PROCESS_SHBUF_UVA (PROCESS_VMEM_START)
-
-/* Sanity checks */
-_Static_assert((SOS_SHBUF_BASE & (SOS_SHBUF_PAGE_BYTES - 1)) == 0,
-               "SHBUF base must be 4K aligned");
-_Static_assert(SOS_SHBUF_BASE < SOS_SHBUF_END, "SHBUF size underflow");
-_Static_assert(SOS_SHBUF_END <= SOS_DEVICE_START,
-               "SHBUF must reside below device mappings");
-_Static_assert(SOS_SHBUF_BASE >= 0x10000000ul,
-               "SHBUF spills into low SOS VA (adjust anchors)");

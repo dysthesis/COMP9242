@@ -16,11 +16,13 @@
 #include <string.h>
 #include <assert.h>
 #include <cspace/cspace.h>
+#include <errno.h>
 
 #include "frame_table.h"
 #include "ut.h"
 #include "mapping.h"
 #include "elfload.h"
+#include "vm/api.h"
 
 /*
  * Convert ELF permissions into seL4 permissions.
@@ -72,7 +74,8 @@ static inline seL4_CapRights_t get_sel4_rights_from_elf(unsigned long permission
  *
  */
 static int load_segment_into_vspace(cspace_t *cspace, seL4_CPtr loadee, const char *src, size_t segment_size,
-                                    size_t file_size, uintptr_t dst, seL4_CapRights_t permissions)
+                                    size_t file_size, uintptr_t dst, seL4_CapRights_t permissions,
+                                    struct vm_handle *vm_handle, unsigned long elf_flags)
 {
     assert(file_size <= segment_size);
 
@@ -103,26 +106,43 @@ static int load_segment_into_vspace(cspace_t *cspace, seL4_CPtr loadee, const ch
             return -1;
         }
 
-        /* map the frame into the loadee address space */
-        err = map_frame(cspace, loadee_frame, loadee, loadee_vaddr, permissions,
-                        seL4_ARM_Default_VMAttributes);
+        bool already_mapped = false;
+        if (vm_handle != NULL) {
+            bool readable = (elf_flags & PF_R) || (elf_flags & PF_X);
+            bool writable = (elf_flags & PF_W);
+            bool executable = (elf_flags & PF_X);
+            int vm_err = vm_map_owned_frame(vm_handle, loadee_vaddr, frame, loadee_frame,
+                                            readable, writable, executable, true, true);
+            if (vm_err == -EEXIST) {
+                already_mapped = true;
+            } else if (vm_err < 0) {
+                ZF_LOGE("VM map failed for loadee %p (errno=%d)", (void *) loadee_vaddr, -vm_err);
+                return -1;
+            }
+        } else {
+            /* map the frame into the loadee address space */
+            err = map_frame(cspace, loadee_frame, loadee, loadee_vaddr, permissions,
+                            seL4_ARM_Default_VMAttributes);
 
-        /* A frame has already been mapped at this address. This occurs when segments overlap in
-         * the same frame, which is permitted by the standard. That's fine as we
-         * leave all the frames mapped in, and this one is already mapped. Give back
-         * the ut we allocated and continue on to do the write.
-         *
-         * Note that while the standard permits segments to overlap, this should not occur if the segments
-         * have different permissions - you should check this and return an error if this case is detected. */
-        bool already_mapped = (err == seL4_DeleteFirst);
+            /* A frame has already been mapped at this address. This occurs when segments overlap in
+             * the same frame, which is permitted by the standard. That's fine as we
+             * leave all the frames mapped in, and this one is already mapped. Give back
+             * the ut we allocated and continue on to do the write.
+             *
+             * Note that while the standard permits segments to overlap, this should not occur if the segments
+             * have different permissions - you should check this and return an error if this case is detected. */
+            already_mapped = (err == seL4_DeleteFirst);
+
+            if (!already_mapped && err != seL4_NoError) {
+                ZF_LOGE("Failed to map into loadee at %p, error %u", (void *) loadee_vaddr, err);
+                return -1;
+            }
+        }
 
         if (already_mapped) {
             cspace_delete(cspace, loadee_frame);
             cspace_free_slot(cspace, loadee_frame);
             free_frame(frame);
-        } else if (err != seL4_NoError) {
-            ZF_LOGE("Failed to map into loadee at %p, error %u", (void *) loadee_vaddr, err);
-            return -1;
         }
 
         /* finally copy the data */
@@ -154,7 +174,7 @@ static int load_segment_into_vspace(cspace_t *cspace, seL4_CPtr loadee, const ch
     return 0;
 }
 
-int elf_load(cspace_t *cspace, seL4_CPtr loadee_vspace, elf_t *elf_file)
+int elf_load(cspace_t *cspace, seL4_CPtr loadee_vspace, elf_t *elf_file, struct vm_handle *vm_handle)
 {
 
     int num_headers = elf_getNumProgramHeaders(elf_file);
@@ -175,7 +195,7 @@ int elf_load(cspace_t *cspace, seL4_CPtr loadee_vspace, elf_t *elf_file)
         /* Copy it across into the vspace. */
         ZF_LOGD(" * Loading segment %p-->%p\n", (void *) vaddr, (void *)(vaddr + segment_size));
         int err = load_segment_into_vspace(cspace, loadee_vspace, source_addr, segment_size, file_size, vaddr,
-                                           get_sel4_rights_from_elf(flags));
+                                           get_sel4_rights_from_elf(flags), vm_handle, flags);
         if (err) {
             ZF_LOGE("Elf loading failed!");
             return -1;

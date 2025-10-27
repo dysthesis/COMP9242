@@ -10,6 +10,15 @@ pub const Syscall = union(lib.SyscallNum) {
     Usleep: struct { arg: sel4.seL4_Word },
     Timestamp: struct {},
     MyId: struct {},
+    Brk: struct { new_break: sel4.seL4_Word },
+    Mmap: struct {
+        addr: sel4.seL4_Word,
+        length: sel4.seL4_Word,
+        prot: sel4.seL4_Word,
+        flags: sel4.seL4_Word,
+        fd: sel4.seL4_Word,
+        offset: sel4.seL4_Word,
+    },
 
     fn serialise(self: Syscall) sel4.seL4_MessageInfo_t {
         return switch (self) {
@@ -62,6 +71,23 @@ pub const Syscall = union(lib.SyscallNum) {
                 sel4.seL4_SetMR(3, 0);
                 break :blk sel4.seL4_MessageInfo_new(0, 0, 0, 4);
             },
+            .Brk => |args| blk: {
+                sel4.seL4_SetMR(0, @as(sel4.seL4_Word, @intFromEnum(lib.SyscallNum.Brk)));
+                sel4.seL4_SetMR(1, args.new_break);
+                sel4.seL4_SetMR(2, 0);
+                sel4.seL4_SetMR(3, 0);
+                break :blk sel4.seL4_MessageInfo_new(0, 0, 0, 4);
+            },
+            .Mmap => |args| blk: {
+                sel4.seL4_SetMR(0, @as(sel4.seL4_Word, @intFromEnum(lib.SyscallNum.Mmap)));
+                sel4.seL4_SetMR(1, args.addr);
+                sel4.seL4_SetMR(2, args.length);
+                sel4.seL4_SetMR(3, args.prot);
+                sel4.seL4_SetMR(4, args.flags);
+                sel4.seL4_SetMR(5, args.fd);
+                sel4.seL4_SetMR(6, args.offset);
+                break :blk sel4.seL4_MessageInfo_new(0, 0, 0, 7);
+            },
         };
     }
 
@@ -74,6 +100,8 @@ pub const Syscall = union(lib.SyscallNum) {
             .Usleep => .Usleep,
             .Timestamp => .Timestamp,
             .MyId => .MyId,
+            .Brk => .Brk,
+            .Mmap => .Mmap,
         };
     }
 
@@ -127,6 +155,19 @@ pub const Syscall = union(lib.SyscallNum) {
             },
             .Timestamp => Syscall{ .Timestamp = .{} },
             .MyId => Syscall{ .MyId = .{} },
+            .Brk => if (len < 2) lib.SyscallDeserialisationError.NoMessageRegisters else Syscall{
+                .Brk = .{ .new_break = sel4.seL4_GetMR(1) },
+            },
+            .Mmap => if (len < 7) lib.SyscallDeserialisationError.NoMessageRegisters else Syscall{
+                .Mmap = .{
+                    .addr = sel4.seL4_GetMR(1),
+                    .length = sel4.seL4_GetMR(2),
+                    .prot = sel4.seL4_GetMR(3),
+                    .flags = sel4.seL4_GetMR(4),
+                    .fd = sel4.seL4_GetMR(5),
+                    .offset = sel4.seL4_GetMR(6),
+                },
+            },
         };
     }
 };

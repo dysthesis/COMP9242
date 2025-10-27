@@ -11,14 +11,15 @@
  */
 #include <assert.h>
 #include <autoconf.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <ipc.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <utils/util.h>
+#include <errno.h>
 
 #include <aos/debug.h>
 #include <aos/sel4_zf_logif.h>
@@ -29,7 +30,6 @@
 #include <elf/elf.h>
 #include <networkconsole/networkconsole.h>
 
-#include "sos_time.h"
 #include <sel4runtime.h>
 #include <sel4runtime/auxv.h>
 
@@ -42,12 +42,12 @@
 #include "irq.h"
 #include "mapping.h"
 #include "network.h"
-#include "sel4/functions.h"
 #include "syscalls.h"
 #include "tests.h"
 #include "threads.h"
 #include "ut.h"
 #include "utils.h"
+#include "vm/api.h"
 #include "vmem_layout.h"
 #include <sos/gen_config.h>
 #ifdef CONFIG_SOS_GDB_ENABLED
@@ -68,7 +68,7 @@
 #define IRQ_EP_BADGE BIT(seL4_BadgeBits - 1ul)
 #define IRQ_IDENT_BADGE_BITS MASK(seL4_BadgeBits - 1ul)
 
-#define APP_NAME "sosh"
+#define APP_NAME "vm_test"
 #define APP_PRIORITY (0)
 #define APP_EP_BADGE (101)
 
@@ -114,17 +114,45 @@ static struct {
   client_t *client;
   seL4_Word badge;
 
-  ut_t *ipc_buffer_ut;
+  frame_ref_t ipc_buffer_frame;
   seL4_CPtr ipc_buffer;
+  bool ipc_buffer_vm_owned;
 
   ut_t *sched_context_ut;
   seL4_CPtr sched_context;
 
   cspace_t cspace;
 
-  ut_t *stack_ut;
-  seL4_CPtr stack;
+  frame_ref_t stack_frames[INITIAL_PROCESS_EXTRA_STACK_PAGES + 1];
+  seL4_CPtr stack_slots[INITIAL_PROCESS_EXTRA_STACK_PAGES + 1];
+  size_t stack_frame_count;
+  seL4_CPtr fault_ep_slot;
 } user_process;
+
+/* Temporary helpers until a general VM subsystem is in place. */
+seL4_CPtr client_get_vspace(client_t *client) {
+  printf("[client_get_vspace] client=%p user_client=%p id=%d/%d gen=%u/%u "
+         "vspace=%#lx\n",
+         (void *)client, (void *)user_process.client, client ? client->id : -1,
+         user_process.client ? user_process.client->id : -1,
+         client ? client->gen : 0,
+         user_process.client ? user_process.client->gen : 0,
+         (unsigned long)user_process.vspace);
+
+  if (client && user_process.client && client->id == user_process.client->id &&
+      client->gen == user_process.client->gen) {
+    return user_process.vspace;
+  }
+  return seL4_CapNull;
+}
+
+cspace_t *client_get_cspace(client_t *client) {
+  if (client && user_process.client && client->id == user_process.client->id &&
+      client->gen == user_process.client->gen) {
+    return &user_process.cspace;
+  }
+  return NULL;
+}
 
 // ZIG FUNCTION STUBS
 
@@ -162,12 +190,15 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
     /* Awake! We got a message - check the label and badge to
      * see what the message is about */
     seL4_Word label = seL4_MessageInfo_get_label(message);
+    // printf("[sos] msg label=%lu len=%lu badge=0x%lx\n", label,
+    // seL4_MessageInfo_get_length(message), badge);
 
     if (badge & IRQ_EP_BADGE) {
       /* It's a notification from our bound notification
        * object! */
       sos_handle_irq_notification(&badge, &have_reply);
-    } else if (label == seL4_Fault_NullFault) {
+    } else if (label == seL4_Fault_NullFault ||
+               label == seL4_Fault_UnknownSyscall) {
       client_t *caller = client_lookup(badge);
       if (!caller) {
         ZF_LOGE("Unknown/stale caller badge=0x%lx", (unsigned long)badge);
@@ -179,19 +210,49 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
        * message from console_test! */
       reply_msg = handle_syscall(badge, &message, &have_reply, caller, &reply,
                                  &reply_ut);
+    } else if (label == seL4_Fault_VMFault) {
+      client_t *caller = client_lookup(badge);
+      if (!caller) {
+        ZF_LOGE("Unknown/stale caller badge=0x%lx", (unsigned long)badge);
+        have_reply = false;
+        continue;
+      }
+
+      struct vm_handle *vm = caller->vm_state;
+      if (vm == NULL) {
+        vm = vm_state_lookup(caller);
+        if (vm == NULL) {
+          ZF_LOGE("VM state missing for caller badge=0x%lx",
+                  (unsigned long)badge);
+          have_reply = false;
+          continue;
+        }
+        caller->vm_state = vm;
+      }
+
+      if (handle_vm_fault(vm, badge, &message)) {
+        reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
+        have_reply = true;
+        continue;
+      }
+
+      goto fault_log;
     } else {
+    fault_log:
 
       sos_ipc_msg_t ipc_msg;
       if (sos_deserialise_ipc_msg(&message, &ipc_msg) == 0) {
         // inspect the IPC message received if we can
-        printf("[sos] syscall_loop(fault): badge -> %d\n", badge);
-        printf("[sos] syscall_loop(fault): sysno -> %d\n",
-               (sos_sysno_t)ipc_msg.sysno);
-        printf("[sos] syscall_loop(fault): arg -> %d\n", ipc_msg.arg);
-        printf("[sos] syscall_loop(fault): buf_addr -> %x\n", ipc_msg.buf_addr);
-        printf("[sos] syscall_loop(fault): buf_size -> %d\n", ipc_msg.buf_size);
-        printf("[sos] syscall_loop(fault): shbuf-> %.*s\n", 10,
-               PROCESS_SHBUF_UVA);
+        printf("[sos] syscall_loop(fault): badge -> %lu\n",
+               (unsigned long)badge);
+        printf("[sos] syscall_loop(fault): sysno -> %lu\n",
+               (unsigned long)(sos_sysno_t)ipc_msg.sysno);
+        printf("[sos] syscall_loop(fault): arg -> %lu\n",
+               (unsigned long)ipc_msg.arg);
+        printf("[sos] syscall_loop(fault): buf_addr -> %lx\n",
+               (unsigned long)ipc_msg.buf_addr);
+        printf("[sos] syscall_loop(fault): buf_size -> %lu\n",
+               (unsigned long)ipc_msg.buf_size);
       }
       /* some kind of fault */
       debug_print_fault(message, APP_NAME);
@@ -210,21 +271,150 @@ static int stack_write(seL4_Word *mapped_stack, int index, uintptr_t val) {
   return index - 1;
 }
 
+static void cleanup_stack_frames(void) {
+  bool use_vm_reset =
+      user_process.client != NULL && user_process.client->vm_state != NULL;
+
+  if (use_vm_reset) {
+    vm_reset_state(user_process.client->vm_state);
+  } else {
+    while (user_process.stack_frame_count > 0) {
+      user_process.stack_frame_count--;
+      frame_ref_t frame =
+          user_process.stack_frames[user_process.stack_frame_count];
+      seL4_CPtr slot = user_process.stack_slots[user_process.stack_frame_count];
+
+      if (slot != seL4_CapNull) {
+        seL4_Error err = seL4_ARM_Page_Unmap(slot);
+        if (err != seL4_NoError) {
+          ZF_LOGW("Failed to unmap stack slot %zu (err=%d)",
+                  user_process.stack_frame_count, err);
+        }
+        err = cspace_delete(&cspace, slot);
+        if (err != seL4_NoError) {
+          ZF_LOGW("Failed to delete stack slot %zu (err=%d)",
+                  user_process.stack_frame_count, err);
+        }
+        cspace_free_slot(&cspace, slot);
+      }
+
+      if (frame != NULL_FRAME) {
+        free_frame(frame);
+      }
+    }
+  }
+
+  user_process.stack_frame_count = 0;
+  for (size_t i = 0; i < ARRAY_SIZE(user_process.stack_frames); i++) {
+    user_process.stack_frames[i] = NULL_FRAME;
+    user_process.stack_slots[i] = seL4_CapNull;
+  }
+}
+
+static void release_ipc_buffer_manual(void) {
+  if (user_process.ipc_buffer != seL4_CapNull) {
+    seL4_Error err = cspace_delete(&cspace, user_process.ipc_buffer);
+    if (err != seL4_NoError) {
+      ZF_LOGW("Failed to delete IPC buffer slot (err=%d)", err);
+    }
+    cspace_free_slot(&cspace, user_process.ipc_buffer);
+    user_process.ipc_buffer = seL4_CapNull;
+  }
+  if (user_process.ipc_buffer_frame != NULL_FRAME) {
+    free_frame(user_process.ipc_buffer_frame);
+    user_process.ipc_buffer_frame = NULL_FRAME;
+  }
+  user_process.ipc_buffer_vm_owned = false;
+}
+
+static int map_process_stack_page(uintptr_t vaddr) {
+  if (user_process.stack_frame_count >= ARRAY_SIZE(user_process.stack_frames)) {
+    ZF_LOGE("Stack frame tracking overflow");
+    return -1;
+  }
+
+  frame_ref_t frame = alloc_frame();
+  if (frame == NULL_FRAME) {
+    ZF_LOGE("Failed to allocate stack frame");
+    return -1;
+  }
+
+  unsigned char *bytes = frame_data(frame);
+  memset(bytes, 0, PAGE_SIZE_4K);
+
+  seL4_CPtr slot = cspace_alloc_slot(&cspace);
+  if (slot == seL4_CapNull) {
+    free_frame(frame);
+    ZF_LOGE("Failed to allocate slot for stack frame");
+    return -1;
+  }
+
+  seL4_Error err = cspace_copy(&cspace, slot, frame_table_cspace(),
+                               frame_page(frame), seL4_AllRights);
+  if (err != seL4_NoError) {
+    cspace_free_slot(&cspace, slot);
+    free_frame(frame);
+    ZF_LOGE("Failed to copy stack frame cap");
+    return -1;
+  }
+
+  struct vm_handle *vm_handle =
+      (user_process.client && user_process.client->vm_state)
+          ? user_process.client->vm_state
+          : NULL;
+  if (vm_handle != NULL) {
+    int vm_err = vm_map_owned_frame(vm_handle, vaddr, frame, slot,
+                                    true, true, false, true, true);
+    if (vm_err < 0) {
+      if (vm_err == -EEXIST) {
+        ZF_LOGE("Stack frame already mapped at %p", (void *)vaddr);
+      } else {
+        ZF_LOGE("VM stack map failed for %p errno=%d", (void *)vaddr, -vm_err);
+      }
+      cspace_delete(&cspace, slot);
+      cspace_free_slot(&cspace, slot);
+      free_frame(frame);
+      return -1;
+    }
+  } else {
+    seL4_CapRights_t rights = seL4_CapRights_new(0, 0, 1, 1);
+    err = map_frame(&cspace, slot, user_process.vspace, vaddr, rights,
+                    seL4_ARM_Default_VMAttributes);
+    if (err != seL4_NoError) {
+      cspace_delete(&cspace, slot);
+      cspace_free_slot(&cspace, slot);
+      free_frame(frame);
+      ZF_LOGE("Unable to map stack frame for user app");
+      return -1;
+    }
+  }
+
+  if (user_process.client == NULL || user_process.client->vm_state == NULL) {
+    ZF_LOGE("Missing VM handle while recording stack mapping");
+  } else {
+    vm_register_stack_mapping(user_process.client->vm_state, vaddr, frame,
+                              slot);
+  }
+
+  user_process.stack_frames[user_process.stack_frame_count] = frame;
+  user_process.stack_slots[user_process.stack_frame_count] = slot;
+  user_process.stack_frame_count++;
+  return 0;
+}
+
 /* set up System V ABI compliant stack, so that the process can
  * start up and initialise the C library */
 static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace,
                                     elf_t *elf_file) {
-  /* Create a stack frame */
-  user_process.stack_ut = alloc_retype(&user_process.stack,
-                                       seL4_ARM_SmallPageObject, seL4_PageBits);
-  if (user_process.stack_ut == NULL) {
-    ZF_LOGE("Failed to allocate stack");
-    return 0;
+  user_process.stack_frame_count = 0;
+  for (size_t i = 0; i < ARRAY_SIZE(user_process.stack_frames); i++) {
+    user_process.stack_frames[i] = NULL_FRAME;
+    user_process.stack_slots[i] = seL4_CapNull;
   }
 
   /* virtual addresses in the target process' address space */
-  uintptr_t stack_top = PROCESS_STACK_TOP;
-  uintptr_t stack_bottom = PROCESS_STACK_TOP - PAGE_SIZE_4K;
+  uintptr_t stack_top = PROCESS_STACK_TOP & ~((uintptr_t)PAGE_SIZE_4K - 1);
+  uintptr_t stack_bottom = stack_top - PAGE_SIZE_4K;
   /* virtual addresses in the SOS's address space */
   void *local_stack_top = (seL4_Word *)SOS_SCRATCH;
   uintptr_t local_stack_bottom = SOS_SCRATCH - PAGE_SIZE_4K;
@@ -237,38 +427,38 @@ static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace,
     return 0;
   }
 
-  /* Map in the stack frame for the user app */
-  seL4_Error err =
-      map_frame(cspace, user_process.stack, user_process.vspace, stack_bottom,
-                seL4_AllRights, seL4_ARM_Default_VMAttributes);
-  if (err != 0) {
-    ZF_LOGE("Unable to map stack for user app");
+  seL4_Error err;
+  seL4_CPtr local_stack_cptr = seL4_CapNull;
+  seL4_CapRights_t stack_rights = seL4_CapRights_new(0, 0, 1, 1);
+
+  if (map_process_stack_page(stack_bottom) != 0) {
+    cleanup_stack_frames();
     return 0;
   }
 
-  /* allocate a slot to duplicate the stack frame cap so we can map it into our
-   * address space */
-  seL4_CPtr local_stack_cptr = cspace_alloc_slot(cspace);
+  local_stack_cptr = cspace_alloc_slot(cspace);
   if (local_stack_cptr == seL4_CapNull) {
     ZF_LOGE("Failed to alloc slot for stack");
+    cleanup_stack_frames();
     return 0;
   }
 
-  /* copy the stack frame cap into the slot */
-  err = cspace_copy(cspace, local_stack_cptr, cspace, user_process.stack,
-                    seL4_AllRights);
+  err = cspace_copy(cspace, local_stack_cptr, frame_table_cspace(),
+                    frame_page(user_process.stack_frames[0]), seL4_AllRights);
   if (err != seL4_NoError) {
     cspace_free_slot(cspace, local_stack_cptr);
-    ZF_LOGE("Failed to copy cap");
+    ZF_LOGE("Failed to copy cap for local stack mapping");
+    cleanup_stack_frames();
     return 0;
   }
 
-  /* map it into the sos address space */
   err = map_frame(cspace, local_stack_cptr, local_vspace, local_stack_bottom,
-                  seL4_AllRights, seL4_ARM_Default_VMAttributes);
+                  stack_rights, seL4_ARM_Default_VMAttributes);
   if (err != seL4_NoError) {
     cspace_delete(cspace, local_stack_cptr);
     cspace_free_slot(cspace, local_stack_cptr);
+    ZF_LOGE("Failed to map stack into SOS");
+    cleanup_stack_frames();
     return 0;
   }
 
@@ -319,44 +509,19 @@ static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace,
 
   /* mark the slot as free */
   cspace_free_slot(cspace, local_stack_cptr);
+  local_stack_cptr = seL4_CapNull;
 
   /* Exend the stack with extra pages */
   for (int page = 0; page < INITIAL_PROCESS_EXTRA_STACK_PAGES; page++) {
     stack_bottom -= PAGE_SIZE_4K;
-    frame_ref_t frame = alloc_frame();
-    if (frame == NULL_FRAME) {
-      ZF_LOGE("Couldn't allocate additional stack frame");
+    if (map_process_stack_page(stack_bottom) != 0) {
+      cleanup_stack_frames();
       return 0;
     }
+  }
 
-    /* allocate a slot to duplicate the stack frame cap so we can map it into
-     * the application */
-    seL4_CPtr frame_cptr = cspace_alloc_slot(cspace);
-    if (frame_cptr == seL4_CapNull) {
-      free_frame(frame);
-      ZF_LOGE("Failed to alloc slot for stack extra stack frame");
-      return 0;
-    }
-
-    /* copy the stack frame cap into the slot */
-    err = cspace_copy(cspace, frame_cptr, cspace, frame_page(frame),
-                      seL4_AllRights);
-    if (err != seL4_NoError) {
-      cspace_free_slot(cspace, frame_cptr);
-      free_frame(frame);
-      ZF_LOGE("Failed to copy cap");
-      return 0;
-    }
-
-    err = map_frame(cspace, frame_cptr, user_process.vspace, stack_bottom,
-                    seL4_AllRights, seL4_ARM_Default_VMAttributes);
-    if (err != 0) {
-      cspace_delete(cspace, frame_cptr);
-      cspace_free_slot(cspace, frame_cptr);
-      free_frame(frame);
-      ZF_LOGE("Unable to map extra stack frame for user app");
-      return 0;
-    }
+  if (user_process.client != NULL && user_process.client->vm_state != NULL) {
+    vm_report_initial_stack(user_process.client->vm_state, stack_bottom);
   }
 
   return stack_top;
@@ -375,6 +540,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
   seL4_Word client_badge = 0;
   user_process.client = NULL;
   user_process.badge = 0;
+  user_process.fault_ep_slot = seL4_CapNull;
   /* Create a VSpace */
   user_process.vspace_ut = alloc_retype(
       &user_process.vspace, seL4_ARM_PageGlobalDirectoryObject, seL4_PGDBits);
@@ -397,6 +563,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
   }
   user_process.client = client;
   user_process.badge = client_badge;
+  client->vm_state = vm_state_acquire(client);
 
   /* Create a simple 1 level CSpace */
   err = cspace_create_one_level(&cspace, &user_process.cspace);
@@ -405,13 +572,34 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
     goto out;
   }
 
-  /* Create an IPC buffer */
-  user_process.ipc_buffer_ut = alloc_retype(
-      &user_process.ipc_buffer, seL4_ARM_SmallPageObject, seL4_PageBits);
-  if (user_process.ipc_buffer_ut == NULL) {
-    ZF_LOGE("Failed to alloc ipc buffer ut");
+  /* Create an IPC buffer backing frame */
+  user_process.ipc_buffer_frame = alloc_frame();
+  if (user_process.ipc_buffer_frame == NULL_FRAME) {
+    ZF_LOGE("Failed to allocate IPC buffer frame");
     goto out;
   }
+  unsigned char *ipc_bytes = frame_data(user_process.ipc_buffer_frame);
+  memset(ipc_bytes, 0, PAGE_SIZE_4K);
+
+  user_process.ipc_buffer = cspace_alloc_slot(&cspace);
+  if (user_process.ipc_buffer == seL4_CapNull) {
+    ZF_LOGE("Failed to alloc slot for IPC buffer");
+    free_frame(user_process.ipc_buffer_frame);
+    user_process.ipc_buffer_frame = NULL_FRAME;
+    goto out;
+  }
+
+  err = cspace_copy(&cspace, user_process.ipc_buffer, frame_table_cspace(),
+                    frame_page(user_process.ipc_buffer_frame), seL4_AllRights);
+  if (err != seL4_NoError) {
+    cspace_free_slot(&cspace, user_process.ipc_buffer);
+    user_process.ipc_buffer = seL4_CapNull;
+    free_frame(user_process.ipc_buffer_frame);
+    user_process.ipc_buffer_frame = NULL_FRAME;
+    ZF_LOGE("Failed to copy IPC buffer cap");
+    goto out;
+  }
+  user_process.ipc_buffer_vm_owned = false;
 
   /* allocate a new slot in the target cspace which we will mint a badged
    * endpoint cap into -- the badge is used to identify the process, which will
@@ -427,6 +615,19 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
                     client_badge);
   if (err) {
     ZF_LOGE("Failed to mint user ep");
+    goto out;
+  }
+
+  user_process.fault_ep_slot = cspace_alloc_slot(&cspace);
+  if (user_process.fault_ep_slot == seL4_CapNull) {
+    ZF_LOGE("Failed to alloc slot for fault endpoint");
+    goto out;
+  }
+
+  err = cspace_mint(&cspace, user_process.fault_ep_slot, &cspace, ep,
+                    seL4_AllRights, client_badge);
+  if (err) {
+    ZF_LOGE("Failed to mint fault endpoint");
     goto out;
   }
 
@@ -470,9 +671,9 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
    * NOTE this will use the unbadged ep unlike above, you might want to mint it
    * with a badge so you can identify which thread faulted in your fault handler
    */
-  err = seL4_TCB_SetSchedParams(user_process.tcb, seL4_CapInitThreadTCB,
-                                seL4_MinPrio, APP_PRIORITY,
-                                user_process.sched_context, ep);
+  err = seL4_TCB_SetSchedParams(
+      user_process.tcb, seL4_CapInitThreadTCB, seL4_MinPrio, APP_PRIORITY,
+      user_process.sched_context, user_process.fault_ep_slot);
   if (err != seL4_NoError) {
     ZF_LOGE("Unable to set scheduling params");
     goto out;
@@ -501,21 +702,39 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
   /* set up the stack */
   seL4_Word sp =
       init_process_stack(&cspace, seL4_CapInitThreadVSpace, &elf_file);
+  if (sp == 0) {
+    ZF_LOGE("Failed to initialise process stack");
+    goto out;
+  }
 
   /* load the elf image from the cpio file */
-  err = elf_load(&cspace, user_process.vspace, &elf_file);
+  err = elf_load(&cspace, user_process.vspace, &elf_file, client->vm_state);
   if (err) {
     ZF_LOGE("Failed to load elf image");
     goto out;
   }
 
   /* Map in the IPC buffer for the thread */
-  err = map_frame(&cspace, user_process.ipc_buffer, user_process.vspace,
-                  PROCESS_IPC_BUFFER, seL4_AllRights,
-                  seL4_ARM_Default_VMAttributes);
-  if (err != 0) {
-    ZF_LOGE("Unable to map IPC buffer for user app");
-    goto out;
+  if (client->vm_state != NULL) {
+    int vm_err = vm_map_owned_frame(client->vm_state, PROCESS_IPC_BUFFER,
+                                    user_process.ipc_buffer_frame,
+                                    user_process.ipc_buffer, true, true, false,
+                                    true, true);
+    if (vm_err < 0) {
+      ZF_LOGE("VM map failed for IPC buffer errno=%d", -vm_err);
+      release_ipc_buffer_manual();
+      goto out;
+    }
+    user_process.ipc_buffer_vm_owned = true;
+  } else {
+    err = map_frame(&cspace, user_process.ipc_buffer, user_process.vspace,
+                    PROCESS_IPC_BUFFER, seL4_AllRights,
+                    seL4_ARM_Default_VMAttributes);
+    if (err != 0) {
+      ZF_LOGE("Unable to map IPC buffer for user app");
+      release_ipc_buffer_manual();
+      goto out;
+    }
   }
 
   /* Start the new process */
@@ -530,9 +749,23 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
 
 out:
   if (!success && client) {
+    if (client->vm_state != NULL) {
+      vm_reset_state(client->vm_state);
+    }
     client_destroy(client, &cspace);
     user_process.client = NULL;
     user_process.badge = 0;
+  }
+  if (!success && user_process.fault_ep_slot != seL4_CapNull) {
+    cspace_delete(&cspace, user_process.fault_ep_slot);
+    cspace_free_slot(&cspace, user_process.fault_ep_slot);
+    user_process.fault_ep_slot = seL4_CapNull;
+  }
+  if (!success) {
+    cleanup_stack_frames();
+    if (!user_process.ipc_buffer_vm_owned) {
+      release_ipc_buffer_manual();
+    }
   }
   return success;
 }
