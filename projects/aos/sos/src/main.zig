@@ -541,3 +541,5 @@ const PendingConsoleRead = console.PendingConsoleRead;
 const ensureStdio = console.ensureStdio;
 const setupConsoleFd = console.setupConsoleFd;
 const console_object_ptr = console.console_object_ptr;
+
+pub const continuation = @import("continuation.zig");
