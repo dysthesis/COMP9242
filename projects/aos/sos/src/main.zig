@@ -594,6 +594,11 @@ const sel4 = cimports.sel4;
 const sos = cimports.sos;
 
 const vm = @import("vm/mod.zig");
+pub const worker = @import("worker.zig");
+// Force worker module to be compiled so its exported C functions are available
+comptime {
+    _ = worker;
+}
 
 pub extern var cspace: sos.cspace_t;
 
