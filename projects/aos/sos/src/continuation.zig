@@ -222,9 +222,224 @@ pub const ContinuationPool = struct {
     }
 };
 
+/// Maximum number of file descriptors that can have waiting continuations
+pub const MAX_FDS: usize = 32;
+
+/// Standard file descriptor for console stdin (FD 0)
+pub const CONSOLE_STDIN_FD: c_int = 0;
+
+/// Wait queues for different event types
+pub const WaitQueues = struct {
+    /// Per-FD queues for I/O readiness events
+    io_queues: [MAX_FDS]?*Continuation,
+
+    /// Global queue for timer expiry events
+    timer_list: ?*Continuation,
+
+    /// Global queue for IRQ events (future use)
+    irq_list: ?*Continuation,
+
+    /// Global wait queue instance
+    var global: WaitQueues = .{
+        .io_queues = [_]?*Continuation{null} ** MAX_FDS,
+        .timer_list = null,
+        .irq_list = null,
+    };
+
+    /// Enqueue a continuation to wait for I/O readiness on a file descriptor
+    pub fn waitIO(cont: *Continuation, fd: c_int) void {
+        const fd_usize: usize = @intCast(fd);
+        if (fd_usize >= MAX_FDS) {
+            _ = c.printf("[continuation] ERROR: Invalid FD %d (max %u)\n", fd, MAX_FDS);
+            @panic("Invalid file descriptor for continuation");
+        }
+
+        // Prepend to the FD's wait queue
+        cont.next = global.io_queues[fd_usize];
+        global.io_queues[fd_usize] = cont;
+        cont.wait_on = .{ .IO = .{ .fd = fd } };
+
+        _ = c.printf("[continuation] Enqueued continuation for FD %d\n", fd);
+    }
+
+    /// Enqueue a continuation to wait for a timer to expire
+    pub fn waitTimer(cont: *Continuation, timer_id: u32) void {
+        cont.next = global.timer_list;
+        global.timer_list = cont;
+        cont.wait_on = .{ .Timer = .{ .id = timer_id } };
+
+        _ = c.printf("[continuation] Enqueued continuation for timer %u\n", timer_id);
+    }
+
+    /// Resume all continuations waiting on I/O for a specific file descriptor
+    pub fn resumeIO(fd: c_int, event_data: ?*anyopaque) void {
+        const fd_usize: usize = @intCast(fd);
+        if (fd_usize >= MAX_FDS) {
+            _ = c.printf("[continuation] ERROR: Invalid FD %d in resumeIO\n", fd);
+            return;
+        }
+
+        // Atomically dequeue entire list for this FD
+        const head = global.io_queues[fd_usize];
+        global.io_queues[fd_usize] = null;
+
+        var cursor = head;
+        var count: usize = 0;
+        while (cursor) |cont| {
+            const next = cont.next;
+            resumeContinuation(cont, event_data);
+            cursor = next;
+            count += 1;
+        }
+
+        _ = c.printf("[continuation] Resumed %u continuations for FD %d\n", count, fd);
+    }
+
+    /// Resume a specific continuation waiting on a timer
+    pub fn resumeTimer(timer_id: u32, event_data: ?*anyopaque) void {
+        // Search the timer list for matching timer_id
+        var prev: ?*Continuation = null;
+        var cursor = global.timer_list;
+
+        while (cursor) |cont| {
+            // Check if this continuation is waiting on the specified timer
+            if (cont.wait_on == .Timer and cont.wait_on.Timer.id == timer_id) {
+                // Remove from list
+                if (prev) |p| {
+                    p.next = cont.next;
+                } else {
+                    global.timer_list = cont.next;
+                }
+
+                _ = c.printf("[continuation] Resuming continuation for timer %u\n", timer_id);
+                resumeContinuation(cont, event_data);
+                return;
+            }
+
+            prev = cont;
+            cursor = cont.next;
+        }
+
+        _ = c.printf("[continuation] WARNING: No continuation found for timer %u\n", timer_id);
+    }
+
+    /// Resume a continuation by invoking its resume function
+    fn resumeContinuation(cont: *Continuation, event_data: ?*anyopaque) void {
+        var result: ContinuationResult = undefined;
+        cont.resume_fn(cont, event_data, &result);
+
+        switch (result) {
+            .Complete => |r| {
+                cont.sendReply(r.response);
+                ContinuationPool.free(cont);
+            },
+            .Error => |e| {
+                cont.sendError(e.errno);
+                ContinuationPool.free(cont);
+            },
+            .Retry => {
+                // Re-enqueue based on what we're waiting on
+                switch (cont.wait_on) {
+                    .IO => |io| waitIO(cont, io.fd),
+                    .Timer => |timer| waitTimer(cont, timer.id),
+                    .IRQ => {
+                        _ = c.printf("[continuation] ERROR: IRQ retry not yet implemented\n");
+                        cont.sendError(sos.ENOSYS);
+                        ContinuationPool.free(cont);
+                    },
+                }
+            },
+        }
+    }
+
+    /// Cancel all continuations belonging to a specific client
+    pub fn cancelClient(client: *sos.client_t) void {
+        var cancelled: usize = 0;
+
+        // Cancel all I/O wait queues
+        for (&global.io_queues, 0..) |*queue, fd| {
+            var prev: ?*Continuation = null;
+            var cursor = queue.*;
+
+            while (cursor) |cont| {
+                const next = cont.next;
+
+                if (cont.client == client) {
+                    // Remove from list
+                    if (prev) |p| {
+                        p.next = next;
+                    } else {
+                        queue.* = next;
+                    }
+
+                    // Cleanup without sending reply (client is dead)
+                    cont.cleanup();
+                    ContinuationPool.free(cont);
+                    cancelled += 1;
+
+                    _ = c.printf("[continuation] Cancelled continuation for client on FD %u\n", fd);
+                } else {
+                    prev = cont;
+                }
+
+                cursor = next;
+            }
+        }
+
+        // Cancel timer wait queue
+        {
+            var prev: ?*Continuation = null;
+            var cursor = global.timer_list;
+
+            while (cursor) |cont| {
+                const next = cont.next;
+
+                if (cont.client == client) {
+                    // Remove from list
+                    if (prev) |p| {
+                        p.next = next;
+                    } else {
+                        global.timer_list = next;
+                    }
+
+                    // Cleanup without sending reply
+                    cont.cleanup();
+                    ContinuationPool.free(cont);
+                    cancelled += 1;
+
+                    _ = c.printf("[continuation] Cancelled timer continuation for client\n");
+                } else {
+                    prev = cont;
+                }
+
+                cursor = next;
+            }
+        }
+
+        if (cancelled > 0) {
+            _ = c.printf("[continuation] Cancelled %u total continuations for client %p\n", cancelled, client);
+        }
+    }
+};
+
 /// Initialise the continuation pool from C code.
 pub export fn continuation_bootstrap() callconv(.c) void {
     ContinuationPool.bootstrap();
+}
+
+/// Resume continuations waiting on I/O for a file descriptor
+pub export fn continuation_resume_io(fd: c_int) callconv(.c) void {
+    WaitQueues.resumeIO(fd, null);
+}
+
+/// Resume a continuation waiting on a specific timer
+pub export fn continuation_resume_timer(timer_id: u32) callconv(.c) void {
+    WaitQueues.resumeTimer(timer_id, null);
+}
+
+/// Cancel all continuations belonging to a client
+pub export fn continuation_cancel_client(client: *sos.client_t) callconv(.c) void {
+    WaitQueues.cancelClient(client);
 }
 
 const cimports = @import("cimports");
