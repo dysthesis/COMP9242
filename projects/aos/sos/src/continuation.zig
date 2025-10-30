@@ -60,7 +60,8 @@ pub const ContinuationResult = union(enum) {
 };
 
 /// Function pointer type for continuation resume logic.
-pub const ResumeFn = *const fn (cont: *Continuation, event_data: ?*anyopaque) callconv(.c) ContinuationResult;
+/// Returns result via pointer parameter to avoid ABI issues with unions across C boundary.
+pub const ResumeFn = *const fn (cont: *Continuation, event_data: ?*anyopaque, result: *ContinuationResult) callconv(.c) void;
 
 /// A suspended syscall awaiting an asynchronous event
 pub const Continuation = struct {
@@ -133,6 +134,97 @@ comptime {
     _ = state_size;
     _ = waiton_size;
     // _ = cache_line_size;
+}
+/// Maximum number of concurrent continuation objects
+pub const CONT_POOL_SIZE: usize = 64;
+
+/// Fixed-size slab allocator for continuation objects.
+pub const ContinuationPool = struct {
+    /// Pre-allocated array of continuation objects
+    pool: [CONT_POOL_SIZE]Continuation,
+
+    /// Head of the free list
+    free_list: ?*Continuation,
+
+    /// Count of currently allocated continuations
+    in_use: usize,
+
+    /// Global pool instance
+    var global: ContinuationPool = undefined;
+    var initialised: bool = false;
+
+    /// Initialise the continuation pool by threading all entries into the free list.
+    pub fn bootstrap() void {
+        if (initialised) {
+            _ = c.printf("[continuation] Pool already initialised, skipping bootstrap\n");
+            return;
+        }
+
+        global.in_use = 0;
+        global.free_list = null;
+
+        // Thread all pool entries into the free list
+        var i: usize = CONT_POOL_SIZE;
+        while (i > 0) {
+            i -= 1;
+            global.pool[i].next = global.free_list;
+            global.free_list = &global.pool[i];
+        }
+
+        initialised = true;
+        _ = c.printf("[continuation] Pool bootstrapped: %u entries available\n", CONT_POOL_SIZE);
+    }
+
+    /// Allocate a continuation from the pool.
+    pub fn alloc() ?*Continuation {
+        if (global.free_list == null) {
+            _ = c.printf("[continuation] ERROR: Pool exhausted (%u/%u in use)\n", global.in_use, CONT_POOL_SIZE);
+            return null;
+        }
+
+        // Pop from free list head
+        const cont = global.free_list.?;
+        global.free_list = cont.next;
+        global.in_use += 1;
+
+        // Zero-initialize the continuation structure
+        cont.* = std.mem.zeroes(Continuation);
+
+        return cont;
+    }
+
+    /// Free a continuation back to the pool.
+    pub fn free(cont: *Continuation) void {
+        //  verify continuation is not already in the free list
+        if (comptime std.debug.runtime_safety) {
+            var cursor = global.free_list;
+            while (cursor) |node| {
+                if (node == cont) {
+                    _ = c.printf("[continuation] FATAL: Double-free detected at %p\n", cont);
+                    @panic("Continuation double-free");
+                }
+                cursor = node.next;
+            }
+        }
+
+        // Push to free list head
+        cont.next = global.free_list;
+        global.free_list = cont;
+        global.in_use -= 1;
+    }
+
+    /// Get current pool usage statistics
+    pub fn getStats() struct { in_use: usize, capacity: usize } {
+        return .{
+            .in_use = global.in_use,
+            .capacity = CONT_POOL_SIZE,
+        };
+    }
+};
+
+/// Initialise the continuation pool from C code.
+pub export fn continuation_bootstrap() callconv(.c) void {
+    ContinuationPool.bootstrap();
 }
 
 const cimports = @import("cimports");

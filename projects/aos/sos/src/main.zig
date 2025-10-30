@@ -543,3 +543,10 @@ const setupConsoleFd = console.setupConsoleFd;
 const console_object_ptr = console.console_object_ptr;
 
 pub const continuation = @import("continuation.zig");
+
+// Force continuation module to be fully compiled and linked
+comptime {
+    _ = continuation;
+    // Ensure all exports from continuation are included
+    _ = &continuation.continuation_bootstrap;
+}

@@ -34,6 +34,7 @@
 #include <sel4runtime/auxv.h>
 
 #include "bootstrap.h"
+#include "continuation.h"
 #include "drivers/uart.h"
 #include "elfload.h"
 #include "file.h"
@@ -905,6 +906,9 @@ NORETURN void *main_continued(UNUSED void *arg) {
     printf("Start first process\n");
     bool success = start_first_process(APP_NAME, ipc_ep);
     ZF_LOGF_IF(!success, "Failed to start first process");
+
+    /* Initialise continuation pool allocator */
+    continuation_bootstrap();
 
     printf("\nSOS entering syscall loop\n");
     syscall_loop(ipc_ep);
