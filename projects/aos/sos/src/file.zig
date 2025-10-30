@@ -1,3 +1,27 @@
+const File = struct {
+    /// Is this file in use?
+    in_use: bool,
+    /// Is this file a directory
+    dir: bool,
+    /// vtable for this file's operations
+    /// TODO: See if we can port file_ops_t to Zig.
+    handlers: sos.file_ops_t,
+    /// Identifier for the file
+    id: usize,
+    /// Current read/write offset
+    /// TODO: can this be ported to Zig?
+    offset: sos.off_t,
+};
+
+/// Maximum number of files open
+const MAX_FILES = 256;
+
+// TODO: How best to sync this? Can we mutex individual files, or do we have to
+// lock the whole table?
+const FileTable = struct {
+    files: [MAX_FILES]File,
+};
+
 const ring_capacity: usize = @intCast(sos.CONSOLE_RING_SIZE);
 
 extern fn sos_console_data_ready() callconv(.c) void;
