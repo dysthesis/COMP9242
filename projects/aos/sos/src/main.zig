@@ -595,9 +595,11 @@ const sos = cimports.sos;
 
 const vm = @import("vm/mod.zig");
 pub const worker = @import("worker.zig");
-// Force worker module to be compiled so its exported C functions are available
+pub const delegation = @import("delegation.zig");
+// Force worker and delegation modules to be compiled so their exported C functions are available
 comptime {
     _ = worker;
+    _ = delegation;
 }
 
 pub extern var cspace: sos.cspace_t;

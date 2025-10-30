@@ -20,15 +20,15 @@ pub const WorkItem = struct {
 
     const Self = @This();
 
-    pub fn process(self: Self, ep: sel4.seL4_CPtr) void {
+    pub fn process(self: Self, worker: anytype) void {
         switch (self.work_type) {
-            .Open => workerOpenFile(ep, self.param),
-            .Read => workerReadFile(ep, self.param),
-            .Write => workerWriteFile(ep, self.param),
-            .Close => workerCloseFile(ep, self.param),
-            .Stat => workerStatFile(ep, self.param),
-            .OpenDir => workerOpenDir(ep, self.param),
-            .ReadDir => workerReadDir(ep, self.param),
+            .Open => worker.workerOpenFile(self.param),
+            .Read => worker.workerReadFile(self.param),
+            .Write => worker.workerWriteFile(self.param),
+            .Close => worker.workerCloseFile(self.param),
+            .Stat => worker.workerStatFile(self.param),
+            .OpenDir => worker.workerOpenDir(self.param),
+            .ReadDir => worker.workerReadDir(self.param),
         }
     }
 };
@@ -88,108 +88,129 @@ pub const WorkQueue = struct {
         return item;
     }
 
-    pub fn drain(self: *Self, ep: sel4.seL4_CPtr) void {
+    pub fn drain(self: *Self, worker: *Worker) void {
         while (self.dequeue()) |item| {
-            item.process(ep);
+            item.process(worker);
         }
     }
 };
 
-var work_queue: WorkQueue = undefined;
-var delegate_ep: sel4.seL4_CPtr = undefined;
-/// Thread spawner defined in
+pub const Worker = struct {
+    queue: WorkQueue,
+    delegate_ep: sel4.seL4_CPtr,
+
+    const Self = @This();
+
+    pub fn init(delegate_ep: sel4.seL4_CPtr, work_ntfn: sel4.seL4_CPtr) Worker {
+        return Worker{
+            .queue = WorkQueue.init(work_ntfn),
+            .delegate_ep = delegate_ep,
+        };
+    }
+
+    /// Enqueue work item
+    pub fn enqueue(self: *Self, work_type: WorkType, param: *anyopaque) !void {
+        try self.queue.enqueue(work_type, param);
+    }
+
+    /// Main worker thread loop
+    pub fn run(self: *Self) void {
+        _ = c.printf("[worker] Worker thread started (delegate_ep=%lu)\n", self.delegate_ep);
+
+        while (true) {
+            // Wait for work notification
+            _ = sel4.seL4_Wait(self.queue.notification, null);
+
+            self.queue.drain(self);
+
+            self.signalQueueSpaceAvailable();
+        }
+    }
+
+    /// Signal any waiting continuations that queue has space
+    fn signalQueueSpaceAvailable(self: *Self) void {
+        _ = self;
+        // TODO: Implement continuation integration
+    }
+
+    fn workerOpenFile(self: *Self, param: *anyopaque) void {
+        _ = self;
+        _ = param;
+        // TODO: Implement this
+        _ = c.printf("[worker] workerOpenFile called (not yet implemented)\n");
+    }
+
+    fn workerReadFile(self: *Self, param: *anyopaque) void {
+        _ = self;
+        _ = param;
+        // TODO: Implement this
+        _ = c.printf("[worker] workerReadFile called (not yet implemented)\n");
+    }
+
+    fn workerWriteFile(self: *Self, param: *anyopaque) void {
+        _ = self;
+        _ = param;
+        // TODO: Implement this
+        _ = c.printf("[worker] workerWriteFile called (not yet implemented)\n");
+    }
+
+    fn workerCloseFile(self: *Self, param: *anyopaque) void {
+        _ = self;
+        _ = param;
+        // TODO: Implement this
+        _ = c.printf("[worker] workerCloseFile called (not yet implemented)\n");
+    }
+
+    fn workerStatFile(self: *Self, param: *anyopaque) void {
+        _ = self;
+        _ = param;
+        // TODO: Implement this
+        _ = c.printf("[worker] workerStatFile called (not yet implemented)\n");
+    }
+
+    fn workerOpenDir(self: *Self, param: *anyopaque) void {
+        _ = self;
+        _ = param;
+        // TODO: Implement this
+        _ = c.printf("[worker] workerOpenDir called (not yet implemented)\n");
+    }
+
+    fn workerReadDir(self: *Self, param: *anyopaque) void {
+        _ = self;
+        _ = param;
+        // TODO: Implement this
+        _ = c.printf("[worker] workerReadDir called (not yet implemented)\n");
+    }
+};
+
+// Global worker instance
+var global_worker: Worker = undefined;
+
+/// Thread spawner defined in threads.c
 extern fn spawn_worker_thread(
     entry: *const fn (usize) callconv(.c) void,
     arg: usize,
 ) void;
 
-/// Initialise worker subsystem
+/// Initialise worker subsystem (C-callable)
 pub fn init(delegate_ep_arg: sel4.seL4_CPtr, work_ntfn: sel4.seL4_CPtr) void {
-    work_queue = WorkQueue.init(work_ntfn);
-    delegate_ep = delegate_ep_arg;
+    global_worker = Worker.init(delegate_ep_arg, work_ntfn);
 
     spawn_worker_thread(worker_main_c, delegate_ep_arg);
     _ = c.printf("[worker] Worker thread spawned with delegate_ep=%lu\n", delegate_ep_arg);
 }
 
-/// C wrapper for workerMain
+/// C wrapper for worker main loop
 pub export fn worker_main_c(arg: usize) callconv(.c) void {
-    const ep: sel4.seL4_CPtr = @intCast(arg);
-    workerMain(ep);
+    _ = arg; // delegate_ep already stored in global_worker
+    global_worker.run();
 }
 
-/// Worker thread main loop
-fn workerMain(ep: sel4.seL4_CPtr) void {
-    _ = c.printf("[worker] Worker thread started (delegate_ep=%lu)\n", ep);
-
-    while (true) {
-        // Wait for work notification
-        _ = sel4.seL4_Wait(work_queue.notification, null);
-
-        work_queue.drain(ep);
-
-        signalQueueSpaceAvailable();
-    }
-}
-
-/// Signal any waiting continuations that queue has space
-fn signalQueueSpaceAvailable() void {
-    // TODO: Implement this.
-}
-
-fn workerOpenFile(ep: sel4.seL4_CPtr, param: *anyopaque) void {
-    _ = ep;
-    _ = param;
-    // TODO: Implement this
-    _ = c.printf("[worker] workerOpenFile called (not yet implemented)\n");
-}
-
-fn workerReadFile(ep: sel4.seL4_CPtr, param: *anyopaque) void {
-    _ = ep;
-    _ = param;
-    // TODO: Implement this
-    _ = c.printf("[worker] workerReadFile called (not yet implemented)\n");
-}
-
-fn workerWriteFile(ep: sel4.seL4_CPtr, param: *anyopaque) void {
-    _ = ep;
-    _ = param;
-    // TODO: Implement this
-    _ = c.printf("[worker] workerWriteFile called (not yet implemented)\n");
-}
-
-fn workerCloseFile(ep: sel4.seL4_CPtr, param: *anyopaque) void {
-    _ = ep;
-    _ = param;
-    // TODO: Implement this
-    _ = c.printf("[worker] workerCloseFile called (not yet implemented)\n");
-}
-
-fn workerStatFile(ep: sel4.seL4_CPtr, param: *anyopaque) void {
-    _ = ep;
-    _ = param;
-    // TODO: Implement this
-    _ = c.printf("[worker] workerStatFile called (not yet implemented)\n");
-}
-
-fn workerOpenDir(ep: sel4.seL4_CPtr, param: *anyopaque) void {
-    _ = ep;
-    _ = param;
-    // TODO: Implement thi
-    _ = c.printf("[worker] workerOpenDir called (not yet implemented)\n");
-}
-
-fn workerReadDir(ep: sel4.seL4_CPtr, param: *anyopaque) void {
-    _ = ep;
-    _ = param;
-    // TODO: Implement this
-    _ = c.printf("[worker] workerReadDir called (not yet implemented)\n");
-}
-
+/// C-callable enqueue function
 pub export fn workerEnqueue(
     work_type: WorkType,
     param: *anyopaque,
 ) callconv(.c) c_int {
-    work_queue.enqueue(work_type, param) catch return -@as(c_int, @intCast(sos.EAGAIN));
+    global_worker.enqueue(work_type, param) catch return -@as(c_int, @intCast(sos.EAGAIN));
     return 0;
 }

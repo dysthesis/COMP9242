@@ -57,6 +57,9 @@
 
 #include <aos/vsyscall.h>
 
+/* Import Zig delegation handler */
+extern seL4_MessageInfo_t delegationHandleRequest(seL4_Word badge, seL4_MessageInfo_t message);
+
 /*
  * To differentiate between signals from notification objects and and IPC
  * messages, we assign a badge to the notification object. The badge that we
@@ -65,9 +68,11 @@
  *
  * All badged IRQs set high bit, then we use unique bits to
  * distinguish interrupt sources.
+ * Delegation IPC uses second-highest bit.
  */
 #define IRQ_EP_BADGE BIT(seL4_BadgeBits - 1ul)
 #define IRQ_IDENT_BADGE_BITS MASK(seL4_BadgeBits - 1ul)
+#define DELEGATE_EP_BADGE (1UL << 30)
 
 #define APP_NAME "sosh"
 #define APP_PRIORITY (0)
@@ -198,6 +203,10 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
       /* It's a notification from our bound notification
        * object! */
       sos_handle_irq_notification(&badge, &have_reply);
+    } else if (badge & DELEGATE_EP_BADGE) {
+      /* Delegation IPC from worker thread */
+      reply_msg = delegationHandleRequest(badge, message);
+      have_reply = true;
     } else if (label == seL4_Fault_NullFault ||
                label == seL4_Fault_UnknownSyscall) {
       client_t *caller = client_lookup(badge);
