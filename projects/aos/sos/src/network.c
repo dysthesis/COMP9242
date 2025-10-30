@@ -48,6 +48,9 @@
 #include "ut.h"
 #include "vmem_layout.h"
 
+/* Zig NFS handler polling */
+extern void nfsServicePoll(int revents);
+
 #ifndef SOS_NFS_DIR
 #ifdef CONFIG_SOS_NFS_DIR
 #define SOS_NFS_DIR CONFIG_SOS_NFS_DIR
@@ -154,6 +157,10 @@ static int network_irq(UNUSED void *data, UNUSED seL4_Word irq,
   ethif_irq();
   seL4_IRQHandler_Ack(irq_handler);
   pico_bsd_stack_tick();
+
+  /* Service NFS events */
+  nfsServicePoll(POLLIN | POLLOUT);
+
   return 0;
 }
 

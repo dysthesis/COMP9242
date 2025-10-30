@@ -596,10 +596,13 @@ const sos = cimports.sos;
 const vm = @import("vm/mod.zig");
 pub const worker = @import("worker.zig");
 pub const delegation = @import("delegation.zig");
-// Force worker and delegation modules to be compiled so their exported C functions are available
+pub const nfs_handler = @import("nfs_handler.zig");
 comptime {
     _ = worker;
     _ = delegation;
+    _ = nfs_handler;
+    _ = continuation;
+    _ = &continuation.continuation_bootstrap;
 }
 
 pub extern var cspace: sos.cspace_t;
@@ -618,10 +621,3 @@ const setupConsoleFd = console.setupConsoleFd;
 const console_object_ptr = console.console_object_ptr;
 
 pub const continuation = @import("continuation.zig");
-
-// Force continuation module to be fully compiled and linked
-comptime {
-    _ = continuation;
-    // Ensure all exports from continuation are included
-    _ = &continuation.continuation_bootstrap;
-}

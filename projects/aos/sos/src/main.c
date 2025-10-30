@@ -60,6 +60,12 @@
 /* Import Zig delegation handler */
 extern seL4_MessageInfo_t delegationHandleRequest(seL4_Word badge, seL4_MessageInfo_t message);
 
+/* Import Zig worker init */
+extern void worker_init(seL4_CPtr delegate_ep, seL4_CPtr work_ntfn);
+
+/* Import Zig NFS handler init */
+extern void nfs_handler_init(void);
+
 /*
  * To differentiate between signals from notification objects and and IPC
  * messages, we assign a badge to the notification object. The badge that we
@@ -873,6 +879,32 @@ NORETURN void *main_continued(UNUSED void *arg) {
   printf("Network init\n");
   network_init(&cspace, timer_vaddr, ntfn);
   sos_nc = network_console_init();
+
+  /* Initialise NFS handler pool */
+  printf("NFS handler init\n");
+  nfs_handler_init();
+
+  /* Initialise worker thread infrastructure */
+  printf("Worker init\n");
+
+  /* Allocate delegation endpoint */
+  seL4_CPtr delegate_ep;
+  ut_t *delegate_ep_ut = alloc_retype(&delegate_ep, seL4_EndpointObject, seL4_EndpointBits);
+  ZF_LOGF_IF(delegate_ep_ut == NULL, "Failed to alloc delegation endpoint");
+
+  /* Mint badged delegation endpoint */
+  seL4_CPtr delegate_ep_badged;
+  seL4_Error err = cspace_mint(&cspace, delegate_ep, &cspace, &delegate_ep_badged,
+                                seL4_AllRights, DELEGATE_EP_BADGE);
+  ZF_LOGF_IF(err, "Failed to mint badged delegation endpoint");
+
+  /* Allocate work queue notification */
+  seL4_CPtr work_ntfn;
+  ut_t *work_ntfn_ut = alloc_retype(&work_ntfn, seL4_NotificationObject, seL4_NotificationBits);
+  ZF_LOGF_IF(work_ntfn_ut == NULL, "Failed to alloc work notification");
+
+  /* Initialize worker subsystem */
+  worker_init(delegate_ep_badged, work_ntfn);
 
 #ifdef CONFIG_SOS_GDB_ENABLED
   /* Initialize the debugger */

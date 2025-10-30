@@ -193,7 +193,7 @@ extern fn spawn_worker_thread(
 ) void;
 
 /// Initialise worker subsystem (C-callable)
-pub fn init(delegate_ep_arg: sel4.seL4_CPtr, work_ntfn: sel4.seL4_CPtr) void {
+pub export fn worker_init(delegate_ep_arg: sel4.seL4_CPtr, work_ntfn: sel4.seL4_CPtr) callconv(.c) void {
     global_worker = Worker.init(delegate_ep_arg, work_ntfn);
 
     spawn_worker_thread(worker_main_c, delegate_ep_arg);
