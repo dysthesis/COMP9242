@@ -1,9 +1,9 @@
-pub fn setupConsoleFd(fd: *sos.sos_fd_entry_t, ops: *const sos.file_ops_t, readable: bool, writable: bool, dev_id: c_int) void {
+pub fn setupConsoleFd(fd: *file.File, ops: *const file.FileOps, readable: bool, writable: bool, dev_id: c_int) void {
     fd.* = empty_fd;
     fd.used = true;
     fd.readable = readable;
     fd.writable = writable;
-    fd.kind = sos.FD_DEV_CONSOLE;
+    fd.kind = file.FileKind.dev_console;
     fd.obj = console_object_ptr;
     fd.ops = ops;
     fd.dev_id = dev_id;
@@ -17,7 +17,7 @@ pub fn ensureStdio(state: *SosClientIoState) void {
 
 fn initStdio(state: *SosClientIoState) void {
     state.* = SosClientIoState{};
-    const ops = sos.vfs_lookup_ops(console_name_ptr) orelse {
+    const ops = file.vfs_lookup_ops(console_name_ptr) orelse {
         std.debug.panic("console device not registered", .{});
     };
     if (ops.*.open == null or ops.*.read == null or ops.*.write == null) {
@@ -56,7 +56,7 @@ const c = cimports.c;
 
 const file = @import("file.zig");
 const empty_fd = file.empty_fd;
-const SosClientIoState = file.SosClientIoState;
+const SosClientIoState = file.ClientIoState;
 const console_name_ptr = file.console_name_ptr;
 
 const continuation = @import("continuation.zig");

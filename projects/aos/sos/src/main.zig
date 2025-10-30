@@ -154,12 +154,12 @@ fn handleOpen(ctx: *ServerContext, args: anytype) SyscallResponse {
         return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.EMFILE)) } };
     }
 
-    const ops = sos.vfs_lookup_ops(filename_ptr) orelse {
+    const ops = file.vfs_lookup_ops(filename_ptr) orelse {
         return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.ENODEV)) } };
     };
 
     var dev_id: c_int = 0;
-    if (ops.*.open) |open_fn| {
+    if (ops.open) |open_fn| {
         const ret = open_fn(filename_ptr, mode, &dev_id);
         if (ret < 0) {
             return SyscallResponse{ .Open = .{ .result = @as(c_int, (ret)) } };
@@ -215,7 +215,7 @@ fn handleClose(ctx: *ServerContext, args: anytype) SyscallResponse {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EBUSY)) } };
     }
 
-    if (entry.kind == sos.FD_DEV_CONSOLE and entry.obj == console_object_ptr) {
+    if (entry.kind == .dev_console and entry.obj == console_object_ptr) {
         if (entry.readable and sos.global_console.reader_in_use and sos.global_console.reader_owner_id == client_id_u16) {
             sos.global_console.reader_in_use = false;
             sos.global_console.reader_owner_id = 0;
@@ -225,9 +225,10 @@ fn handleClose(ctx: *ServerContext, args: anytype) SyscallResponse {
         }
     }
 
-    const ops_ptr = entry.ops;
-    if (ops_ptr != null and ops_ptr.*.close != null) {
-        _ = ops_ptr.*.close.?(entry.dev_id);
+    if (entry.ops) |ops_ptr| {
+        if (ops_ptr.close) |close_fn| {
+            _ = close_fn(entry.dev_id);
+        }
     }
 
     entry.* = empty_fd;
@@ -260,7 +261,7 @@ fn readResumeFn(cont: *continuation.Continuation, event_data: ?*anyopaque, resul
         return;
     }
 
-    const read_fn = state.ops.*.read orelse {
+    const read_fn = state.ops.read orelse {
         result.* = .{ .Error = .{ .errno = sos.ENOSYS } };
         return;
     };
@@ -320,9 +321,8 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
 
     const handle = ctx.vm_handle orelse return .{ .Read = .{ .result = -sos.EINVAL } };
 
-    const ops_ptr = entry.ops;
-    if (ops_ptr == null or ops_ptr.*.read == null) return .{ .Read = .{ .result = -sos.ENOSYS } };
-    const read_fn = ops_ptr.*.read.?;
+    const ops_ptr = entry.ops orelse return .{ .Read = .{ .result = -sos.ENOSYS } };
+    const read_fn = ops_ptr.read orelse return .{ .Read = .{ .result = -sos.ENOSYS } };
 
     const ReadCtx = struct {
         dev_id: c_int,
@@ -440,7 +440,7 @@ fn handleWrite(ctx: *ServerContext, args: anytype) SyscallResponse {
 
     const handle = ctx.vm_handle orelse return .{ .Write = .{ .result = -sos.EINVAL } };
 
-    const write_fn = entry.ops.?.*.write orelse return .{ .Write = .{ .result = -sos.ENOSYS } };
+    const write_fn = entry.ops.?.write orelse return .{ .Write = .{ .result = -sos.ENOSYS } };
 
     const WriteCtx = struct {
         dev_id: c_int,

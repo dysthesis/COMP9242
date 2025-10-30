@@ -9,7 +9,7 @@ pub const ContinuationState = union(enum) {
         vm_handle: *vm.VmHandle,
         user_buf_addr: usize,
         requested: usize,
-        ops: *const sos.file_ops_t,
+        ops: *const file.FileOps,
         dev_id: c_int,
     },
 
@@ -450,3 +450,4 @@ const c = cimports.c;
 const std = @import("std");
 const vm = @import("vm/mod.zig");
 const libipc = @import("libipc");
+const file = @import("file.zig");
