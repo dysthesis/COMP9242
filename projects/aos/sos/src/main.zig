@@ -216,11 +216,6 @@ fn handleClose(ctx: *ServerContext, args: anytype) SyscallResponse {
     }
 
     if (entry.kind == sos.FD_DEV_CONSOLE and entry.obj == console_object_ptr) {
-        if (console.pending_console_read) |pending| {
-            if (pending.client_id == client_id and pending.fd_index == fd_index) {
-                pending.cancel(-sos.ECANCELED);
-            }
-        }
         if (entry.readable and sos.global_console.reader_in_use and sos.global_console.reader_owner_id == client_id_u16) {
             sos.global_console.reader_in_use = false;
             sos.global_console.reader_owner_id = 0;
@@ -237,6 +232,70 @@ fn handleClose(ctx: *ServerContext, args: anytype) SyscallResponse {
 
     entry.* = empty_fd;
     return SyscallResponse{ .Close = .{ .result = @as(c_int, (0)) } };
+}
+
+/// Resume function for blocked read operations
+fn readResumeFn(cont: *continuation.Continuation, event_data: ?*anyopaque, result: *continuation.ContinuationResult) callconv(.c) void {
+    _ = event_data; // Unused for console reads
+
+    // Extract state from continuation
+    const state = cont.state.Read;
+
+    // Validate client still exists
+    if (cont.client.id >= MAX_CLIENTS) {
+        result.* = .{ .Error = .{ .errno = sos.EINVAL } };
+        return;
+    }
+
+    // Validate file descriptor is still valid
+    var io_state = &file.client_io_state[@intCast(cont.client.id)];
+    if (!io_state.initialised) {
+        result.* = .{ .Error = .{ .errno = sos.EBADF } };
+        return;
+    }
+
+    const entry = &io_state.fds[state.fd_index];
+    if (!entry.used or !entry.readable or entry.ops != state.ops) {
+        result.* = .{ .Error = .{ .errno = sos.EBADF } };
+        return;
+    }
+
+    const read_fn = state.ops.*.read orelse {
+        result.* = .{ .Error = .{ .errno = sos.ENOSYS } };
+        return;
+    };
+
+    // Attempt to read into temporary buffer
+    var temp_buf: [sos.PAGE_SIZE_4K]u8 = undefined;
+    const dst_any: *anyopaque = @ptrCast(&temp_buf[0]);
+    const read_len = @min(state.requested, sos.PAGE_SIZE_4K);
+    const read_result = read_fn(state.dev_id, dst_any, read_len);
+
+    if (read_result == -sos.EWOULDBLOCK) {
+        // Still would block, retry later
+        result.* = .Retry;
+        return;
+    }
+
+    if (read_result < 0) {
+        // Error occurred
+        result.* = .{ .Error = .{ .errno = @intCast(-read_result) } };
+        return;
+    }
+
+    // Success - copy to user buffer
+    if (read_result > 0) {
+        const copied = state.vm_handle.copyToUserBuffer(state.user_buf_addr, &temp_buf, @intCast(read_result));
+        if (!copied) {
+            result.* = .{ .Error = .{ .errno = sos.EFAULT } };
+            return;
+        }
+    }
+
+    // Serialize response
+    const resp = SyscallResponse{ .Read = .{ .result = @intCast(read_result) } };
+    const msg = resp.serialise();
+    result.* = .{ .Complete = .{ .response = msg } };
 }
 
 fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
@@ -315,35 +374,44 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     };
 
     if (moved == 0 and read_ctx.would_block) {
-        if (console.pending_console_read != null) {
-            return .{ .Read = .{ .result = -sos.EBUSY } };
-        }
+        // Allocate continuation from pool
+        const cont = continuation.ContinuationPool.alloc() orelse {
+            return .{ .Read = .{ .result = -sos.ENOMEM } };
+        };
 
+        // Allocate new reply capability for this continuation
         const old_reply_cap = ctx.reply.*;
         const old_reply_ut = ctx.reply_ut.*;
         const new_reply_ut = sos.alloc_retype(ctx.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
         if (new_reply_ut == null) {
+            continuation.ContinuationPool.free(cont);
             ctx.reply.* = old_reply_cap;
             ctx.reply_ut.* = old_reply_ut;
             return .{ .Read = .{ .result = -sos.ENOMEM } };
         }
 
-        console.pending_console_read = PendingConsoleRead{
-            .client = caller,
-            .client_id = client_id,
-            .fd_index = fd_index,
-            .requested = req,
-            .ops = ops_ptr,
-            .dev_id = entry.dev_id,
-            .reply = old_reply_cap,
-            .reply_ut = old_reply_ut,
-            .vm_handle = handle,
-            .user_buf_addr = user_buf_addr,
+        // Populate continuation
+        cont.client = caller;
+        cont.reply = old_reply_cap;
+        cont.reply_ut = old_reply_ut;
+        cont.resume_fn = readResumeFn;
+        cont.state = .{
+            .Read = .{
+                .fd_index = fd_index,
+                .vm_handle = handle,
+                .user_buf_addr = user_buf_addr,
+                .requested = req,
+                .ops = ops_ptr,
+                .dev_id = entry.dev_id,
+            },
         };
 
+        // Enqueue to wait for console stdin
+        continuation.WaitQueues.waitIO(cont, continuation.CONSOLE_STDIN_FD);
+
+        // Mark that we have a new reply cap and won't send reply immediately
         ctx.have_reply.* = false;
         ctx.reply_ut.* = new_reply_ut.?;
-        if (console.pending_console_read) |pending| pending.tryComplete();
         return null;
     }
 

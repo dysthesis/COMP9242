@@ -1,77 +1,3 @@
-pub var pending_console_read: ?PendingConsoleRead = null;
-
-pub const PendingConsoleRead = struct {
-    client: *sos.client_t,
-    client_id: usize,
-    fd_index: usize,
-    requested: usize,
-    ops: *const sos.file_ops_t,
-    dev_id: c_int,
-    reply: sel4.seL4_CPtr,
-    reply_ut: *sos.ut_t,
-    vm_handle: *vm.VmHandle,
-    user_buf_addr: usize,
-
-    pub fn cancel(self: PendingConsoleRead, err: c_int) void {
-        pending_console_read = null;
-        self.complete(@as(isize, err));
-    }
-
-    fn complete(self: PendingConsoleRead, result: isize) void {
-        const resp = SyscallResponse{ .Read = .{ .result = resultToCInt(result) } };
-        const msg = resp.serialise();
-        sel4.seL4_Send(self.reply, msg);
-        _ = sos.cspace_delete(&super.cspace, self.reply);
-        sos.cspace_free_slot(&super.cspace, self.reply);
-        sos.ut_free(self.reply_ut);
-    }
-    pub fn tryComplete(self: PendingConsoleRead) void {
-        if (self.client_id >= file.client_io_state.len) {
-            pending_console_read = null;
-            self.complete(@as(isize, -sos.EINVAL));
-            return;
-        }
-
-        var state = &file.client_io_state[self.client_id];
-        if (!state.initialised) {
-            pending_console_read = null;
-            self.complete(@as(isize, -sos.EBADF));
-            return;
-        }
-
-        const entry = &state.fds[self.fd_index];
-        if (!entry.used or !entry.readable or entry.ops != self.ops) {
-            pending_console_read = null;
-            self.complete(@as(isize, -sos.EBADF));
-            return;
-        }
-
-        const read_fn = self.ops.*.read orelse {
-            pending_console_read = null;
-            self.complete(@as(isize, -sos.ENOSYS));
-            return;
-        };
-
-        var temp_buf: [sos.PAGE_SIZE_4K]u8 = undefined;
-        const dst_any: *anyopaque = @ptrCast(&temp_buf[0]);
-        const read_len = @min(self.requested, sos.PAGE_SIZE_4K);
-        const result = read_fn(self.dev_id, dst_any, read_len);
-        if (result == -sos.EWOULDBLOCK) {
-            return;
-        }
-
-        pending_console_read = null;
-        if (result > 0) {
-            const copied = self.vm_handle.copyToUserBuffer(self.user_buf_addr, &temp_buf, @intCast(result));
-            if (!copied) {
-                self.complete(@as(isize, -sos.EFAULT));
-                return;
-            }
-        }
-        self.complete(result);
-    }
-};
-
 pub fn setupConsoleFd(fd: *sos.sos_fd_entry_t, ops: *const sos.file_ops_t, readable: bool, writable: bool, dev_id: c_int) void {
     fd.* = empty_fd;
     fd.used = true;
@@ -119,29 +45,20 @@ fn initStdio(state: *SosClientIoState) void {
 }
 
 pub export fn sos_console_data_ready() callconv(.c) void {
-    const pending = pending_console_read orelse return;
-    pending.tryComplete();
+    continuation.continuation_resume_io(continuation.CONSOLE_STDIN_FD);
 }
 
 pub const console_object_ptr: ?*anyopaque = @ptrCast(&sos.global_console);
 
 const cimports = @import("cimports");
 const sos = cimports.sos;
-const sel4 = cimports.sel4;
 const c = cimports.c;
-
-const libipc = @import("libipc");
-const SyscallResponse = libipc.SyscallResponse;
-
-const helpers = @import("helpers.zig");
-const resultToCInt = helpers.resultToCInt;
-
-const super = @import("main.zig");
-const vm = @import("vm/mod.zig");
 
 const file = @import("file.zig");
 const empty_fd = file.empty_fd;
 const SosClientIoState = file.SosClientIoState;
 const console_name_ptr = file.console_name_ptr;
+
+const continuation = @import("continuation.zig");
 
 const std = @import("std");

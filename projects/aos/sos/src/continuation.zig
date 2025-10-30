@@ -187,8 +187,8 @@ pub const ContinuationPool = struct {
         global.free_list = cont.next;
         global.in_use += 1;
 
-        // Zero-initialize the continuation structure
-        cont.* = std.mem.zeroes(Continuation);
+        // Clear the next pointer, other fields must be initialized by caller
+        cont.next = null;
 
         return cont;
     }
