@@ -92,7 +92,10 @@ fn handleOpen(ctx: *ServerContext, args: anytype) SyscallResponse {
         return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.EINVAL)) } };
     }
 
-    var state = &file.client_io_state[client_id];
+    const client_ctx = clients.get(client_id) orelse {
+        return SyscallResponse{ .Open = .{ .result = @as(c_int, (-sos.EINVAL)) } };
+    };
+    var state = client_ctx.ioState();
     ensureStdio(state);
 
     const mode: c_int = @intCast(args.arg);
@@ -191,7 +194,10 @@ fn handleClose(ctx: *ServerContext, args: anytype) SyscallResponse {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EINVAL)) } };
     }
 
-    var state = &file.client_io_state[client_id];
+    const client_ctx = clients.get(client_id) orelse {
+        return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EINVAL)) } };
+    };
+    var state = client_ctx.ioState();
     ensureStdio(state);
     if (!state.initialised) {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EBADF)) } };
@@ -248,8 +254,12 @@ fn readResumeFn(cont: *continuation.Continuation, event_data: ?*anyopaque, resul
         return;
     }
 
+    const ctx_lookup = clients.get(@intCast(cont.client.id)) orelse {
+        result.* = .{ .Error = .{ .errno = sos.EINVAL } };
+        return;
+    };
     // Validate file descriptor is still valid
-    var io_state = &file.client_io_state[@intCast(cont.client.id)];
+    var io_state = ctx_lookup.ioState();
     if (!io_state.initialised) {
         result.* = .{ .Error = .{ .errno = sos.EBADF } };
         return;
@@ -304,7 +314,8 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     const client_id: usize = @intCast(caller.id);
     if (client_id >= MAX_CLIENTS) return .{ .Read = .{ .result = -sos.EINVAL } };
 
-    var state = &file.client_io_state[client_id];
+    const client_ctx = clients.get(client_id) orelse return .{ .Read = .{ .result = -sos.EINVAL } };
+    var state = client_ctx.ioState();
     ensureStdio(state);
     if (!state.initialised) return .{ .Read = .{ .result = -sos.EBADF } };
 
@@ -424,7 +435,8 @@ fn handleWrite(ctx: *ServerContext, args: anytype) SyscallResponse {
     const client_id: usize = @intCast(caller.id);
     if (client_id >= MAX_CLIENTS) return .{ .Write = .{ .result = -sos.EINVAL } };
 
-    var state = &file.client_io_state[client_id];
+    const client_ctx = clients.get(client_id) orelse return .{ .Write = .{ .result = -sos.EINVAL } };
+    var state = client_ctx.ioState();
     ensureStdio(state);
     if (!state.initialised) return .{ .Write = .{ .result = -sos.EBADF } };
 
@@ -612,7 +624,8 @@ const resultToCInt = helpers.resultToCInt;
 
 const file = @import("file.zig");
 const empty_fd = file.empty_fd;
-const SosClientIoState = file.SosClientIoState;
+const SosClientIoState = file.ClientIoState;
+const clients = @import("client.zig");
 
 const console = @import("console.zig");
 const PendingConsoleRead = console.PendingConsoleRead;

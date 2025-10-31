@@ -17,6 +17,7 @@ pub fn ensureStdio(state: *SosClientIoState) void {
 
 fn initStdio(state: *SosClientIoState) void {
     state.* = SosClientIoState{};
+    state.file_table.init();
     const ops = file.vfs_lookup_ops(console_name_ptr) orelse {
         std.debug.panic("console device not registered", .{});
     };
@@ -30,16 +31,25 @@ fn initStdio(state: *SosClientIoState) void {
         std.debug.panic("console stdin open failed", .{});
     }
     setupConsoleFd(&state.fds[0], ops, true, false, id);
+    const stdin_handle: file.FileHandle = @ptrCast(&state.fds[0]);
+    const stdin_fd = state.file_table.allocFd(stdin_handle) catch unreachable;
+    std.debug.assert(stdin_fd == 0);
 
     if (ops.*.open.?(console_name_ptr, c.O_WRONLY, &id) < 0) {
         std.debug.panic("console stdout open failed", .{});
     }
     setupConsoleFd(&state.fds[1], ops, false, true, id);
+    const stdout_handle: file.FileHandle = @ptrCast(&state.fds[1]);
+    const stdout_fd = state.file_table.allocFd(stdout_handle) catch unreachable;
+    std.debug.assert(stdout_fd == 1);
 
     if (ops.*.open.?(console_name_ptr, c.O_WRONLY, &id) < 0) {
         std.debug.panic("console stderr open failed", .{});
     }
     setupConsoleFd(&state.fds[2], ops, false, true, id);
+    const stderr_handle: file.FileHandle = @ptrCast(&state.fds[2]);
+    const stderr_fd = state.file_table.allocFd(stderr_handle) catch unreachable;
+    std.debug.assert(stderr_fd == 2);
 
     state.initialised = true;
 }
