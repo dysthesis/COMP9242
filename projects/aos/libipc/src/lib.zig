@@ -14,6 +14,7 @@ pub const SyscallNum = enum(u8) {
     Brk = 8,
     Mmap = 9,
     Stat = 10,
+    GetDirent = 11,
 };
 
 pub const SyscallDeserialisationError = error{

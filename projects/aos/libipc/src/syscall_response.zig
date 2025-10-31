@@ -47,6 +47,9 @@ pub const SyscallResponse = union(lib.SyscallNum) {
     Brk: struct { result: i64 },
     Mmap: struct { result: i64 },
     Stat: struct { result: c_int },
+    GetDirent: struct {
+        result: c_int,
+    },
 
     pub fn deserialise(tag: lib.SyscallNum, msg: sel4.seL4_MessageInfo_t) lib.SyscallCallError!SyscallResponse {
         const len = sel4.seL4_MessageInfo_get_length(msg);
@@ -69,6 +72,7 @@ pub const SyscallResponse = union(lib.SyscallNum) {
             .Brk => SyscallResponse{ .Brk = .{ .result = wordToI64(mr0) } },
             .Mmap => SyscallResponse{ .Mmap = .{ .result = wordToI64(mr0) } },
             .Stat => SyscallResponse{ .Stat = .{ .result = wordToCInt(mr0) } },
+            .GetDirent => SyscallResponse{ .GetDirent = .{ .result = wordToCInt(mr0) } },
         };
     }
 
@@ -87,6 +91,7 @@ pub const SyscallResponse = union(lib.SyscallNum) {
             .Brk => |payload| i64ToWord(payload.result),
             .Mmap => |payload| i64ToWord(payload.result),
             .Stat => |payload| cIntToWord(payload.result),
+            .GetDirent => |payload| cIntToWord(payload.result),
         };
         sel4.seL4_SetMR(0, word);
         return sel4.seL4_MessageInfo_new(0, 0, 0, 1);
