@@ -11,17 +11,32 @@
  */
 #pragma once
 
-#include <sel4/types.h>
 #include <cspace/cspace.h>
+#include <sel4/types.h>
+#include <stdbool.h>
+
+struct nfs_context;
 
 /**
  * Initialises the network stack
  *
  * @param cspace         for creating slots for mappings
- * @param ntfn_irq       badged notification object bound to SOS's endpoint, for ethernet IRQs
- * @param ntfn_tick      badged notification object bound to SOS's endpoint, for network tick IRQs
- * @param timer_vaddr    mapped timer device. network_init will set up a periodic network_tick
- *                       using the SoC's watchdog timer (which is not used by your timer driver
- *                       and has a completely different programming model!)
+ * @param ntfn_irq       badged notification object bound to SOS's endpoint, for
+ * ethernet IRQs
+ * @param ntfn_tick      badged notification object bound to SOS's endpoint, for
+ * network tick IRQs
+ * @param timer_vaddr    mapped timer device. network_init will set up a
+ * periodic network_tick using the SoC's watchdog timer (which is not used by
+ * your timer driver and has a completely different programming model!)
  */
 void network_init(cspace_t *cspace, void *timer_vaddr, seL4_CPtr irq_ntfn);
+
+/**
+ * Get the NFS context for filesystem implementation
+ */
+struct nfs_context *get_nfs_context(void);
+
+/**
+ * Check if NFS mount is complete
+ */
+bool nfs_is_mounted(void);

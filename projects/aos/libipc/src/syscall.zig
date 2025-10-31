@@ -19,6 +19,13 @@ pub const Syscall = union(lib.SyscallNum) {
         fd: sel4.seL4_Word,
         offset: sel4.seL4_Word,
     },
+    // TODO: see if we can trim this down to 4 MRs
+    Stat: struct { path_addr: sel4.seL4_Word, path_len: sel4.seL4_Word, out_addr: sel4.seL4_Word, out_len: sel4.seL4_Word },
+    GetDirent: struct {
+        index: usize, // which directory entry
+        buf_addr: usize,
+        buf_size: usize,
+    },
 
     fn serialise(self: Syscall) sel4.seL4_MessageInfo_t {
         return switch (self) {
@@ -46,6 +53,21 @@ pub const Syscall = union(lib.SyscallNum) {
             .Write => |args| blk: {
                 sel4.seL4_SetMR(0, @as(sel4.seL4_Word, @intFromEnum(lib.SyscallNum.Write)));
                 sel4.seL4_SetMR(1, args.arg);
+                sel4.seL4_SetMR(2, args.buf_addr);
+                sel4.seL4_SetMR(3, args.buf_size);
+                break :blk sel4.seL4_MessageInfo_new(0, 0, 0, 4);
+            },
+            .Stat => |args| blk: {
+                sel4.seL4_SetMR(0, @as(sel4.seL4_Word, @intFromEnum(lib.SyscallNum.Stat)));
+                sel4.seL4_SetMR(1, args.path_addr);
+                sel4.seL4_SetMR(2, args.path_len);
+                sel4.seL4_SetMR(3, args.out_addr);
+                sel4.seL4_SetMR(4, args.out_len);
+                break :blk sel4.seL4_MessageInfo_new(0, 0, 0, 5);
+            },
+            .GetDirent => |args| blk: {
+                sel4.seL4_SetMR(0, @as(sel4.seL4_Word, @intFromEnum(lib.SyscallNum.GetDirent)));
+                sel4.seL4_SetMR(1, args.index);
                 sel4.seL4_SetMR(2, args.buf_addr);
                 sel4.seL4_SetMR(3, args.buf_size);
                 break :blk sel4.seL4_MessageInfo_new(0, 0, 0, 4);
@@ -102,6 +124,8 @@ pub const Syscall = union(lib.SyscallNum) {
             .MyId => .MyId,
             .Brk => .Brk,
             .Mmap => .Mmap,
+            .Stat => .Stat,
+            .GetDirent => .GetDirent,
         };
     }
 
@@ -150,6 +174,14 @@ pub const Syscall = union(lib.SyscallNum) {
                     .buf_size = sel4.seL4_GetMR(3),
                 },
             },
+            .Stat => if (len < 5) lib.SyscallDeserialisationError.NoMessageRegisters else Syscall{
+                .Stat = .{
+                    .path_addr = sel4.seL4_GetMR(1),
+                    .path_len = sel4.seL4_GetMR(2),
+                    .out_addr = sel4.seL4_GetMR(3),
+                    .out_len = sel4.seL4_GetMR(4),
+                },
+            },
             .Usleep => if (len < 2) lib.SyscallDeserialisationError.NoMessageRegisters else Syscall{
                 .Usleep = .{ .arg = sel4.seL4_GetMR(1) },
             },
@@ -166,6 +198,13 @@ pub const Syscall = union(lib.SyscallNum) {
                     .flags = sel4.seL4_GetMR(4),
                     .fd = sel4.seL4_GetMR(5),
                     .offset = sel4.seL4_GetMR(6),
+                },
+            },
+            .GetDirent => if (len < 4) lib.SyscallDeserialisationError.NoMessageRegisters else Syscall{
+                .GetDirent = .{
+                    .index = sel4.seL4_GetMR(1),
+                    .buf_addr = sel4.seL4_GetMR(2),
+                    .buf_size = sel4.seL4_GetMR(3),
                 },
             },
         };

@@ -31,6 +31,8 @@ pub const sos = @cImport({
     @cInclude("ut.h");
     @cInclude("ut_shim.h");
     @cInclude("utils.h");
+    @cInclude("threads.h");
+    @cInclude("network.h");
 });
 
 pub const sos_types = @cImport({

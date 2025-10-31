@@ -111,6 +111,66 @@ pub const VmHandle = struct {
         return true;
     }
 
+    pub fn copyCStringFromClient(self: *Self, client_va: usize, dest: []u8) VmError!usize {
+        if (dest.len == 0) return 0;
+
+        var copied: usize = 0;
+        var first_zero: ?usize = null;
+
+        while (copied < dest.len) {
+            const remaining = dest.len - copied;
+            const slice = try self.mapUserSlice(client_va + copied, remaining, .readOnly);
+            if (slice.len == 0) break;
+
+            const chunk = @min(slice.len, remaining);
+            const src_ptr: [*]const u8 = @as([*]const u8, @ptrCast(slice.ptr));
+            const src_slice = src_ptr[0..chunk];
+            std.mem.copyForwards(u8, dest[copied .. copied + chunk], src_slice);
+
+            if (first_zero == null) {
+                if (std.mem.indexOfScalar(u8, src_slice, 0)) |idx| {
+                    first_zero = copied + idx;
+                }
+            }
+
+            copied += chunk;
+        }
+
+        return first_zero orelse copied;
+    }
+
+    pub fn copyFromClient(self: *Self, client_va: usize, dest: []u8) VmError!void {
+        var copied: usize = 0;
+        while (copied < dest.len) {
+            const remaining = dest.len - copied;
+            const slice = try self.mapUserSlice(client_va + copied, remaining, .readOnly);
+            if (slice.len == 0) break;
+
+            const chunk = @min(slice.len, remaining);
+            const src_ptr: [*]const u8 = @as([*]const u8, @ptrCast(slice.ptr));
+            std.mem.copyForwards(u8, dest[copied .. copied + chunk], src_ptr[0..chunk]);
+            copied += chunk;
+        }
+
+        if (copied != dest.len) {
+            return VmError.Bounds;
+        }
+    }
+
+    pub fn copyToClient(self: *Self, src: []const u8, client_va: usize) VmError!void {
+        var copied: usize = 0;
+        while (copied < src.len) {
+            const remaining = src.len - copied;
+            const slice = try self.mapUserSlice(client_va + copied, remaining, .writeOnly);
+            if (slice.len == 0) return VmError.Bounds;
+
+            const chunk = @min(slice.len, remaining);
+            const dst_ptr: [*]u8 = @as([*]u8, @ptrCast(slice.ptr));
+            std.mem.copyForwards(u8, dst_ptr[0..chunk], src[copied .. copied + chunk]);
+            copied += chunk;
+        }
+    }
+
     pub fn validate(self: *Self) void {
         const idx = self.idx;
         if (idx >= MAX_CLIENTS) {

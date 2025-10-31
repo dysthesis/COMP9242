@@ -1,3 +1,117 @@
+const std = @import("std");
+
+const cimports = @import("cimports");
+const c = cimports.c;
+const sos = cimports.sos;
+const MAX_CLIENTS: usize = sos.MAX_CLIENTS;
+
+const super = @import("main.zig");
+const SOS_MAX_OPEN_FILES = super.SOS_MAX_OPEN_FILES;
+
+pub const FileHandle = *anyopaque;
+
+pub const FileTableError = error{
+    TableFull,
+    InvalidFd,
+    SlotUnused,
+    MissingHandle,
+};
+
+const FileTableEntry = struct {
+    used: bool = false,
+    generation: u32 = 0,
+    handle: ?FileHandle = null,
+};
+
+pub const FileTable = struct {
+    entries: [SOS_MAX_OPEN_FILES]FileTableEntry = [_]FileTableEntry{FileTableEntry{}} ** SOS_MAX_OPEN_FILES,
+    next_generation: u32 = 1,
+
+    const Self = @This();
+
+    pub fn init(self: *Self) void {
+        self.* = Self{};
+    }
+
+    fn bumpGeneration(self: *Self) void {
+        self.next_generation +%= 1;
+        if (self.next_generation == 0) {
+            self.next_generation = 1;
+        }
+    }
+
+    pub fn allocFd(self: *Self, handle: FileHandle) FileTableError!usize {
+        var idx: usize = 0;
+        while (idx < self.entries.len) : (idx += 1) {
+            const entry = &self.entries[idx];
+            if (!entry.used) {
+                entry.used = true;
+                entry.generation = self.next_generation;
+                entry.handle = handle;
+                self.bumpGeneration();
+                return idx;
+            }
+        }
+        return FileTableError.TableFull;
+    }
+
+    pub fn getHandle(self: *const Self, fd: usize) FileTableError!FileHandle {
+        if (fd >= self.entries.len) {
+            return FileTableError.InvalidFd;
+        }
+        const entry = self.entries[fd];
+        if (!entry.used) {
+            return FileTableError.SlotUnused;
+        }
+        return entry.handle orelse FileTableError.MissingHandle;
+    }
+
+    pub fn freeFd(self: *Self, fd: usize) FileTableError!void {
+        if (fd >= self.entries.len) {
+            return FileTableError.InvalidFd;
+        }
+        const entry = &self.entries[fd];
+        if (!entry.used) {
+            return FileTableError.SlotUnused;
+        }
+        entry.* = FileTableEntry{};
+    }
+};
+
+pub const FileOps = extern struct {
+    open: ?*const fn (name: [*c]const u8, mode: c_int, out_id: ?*c_int) callconv(.c) c_int,
+    read: ?*const fn (id: c_int, buf: ?*anyopaque, len: usize) callconv(.c) isize,
+    write: ?*const fn (id: c_int, buf: ?*const anyopaque, len: usize) callconv(.c) isize,
+    close: ?*const fn (id: c_int) callconv(.c) c_int,
+};
+
+pub const FileKind = enum(c_int) {
+    none = 0,
+    dev_console = 1,
+};
+
+pub const File = extern struct {
+    used: bool,
+    readable: bool,
+    writable: bool,
+    kind: FileKind,
+    obj: ?*anyopaque,
+    ops: ?*const FileOps,
+    dev_id: c_int,
+    refcnt: u16,
+};
+
+pub const ConsoleDev = extern struct {
+    reader_in_use: bool,
+    reader_owner_id: u16,
+    write_refcnt: usize,
+};
+
+pub const Devices = extern struct {
+    name: [*c]const u8,
+    ops: *const FileOps,
+};
+
 const ring_capacity: usize = @intCast(sos.CONSOLE_RING_SIZE);
 
 extern fn sos_console_data_ready() callconv(.c) void;
@@ -5,17 +119,18 @@ extern fn sos_console_data_ready() callconv(.c) void;
 const console_name: [:0]const u8 = "console";
 pub const console_name_ptr: [*c]const u8 = @ptrCast(console_name.ptr);
 
-pub const empty_fd: sos.sos_fd_entry_t = std.mem.zeroes(sos.sos_fd_entry_t);
-const empty_fd_table = [_]sos.sos_fd_entry_t{empty_fd} ** SOS_MAX_OPEN_FILES;
+pub const empty_fd: File = std.mem.zeroes(File);
+const empty_fd_table = [_]File{empty_fd} ** SOS_MAX_OPEN_FILES;
 
-pub const SosClientIoState = struct {
+pub const ClientIoState = struct {
     initialised: bool = false,
-    fds: [SOS_MAX_OPEN_FILES]sos.sos_fd_entry_t = empty_fd_table,
+    fds: [SOS_MAX_OPEN_FILES]File = empty_fd_table,
+    file_table: FileTable = FileTable{},
 };
 
-pub var client_io_state: [MAX_CLIENTS]SosClientIoState = [_]SosClientIoState{SosClientIoState{}} ** MAX_CLIENTS;
+pub var client_io_state: [MAX_CLIENTS]ClientIoState = [_]ClientIoState{ClientIoState{}} ** MAX_CLIENTS;
 
-pub export var global_console: sos.console_dev_t = .{
+pub export var global_console: ConsoleDev = .{
     .reader_in_use = false,
     .reader_owner_id = 0,
     .write_refcnt = 0,
@@ -223,33 +338,40 @@ pub export fn console_write(
     return console_device.write(buf, len);
 }
 
-var console_ops = sos.file_ops_t{
+var console_ops: FileOps = .{
     .open = console_open,
     .read = console_read,
     .write = console_write,
     .close = console_close,
 };
 
-pub export var devices: [1]sos.dev_reg_t = [_]sos.dev_reg_t{.{
+pub export var devices: [1]Devices = [_]Devices{.{
     .name = console_name_ptr,
     .ops = &console_ops,
 }};
 
 pub export var dev_table_len: usize = devices.len;
 
-pub export fn vfs_lookup_ops(name: [*c]const u8) ?*const sos.file_ops_t {
+pub export fn vfs_lookup_ops(name: [*c]const u8) ?*const FileOps {
     if (!ConsoleDevice.nameMatches(name)) {
         return null;
     }
     return devices[0].ops;
 }
 
-const std = @import("std");
+test "FileTable basic operations" {
+    var table = FileTable{};
+    table.init();
 
-const cimports = @import("cimports");
-const c = cimports.c;
-const sos = cimports.sos;
-const MAX_CLIENTS: usize = sos.MAX_CLIENTS;
+    var dummy: u32 = 42;
+    const handle: FileHandle = @ptrCast(&dummy);
 
-const super = @import("main.zig");
-const SOS_MAX_OPEN_FILES = super.SOS_MAX_OPEN_FILES;
+    const fd0 = try table.allocFd(handle);
+    try std.testing.expectEqual(@as(usize, 0), fd0);
+
+    const retrieved = try table.getHandle(fd0);
+    try std.testing.expectEqual(handle, retrieved);
+
+    try table.freeFd(fd0);
+    try std.testing.expectError(FileTableError.SlotUnused, table.getHandle(fd0));
+}

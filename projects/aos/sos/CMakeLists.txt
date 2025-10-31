@@ -52,6 +52,7 @@ add_executable(
     src/main.c
     src/mapping.c
     src/network.c
+    src/nfs_callback_bridge.c
     src/ut.c
     src/tests.c
     src/sys/backtrace.c
