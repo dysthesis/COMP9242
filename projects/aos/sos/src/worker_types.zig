@@ -1,6 +1,8 @@
 const std = @import("std");
 const cimports = @import("cimports");
 const c = cimports.c;
+const sos_types = cimports.sos_types;
+const vm = @import("vm/mod.zig");
 
 pub const WorkType = enum(u8) {
     Open,
@@ -30,8 +32,8 @@ pub const ReadParams = struct {
 
 pub const WriteParams = struct {
     fd: usize,
-    data: [WRITE_BUFFER_CAPACITY]u8,
     count: usize,
+    client_buf: usize,
     client_id: u32,
 };
 
@@ -69,6 +71,7 @@ pub const FileOpResult = union(enum) {
     Fd: usize,
     Bytes: usize,
     Errno: i32,
+    Status: i32,
 
     pub fn okFd(fd: usize) FileOpResult {
         return .{ .Fd = fd };
@@ -81,15 +84,25 @@ pub const FileOpResult = union(enum) {
     pub fn err(errno: i32) FileOpResult {
         return .{ .Errno = errno };
     }
+
+    pub fn status(value: i32) FileOpResult {
+        return .{ .Status = value };
+    }
 };
 
 pub const FileOpState = struct {
     params: WorkParams,
+    payload: [WRITE_BUFFER_CAPACITY]u8 = [_]u8{0} ** WRITE_BUFFER_CAPACITY,
+    payload_len: usize = 0,
+    stat_result: sos_types.sos_stat_t = std.mem.zeroes(sos_types.sos_stat_t),
+    vm_handle: ?*vm.VmHandle = null,
     result: FileOpResult = FileOpResult.err(0),
     completed: bool align(4) = false,
 
     pub fn reset(self: *FileOpState) void {
         self.result = FileOpResult.err(0);
+        self.payload_len = 0;
+        self.stat_result = std.mem.zeroes(sos_types.sos_stat_t);
         @atomicStore(bool, &self.completed, false, .release);
     }
 
@@ -110,8 +123,20 @@ pub const FileOpState = struct {
         self.finish(FileOpResult.err(errno));
     }
 
+    pub fn completeStatus(self: *FileOpState, value: i32) void {
+        self.finish(FileOpResult.status(value));
+    }
+
     pub fn isCompleted(self: *const FileOpState) bool {
         return @atomicLoad(bool, &self.completed, .acquire);
+    }
+
+    pub fn payloadSlice(self: *FileOpState) []u8 {
+        return self.payload[0..self.payload_len];
+    }
+
+    pub fn payloadSliceMut(self: *FileOpState) []u8 {
+        return self.payload[0..];
     }
 };
 

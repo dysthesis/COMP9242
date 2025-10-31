@@ -4,6 +4,16 @@ const PAGE_SIZE_4K: usize = sos.PAGE_SIZE_4K;
 const console_name = "console";
 const console_name_ptr: [*c]const u8 = @ptrCast(&console_name[0]);
 
+fn mapFileTableError(err: file.FileTableError) c_int {
+    return switch (err) {
+        file.FileTableError.TableFull => sos.EMFILE,
+        file.FileTableError.InvalidFd,
+        file.FileTableError.SlotUnused,
+        file.FileTableError.MissingHandle,
+        => sos.EBADF,
+    };
+}
+
 const ServerContext = struct {
     badge: sel4.seL4_Word,
     have_reply: [*c]bool,
@@ -46,7 +56,7 @@ const ServerContext = struct {
         var path_buf: [worker.OPEN_PATH_CAPACITY:0]u8 = undefined;
         @memset(path_buf[0..], 0);
 
-        const copied = vm_handle.copyFromClient(user_buf_addr, path_buf[0..path_buf.len]) catch |err| {
+        const copied = vm_handle.copyCStringFromClient(user_buf_addr, path_buf[0..path_buf.len]) catch |err| {
             const errno: c_int = vm.vmErrorToErrno(err);
             return SyscallResponse{ .Open = .{ .result = -errno } };
         };
@@ -187,6 +197,156 @@ const ServerContext = struct {
         self.reply_ut.* = new_reply_ut.?;
         return null;
     }
+
+    fn startAsyncRead(
+        self: *ServerContext,
+        caller: *sos.client_t,
+        client_ctx: *clients.Client,
+        vm_handle: *vm.VmHandle,
+        fd_index: usize,
+        user_buf: usize,
+        requested: usize,
+    ) ?SyscallResponse {
+        const table = client_ctx.fileTable();
+        _ = table.getHandle(fd_index) catch |err| {
+            const errno: c_int = mapFileTableError(err);
+            return SyscallResponse{ .Read = .{ .result = -errno } };
+        };
+
+        const cont = continuation.ContinuationPool.alloc() orelse {
+            return SyscallResponse{ .Read = .{ .result = -sos.ENOMEM } };
+        };
+
+        const old_reply_cap = self.reply.*;
+        const old_reply_ut = self.reply_ut.*;
+        const new_reply_ut = sos.alloc_retype(self.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
+        if (new_reply_ut == null) {
+            continuation.ContinuationPool.free(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            return SyscallResponse{ .Read = .{ .result = -sos.ENOMEM } };
+        }
+
+        const count = @min(requested, worker.WRITE_BUFFER_CAPACITY);
+
+        cont.client = caller;
+        cont.reply = old_reply_cap;
+        cont.reply_ut = old_reply_ut;
+        cont.resume_fn = fileOpResume;
+        cont.state = .{
+            .FileOp = worker.FileOpState{
+                .params = .{ .Read = .{
+                    .fd = fd_index,
+                    .count = count,
+                    .client_buf = user_buf,
+                    .client_id = @intCast(client_ctx.id),
+                } },
+            },
+        };
+
+        var file_op_state = &cont.state.FileOp;
+        file_op_state.reset();
+        file_op_state.vm_handle = vm_handle;
+        file_op_state.payload_len = 0;
+
+        continuation.FileOpQueue.enqueue(cont);
+
+        const enqueue_rc: c_int = worker.workerEnqueue(file_op_state);
+        if (enqueue_rc < 0) {
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Read = .{ .result = enqueue_rc } };
+        }
+
+        self.have_reply.* = false;
+        self.reply_ut.* = new_reply_ut.?;
+        return null;
+    }
+
+    fn startAsyncWrite(
+        self: *ServerContext,
+        caller: *sos.client_t,
+        client_ctx: *clients.Client,
+        vm_handle: *vm.VmHandle,
+        fd_index: usize,
+        user_buf: usize,
+        requested: usize,
+    ) ?SyscallResponse {
+        const table = client_ctx.fileTable();
+        _ = table.getHandle(fd_index) catch |err| {
+            const errno: c_int = mapFileTableError(err);
+            return SyscallResponse{ .Write = .{ .result = -errno } };
+        };
+
+        const cont = continuation.ContinuationPool.alloc() orelse {
+            return SyscallResponse{ .Write = .{ .result = -sos.ENOMEM } };
+        };
+
+        const old_reply_cap = self.reply.*;
+        const old_reply_ut = self.reply_ut.*;
+        const new_reply_ut = sos.alloc_retype(self.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
+        if (new_reply_ut == null) {
+            continuation.ContinuationPool.free(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            return SyscallResponse{ .Write = .{ .result = -sos.ENOMEM } };
+        }
+
+        const count = @min(requested, worker.WRITE_BUFFER_CAPACITY);
+
+        cont.client = caller;
+        cont.reply = old_reply_cap;
+        cont.reply_ut = old_reply_ut;
+        cont.resume_fn = fileOpResume;
+        cont.state = .{
+            .FileOp = worker.FileOpState{
+                .params = .{ .Write = .{
+                    .fd = fd_index,
+                    .count = count,
+                    .client_buf = user_buf,
+                    .client_id = @intCast(client_ctx.id),
+                } },
+            },
+        };
+
+        var file_op_state = &cont.state.FileOp;
+        file_op_state.reset();
+        file_op_state.vm_handle = vm_handle;
+        file_op_state.payload_len = count;
+
+        if (count > 0) {
+            vm_handle.copyFromClient(user_buf, file_op_state.payload[0..count]) catch |err| {
+                const errno: c_int = vm.vmErrorToErrno(err);
+                self.reply.* = old_reply_cap;
+                self.reply_ut.* = old_reply_ut;
+                sos.ut_free(new_reply_ut.?);
+                cont.cleanup();
+                continuation.ContinuationPool.free(cont);
+                return SyscallResponse{ .Write = .{ .result = -errno } };
+            };
+        }
+
+        continuation.FileOpQueue.enqueue(cont);
+
+        const enqueue_rc: c_int = worker.workerEnqueue(file_op_state);
+        if (enqueue_rc < 0) {
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Write = .{ .result = enqueue_rc } };
+        }
+
+        self.have_reply.* = false;
+        self.reply_ut.* = new_reply_ut.?;
+        return null;
+    }
 };
 
 /// Handle a singular syscall
@@ -273,7 +433,7 @@ pub export fn checkCompletedFileOps() callconv(.c) void {
     }
 }
 
-fn handleClose(ctx: *ServerContext, args: anytype) SyscallResponse {
+fn handleClose(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     const caller = ctx.caller orelse {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EINVAL)) } };
     };
@@ -297,37 +457,97 @@ fn handleClose(ctx: *ServerContext, args: anytype) SyscallResponse {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EBADF)) } };
     }
 
-    if (fd_raw < 3) {
+    const fd_index: usize = @intCast(fd_raw);
+    const is_console = fd_index < state.fds.len and state.fds[fd_index].used and
+        state.fds[fd_index].kind == file.FileKind.dev_console;
+
+    if (is_console) {
+        const entry = &state.fds[fd_index];
+        if (entry.refcnt != 0) {
+            return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EBUSY)) } };
+        }
+
+        if (entry.kind == .dev_console and entry.obj == console_object_ptr) {
+            if (entry.readable and sos.global_console.reader_in_use and sos.global_console.reader_owner_id == client_id_u16) {
+                sos.global_console.reader_in_use = false;
+                sos.global_console.reader_owner_id = 0;
+            }
+            if (entry.writable and sos.global_console.write_refcnt > 0) {
+                sos.global_console.write_refcnt -= 1;
+            }
+        }
+
+        if (entry.ops) |ops_ptr| {
+            if (ops_ptr.close) |close_fn| {
+                _ = close_fn(entry.dev_id);
+            }
+        }
+
+        entry.* = empty_fd;
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (0)) } };
     }
 
-    const fd_index: usize = @intCast(fd_raw);
-    const entry = &state.fds[fd_index];
-    if (!entry.used) {
-        return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EBADF)) } };
-    }
-    if (entry.refcnt != 0) {
-        return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EBUSY)) } };
+    return startAsyncClose(ctx, caller, client_ctx, fd_index);
+}
+
+fn startAsyncClose(
+    ctx: *ServerContext,
+    caller: *sos.client_t,
+    client_ctx: *clients.Client,
+    fd_index: usize,
+) ?SyscallResponse {
+    const table = client_ctx.fileTable();
+    _ = table.getHandle(fd_index) catch |err| {
+        const errno: c_int = mapFileTableError(err);
+        return SyscallResponse{ .Close = .{ .result = -errno } };
+    };
+
+    const cont = continuation.ContinuationPool.alloc() orelse {
+        return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.ENOMEM)) } };
+    };
+
+    const old_reply_cap = ctx.reply.*;
+    const old_reply_ut = ctx.reply_ut.*;
+    const new_reply_ut = sos.alloc_retype(ctx.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
+    if (new_reply_ut == null) {
+        continuation.ContinuationPool.free(cont);
+        ctx.reply.* = old_reply_cap;
+        ctx.reply_ut.* = old_reply_ut;
+        return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.ENOMEM)) } };
     }
 
-    if (entry.kind == .dev_console and entry.obj == console_object_ptr) {
-        if (entry.readable and sos.global_console.reader_in_use and sos.global_console.reader_owner_id == client_id_u16) {
-            sos.global_console.reader_in_use = false;
-            sos.global_console.reader_owner_id = 0;
-        }
-        if (entry.writable and sos.global_console.write_refcnt > 0) {
-            sos.global_console.write_refcnt -= 1;
-        }
+    cont.client = caller;
+    cont.reply = old_reply_cap;
+    cont.reply_ut = old_reply_ut;
+    cont.resume_fn = fileOpResume;
+    cont.state = .{
+        .FileOp = worker.FileOpState{
+            .params = .{ .Close = .{
+                .fd = fd_index,
+                .client_id = @intCast(client_ctx.id),
+            } },
+        },
+    };
+
+    var file_op_state = &cont.state.FileOp;
+    file_op_state.reset();
+
+    continuation.FileOpQueue.enqueue(cont);
+
+    const enqueue_rc: c_int = worker.workerEnqueue(file_op_state);
+    if (enqueue_rc < 0) {
+        continuation.FileOpQueue.remove(cont);
+        ctx.reply.* = old_reply_cap;
+        ctx.reply_ut.* = old_reply_ut;
+        sos.ut_free(new_reply_ut.?);
+        cont.cleanup();
+        continuation.ContinuationPool.free(cont);
+        return SyscallResponse{ .Close = .{ .result = @as(c_int, (enqueue_rc)) } };
     }
 
-    if (entry.ops) |ops_ptr| {
-        if (ops_ptr.close) |close_fn| {
-            _ = close_fn(entry.dev_id);
-        }
-    }
-
-    entry.* = empty_fd;
-    return SyscallResponse{ .Close = .{ .result = @as(c_int, (0)) } };
+    ctx.have_reply.* = false;
+    ctx.reply_ut.* = new_reply_ut.?;
+    return null;
 }
 
 /// Resume function for blocked read operations
@@ -404,7 +624,7 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     if (client_id >= MAX_CLIENTS) return .{ .Read = .{ .result = -sos.EINVAL } };
 
     const client_ctx = clients.get(client_id) orelse return .{ .Read = .{ .result = -sos.EINVAL } };
-    var state = client_ctx.ioState();
+    const state = client_ctx.ioState();
     ensureStdio(state);
     if (!state.initialised) return .{ .Read = .{ .result = -sos.EBADF } };
 
@@ -412,174 +632,168 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     if (fd_raw < 0 or fd_raw >= SOS_MAX_OPEN_FILES) return .{ .Read = .{ .result = -sos.EBADF } };
 
     const fd_index: usize = @intCast(fd_raw);
-    const entry = &state.fds[fd_index];
-    if (!entry.used or !entry.readable) return .{ .Read = .{ .result = -sos.EBADF } };
-
     const user_buf_addr: usize = @intCast(args.buf_addr);
     const req: usize = @intCast(args.buf_size);
     if (req == 0) return .{ .Read = .{ .result = 0 } };
 
-    const handle = ctx.vm_handle orelse return .{ .Read = .{ .result = -sos.EINVAL } };
+    const vm_handle = ctx.vm_handle orelse return .{ .Read = .{ .result = -sos.EINVAL } };
 
-    const ops_ptr = entry.ops orelse return .{ .Read = .{ .result = -sos.ENOSYS } };
-    const read_fn = ops_ptr.read orelse return .{ .Read = .{ .result = -sos.ENOSYS } };
+    const is_console = fd_index < state.fds.len and state.fds[fd_index].used and
+        state.fds[fd_index].kind == file.FileKind.dev_console;
 
-    const ReadCtx = struct {
-        dev_id: c_int,
-        read_fn: *const fn (c_int, ?*anyopaque, usize) callconv(.c) isize,
-        would_block: bool = false,
-        errno: c_int = 0,
-        pub const Self = @This();
-        pub fn op(ctx_opaque: *anyopaque, p: [*]u8, n: usize) anyerror!usize {
-            const rctx: *Self = @ptrCast(@alignCast(ctx_opaque));
-            const anyptr: *anyopaque = @ptrCast(p);
-            const r: isize = rctx.read_fn(rctx.dev_id, anyptr, n);
+    if (is_console) {
+        const entry = &state.fds[fd_index];
+        const ops_ptr = entry.ops orelse return .{ .Read = .{ .result = -sos.ENOSYS } };
+        const read_fn = ops_ptr.read orelse return .{ .Read = .{ .result = -sos.ENOSYS } };
 
-            if (r == -sos.EWOULDBLOCK) {
-                rctx.would_block = true;
-                return 0;
+        const ReadCtx = struct {
+            dev_id: c_int,
+            read_fn: *const fn (c_int, ?*anyopaque, usize) callconv(.c) isize,
+            would_block: bool = false,
+            errno: c_int = 0,
+            pub const Self = @This();
+            pub fn op(ctx_opaque: *anyopaque, p: [*]u8, n: usize) anyerror!usize {
+                const rctx: *Self = @ptrCast(@alignCast(ctx_opaque));
+                const anyptr: *anyopaque = @ptrCast(p);
+                const r: isize = rctx.read_fn(rctx.dev_id, anyptr, n);
+
+                if (r == -sos.EWOULDBLOCK) {
+                    rctx.would_block = true;
+                    return 0;
+                }
+                if (r < 0) {
+                    rctx.errno = @intCast(-r);
+                    return error.DeviceError;
+                }
+                return @intCast(r);
             }
-            if (r < 0) {
-                rctx.errno = @intCast(-r);
-                return error.DeviceError;
-            }
-            return @intCast(r);
-        }
-    };
-
-    var read_ctx = ReadCtx{
-        .dev_id = entry.dev_id,
-        .read_fn = read_fn,
-        .would_block = false,
-        .errno = 0,
-    };
-
-    const moved_or_err = handle.withUserSlice(
-        user_buf_addr,
-        req,
-        .writeOnly,
-        .{ .ctx = &read_ctx, .func = ReadCtx.op },
-    );
-    var moved: usize = 0;
-
-    // Run the reader with the given user slice
-    moved = moved_or_err catch |err| {
-        if (err == error.DeviceError) {
-            return .{ .Read = .{ .result = -read_ctx.errno } };
-        }
-
-        const errno: c_int = vm.vmErrorToErrno(err);
-
-        return .{ .Read = .{ .result = -errno } };
-    };
-
-    if (moved == 0 and read_ctx.would_block) {
-        // Allocate continuation from pool
-        const cont = continuation.ContinuationPool.alloc() orelse {
-            return .{ .Read = .{ .result = -sos.ENOMEM } };
         };
 
-        // Allocate new reply capability for this continuation
-        const old_reply_cap = ctx.reply.*;
-        const old_reply_ut = ctx.reply_ut.*;
-        const new_reply_ut = sos.alloc_retype(ctx.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
-        if (new_reply_ut == null) {
-            continuation.ContinuationPool.free(cont);
-            ctx.reply.* = old_reply_cap;
-            ctx.reply_ut.* = old_reply_ut;
-            return .{ .Read = .{ .result = -sos.ENOMEM } };
-        }
-
-        // Populate continuation
-        cont.client = caller;
-        cont.reply = old_reply_cap;
-        cont.reply_ut = old_reply_ut;
-        cont.resume_fn = readResumeFn;
-        cont.state = .{
-            .Read = .{
-                .fd_index = fd_index,
-                .vm_handle = handle,
-                .user_buf_addr = user_buf_addr,
-                .requested = req,
-                .ops = ops_ptr,
-                .dev_id = entry.dev_id,
-            },
+        var read_ctx = ReadCtx{
+            .dev_id = entry.dev_id,
+            .read_fn = read_fn,
+            .would_block = false,
+            .errno = 0,
         };
 
-        // Enqueue to wait for console stdin
-        continuation.WaitQueues.waitIO(cont, continuation.CONSOLE_STDIN_FD);
+        const moved_or_err = vm_handle.withUserSlice(
+            user_buf_addr,
+            req,
+            .writeOnly,
+            .{ .ctx = &read_ctx, .func = ReadCtx.op },
+        );
+        var moved: usize = 0;
 
-        // Mark that we have a new reply cap and won't send reply immediately
-        ctx.have_reply.* = false;
-        ctx.reply_ut.* = new_reply_ut.?;
-        return null;
+        moved = moved_or_err catch |err| {
+            if (err == error.DeviceError) {
+                return .{ .Read = .{ .result = -read_ctx.errno } };
+            }
+
+            const errno: c_int = vm.vmErrorToErrno(err);
+            return .{ .Read = .{ .result = -errno } };
+        };
+
+        if (moved == 0 and read_ctx.would_block) {
+            const cont = continuation.ContinuationPool.alloc() orelse {
+                return .{ .Read = .{ .result = -sos.ENOMEM } };
+            };
+
+            const old_reply_cap = ctx.reply.*;
+            const old_reply_ut = ctx.reply_ut.*;
+            const new_reply_ut = sos.alloc_retype(ctx.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
+            if (new_reply_ut == null) {
+                continuation.ContinuationPool.free(cont);
+                ctx.reply.* = old_reply_cap;
+                ctx.reply_ut.* = old_reply_ut;
+                return .{ .Read = .{ .result = -sos.ENOMEM } };
+            }
+
+            cont.client = caller;
+            cont.reply = old_reply_cap;
+            cont.reply_ut = old_reply_ut;
+            cont.resume_fn = readResumeFn;
+            cont.state = .{
+                .Read = .{
+                    .fd_index = fd_index,
+                    .vm_handle = vm_handle,
+                    .user_buf_addr = user_buf_addr,
+                    .requested = req,
+                    .ops = ops_ptr,
+                    .dev_id = entry.dev_id,
+                },
+            };
+
+            continuation.WaitQueues.waitIO(cont, continuation.CONSOLE_STDIN_FD);
+
+            ctx.have_reply.* = false;
+            ctx.reply_ut.* = new_reply_ut.?;
+            return null;
+        }
+
+        return .{ .Read = .{ .result = @intCast(moved) } };
     }
 
-    // Either we read some bytes, or EOF
-    return .{ .Read = .{ .result = @intCast(moved) } };
+    return ctx.startAsyncRead(caller, client_ctx, vm_handle, fd_index, user_buf_addr, req);
 }
 
-fn handleWrite(ctx: *ServerContext, args: anytype) SyscallResponse {
+fn handleWrite(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     const caller = ctx.caller orelse return .{ .Write = .{ .result = -sos.EINVAL } };
     const client_id: usize = @intCast(caller.id);
     if (client_id >= MAX_CLIENTS) return .{ .Write = .{ .result = -sos.EINVAL } };
 
     const client_ctx = clients.get(client_id) orelse return .{ .Write = .{ .result = -sos.EINVAL } };
-    var state = client_ctx.ioState();
+    const state = client_ctx.ioState();
     ensureStdio(state);
     if (!state.initialised) return .{ .Write = .{ .result = -sos.EBADF } };
 
     const fd_raw: c_int = @intCast(args.arg);
     if (fd_raw < 0 or fd_raw >= SOS_MAX_OPEN_FILES) return .{ .Write = .{ .result = -sos.EBADF } };
 
-    const entry = &state.fds[@intCast(fd_raw)];
-    if (!entry.used or !entry.writable) return .{ .Write = .{ .result = -sos.EBADF } };
-
+    const fd_index: usize = @intCast(fd_raw);
     const user_buf_addr: usize = @intCast(args.buf_addr);
     const req: usize = @intCast(args.buf_size);
     if (req == 0) return .{ .Write = .{ .result = 0 } };
 
-    const handle = ctx.vm_handle orelse return .{ .Write = .{ .result = -sos.EINVAL } };
+    const vm_handle = ctx.vm_handle orelse return .{ .Write = .{ .result = -sos.EINVAL } };
 
-    const write_fn = entry.ops.?.write orelse return .{ .Write = .{ .result = -sos.ENOSYS } };
+    const is_console = fd_index < state.fds.len and state.fds[fd_index].used and
+        state.fds[fd_index].kind == file.FileKind.dev_console;
 
-    const WriteCtx = struct {
-        dev_id: c_int,
-        write_fn: *const fn (c_int, ?*const anyopaque, usize) callconv(.c) isize,
-        errno: c_int = 0,
-        pub const Self = @This();
-        pub fn op(ctx_opaque: *anyopaque, p: [*]u8, n: usize) anyerror!usize {
-            const self: *Self = @ptrCast(@alignCast(ctx_opaque));
-            const ro: [*]const u8 = p; // treat mapped bytes as const
-            const any_ro: *const anyopaque = @ptrCast(ro);
-            const r: isize = self.write_fn(self.dev_id, any_ro, n);
-            if (r < 0) {
-                self.errno = @intCast(-r);
-                return error.DeviceError;
+    if (is_console) {
+        const entry = &state.fds[fd_index];
+        const write_fn = entry.ops.?.write orelse return .{ .Write = .{ .result = -sos.ENOSYS } };
+
+        const WriteCtx = struct {
+            dev_id: c_int,
+            write_fn: *const fn (c_int, ?*const anyopaque, usize) callconv(.c) isize,
+            errno: c_int = 0,
+            pub const Self = @This();
+            pub fn op(ctx_opaque: *anyopaque, p: [*]u8, n: usize) anyerror!usize {
+                const self: *Self = @ptrCast(@alignCast(ctx_opaque));
+                const ro: [*]const u8 = p;
+                const any_ro: *const anyopaque = @ptrCast(ro);
+                const r: isize = self.write_fn(self.dev_id, any_ro, n);
+                if (r < 0) {
+                    self.errno = @intCast(-r);
+                    return error.DeviceError;
+                }
+                return @intCast(r);
             }
-            return @intCast(r);
-        }
-    };
-
-    var wctx = WriteCtx{ .dev_id = entry.dev_id, .write_fn = write_fn };
-    const moved_or_err = handle.withUserSlice(user_buf_addr, req, .readOnly, .{ .ctx = &wctx, .func = WriteCtx.op });
-
-    const moved: usize = moved_or_err catch |err| {
-        if (err == error.DeviceError) return .{ .Write = .{ .result = -wctx.errno } };
-        const errno: c_int = switch (err) {
-            vm.VmError.ClientContext => sos.EINVAL,
-            vm.VmError.Bounds => sos.ENOMEM,
-            vm.VmError.Unsupported => sos.ENOSYS,
-            vm.VmError.OutOfFrames, vm.VmError.OutOfSlots, vm.VmError.Capacity => sos.ENOMEM,
-            vm.VmError.MapFailed => sos.EIO,
-            vm.VmError.InvalidArgs => sos.EINVAL,
-            vm.VmError.AlreadyMapped => sos.EEXIST,
-            else => sos.EIO,
         };
-        return .{ .Write = .{ .result = -errno } };
-    };
 
-    return .{ .Write = .{ .result = @intCast(moved) } };
+        var wctx = WriteCtx{ .dev_id = entry.dev_id, .write_fn = write_fn };
+        const moved_or_err = vm_handle.withUserSlice(user_buf_addr, req, .readOnly, .{ .ctx = &wctx, .func = WriteCtx.op });
+
+        const moved: usize = moved_or_err catch |err| {
+            if (err == error.DeviceError) return .{ .Write = .{ .result = -wctx.errno } };
+            const errno: c_int = vm.vmErrorToErrno(err);
+            return .{ .Write = .{ .result = -errno } };
+        };
+
+        return .{ .Write = .{ .result = @intCast(moved) } };
+    }
+
+    return ctx.startAsyncWrite(caller, client_ctx, vm_handle, fd_index, user_buf_addr, req);
 }
 
 fn handleTimestamp(ctx: *ServerContext) SyscallResponse {

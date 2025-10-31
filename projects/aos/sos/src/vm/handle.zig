@@ -111,7 +111,7 @@ pub const VmHandle = struct {
         return true;
     }
 
-    pub fn copyFromClient(self: *Self, client_va: usize, dest: []u8) VmError!usize {
+    pub fn copyCStringFromClient(self: *Self, client_va: usize, dest: []u8) VmError!usize {
         if (dest.len == 0) return 0;
 
         var copied: usize = 0;
@@ -137,6 +137,24 @@ pub const VmHandle = struct {
         }
 
         return first_zero orelse copied;
+    }
+
+    pub fn copyFromClient(self: *Self, client_va: usize, dest: []u8) VmError!void {
+        var copied: usize = 0;
+        while (copied < dest.len) {
+            const remaining = dest.len - copied;
+            const slice = try self.mapUserSlice(client_va + copied, remaining, .readOnly);
+            if (slice.len == 0) break;
+
+            const chunk = @min(slice.len, remaining);
+            const src_ptr: [*]const u8 = @as([*]const u8, @ptrCast(slice.ptr));
+            std.mem.copyForwards(u8, dest[copied .. copied + chunk], src_ptr[0..chunk]);
+            copied += chunk;
+        }
+
+        if (copied != dest.len) {
+            return VmError.Bounds;
+        }
     }
 
     pub fn copyToClient(self: *Self, src: []const u8, client_va: usize) VmError!void {

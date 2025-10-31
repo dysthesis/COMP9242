@@ -39,7 +39,7 @@ fn mapFileTableError(err: file.FileTableError) c_int {
         file.FileTableError.InvalidFd,
         file.FileTableError.SlotUnused,
         file.FileTableError.MissingHandle,
-        => sos.EINVAL,
+        => sos.EBADF,
     };
 }
 
@@ -203,10 +203,38 @@ pub const Worker = struct {
         const tag = std.meta.activeTag(file_op.params);
         if (tag != .Read) {
             _ = c.printf("[worker] workerReadFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            file_op.completeErrno(sos.EINVAL);
             return;
         }
-        // TODO: Implement this
-        _ = c.printf("[worker] workerReadFile called (not yet implemented)\n");
+        const params = &file_op.params.Read;
+        const client_ctx = clients.get(@intCast(params.client_id)) orelse {
+            file_op.completeErrno(sos.EINVAL);
+            return;
+        };
+
+        const table = client_ctx.fileTable();
+        const handle = table.getHandle(params.fd) catch |err| {
+            const errno = mapFileTableError(err);
+            file_op.completeErrno(errno);
+            return;
+        };
+
+        const to_read = @min(params.count, WRITE_BUFFER_CAPACITY);
+        if (to_read == 0) {
+            file_op.payload_len = 0;
+            file_op.completeBytes(0);
+            return;
+        }
+
+        const buf_ptr: [*]u8 = @as([*]u8, @ptrCast(&file_op.payload[0]));
+        const read_bytes = nfs_handler.readSync(handle, buf_ptr, to_read) catch |err| {
+            const errno = mapNfsError(err);
+            file_op.completeErrno(errno);
+            return;
+        };
+
+        file_op.payload_len = read_bytes;
+        file_op.completeBytes(read_bytes);
     }
 
     fn workerWriteFile(self: *Self, file_op: *FileOpState) void {
@@ -214,10 +242,37 @@ pub const Worker = struct {
         const tag = std.meta.activeTag(file_op.params);
         if (tag != .Write) {
             _ = c.printf("[worker] workerWriteFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            file_op.completeErrno(sos.EINVAL);
             return;
         }
-        // TODO: Implement this
-        _ = c.printf("[worker] workerWriteFile called (not yet implemented)\n");
+
+        const params = &file_op.params.Write;
+        const client_ctx = clients.get(@intCast(params.client_id)) orelse {
+            file_op.completeErrno(sos.EINVAL);
+            return;
+        };
+
+        const table = client_ctx.fileTable();
+        const handle = table.getHandle(params.fd) catch |err| {
+            const errno = mapFileTableError(err);
+            file_op.completeErrno(errno);
+            return;
+        };
+
+        const to_write = @min(params.count, file_op.payload_len);
+        if (to_write == 0) {
+            file_op.completeBytes(0);
+            return;
+        }
+
+        const buf_ptr: [*]const u8 = @as([*]const u8, @ptrCast(&file_op.payload[0]));
+        const written = nfs_handler.writeSync(handle, buf_ptr, to_write) catch |err| {
+            const errno = mapNfsError(err);
+            file_op.completeErrno(errno);
+            return;
+        };
+
+        file_op.completeBytes(written);
     }
 
     fn workerCloseFile(self: *Self, file_op: *FileOpState) void {
@@ -225,10 +280,37 @@ pub const Worker = struct {
         const tag = std.meta.activeTag(file_op.params);
         if (tag != .Close) {
             _ = c.printf("[worker] workerCloseFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            file_op.completeErrno(sos.EINVAL);
             return;
         }
-        // TODO: Implement this
-        _ = c.printf("[worker] workerCloseFile called (not yet implemented)\n");
+
+        const params = &file_op.params.Close;
+        const client_ctx = clients.get(@intCast(params.client_id)) orelse {
+            file_op.completeErrno(sos.EINVAL);
+            return;
+        };
+
+        const table = client_ctx.fileTable();
+        const handle = table.getHandle(params.fd) catch |err| {
+            const errno = mapFileTableError(err);
+            file_op.completeErrno(errno);
+            return;
+        };
+
+        const close_result = nfs_handler.closeSync(handle) catch |err| {
+            const errno = mapNfsError(err);
+            file_op.completeErrno(errno);
+            return;
+        };
+        _ = close_result;
+
+        table.freeFd(params.fd) catch |err| {
+            const errno = mapFileTableError(err);
+            file_op.completeErrno(errno);
+            return;
+        };
+
+        file_op.completeStatus(0);
     }
 
     fn workerStatFile(self: *Self, file_op: *FileOpState) void {
@@ -236,10 +318,12 @@ pub const Worker = struct {
         const tag = std.meta.activeTag(file_op.params);
         if (tag != .Stat) {
             _ = c.printf("[worker] workerStatFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            file_op.completeErrno(sos.EINVAL);
             return;
         }
         // TODO: Implement this
         _ = c.printf("[worker] workerStatFile called (not yet implemented)\n");
+        file_op.completeErrno(sos.ENOSYS);
     }
 
     fn workerOpenDir(self: *Self, file_op: *FileOpState) void {
