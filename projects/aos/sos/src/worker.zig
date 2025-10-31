@@ -235,6 +235,8 @@ pub const Worker = struct {
             return;
         };
 
+        _ = c.printf("[worker] read fd=%zu -> %zu bytes\n", params.fd, read_bytes);
+
         file_op.payload_len = read_bytes;
         file_op.completeBytes(read_bytes);
     }
