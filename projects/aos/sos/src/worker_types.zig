@@ -12,8 +12,11 @@ pub const WorkType = enum(u8) {
     ReadDir,
 };
 
+pub const OPEN_PATH_CAPACITY: usize = 256;
+pub const WRITE_BUFFER_CAPACITY: usize = 4096;
+
 pub const OpenParams = struct {
-    path: [256:0]u8,
+    path: [OPEN_PATH_CAPACITY:0]u8,
     flags: c_int,
     client_id: u32,
 };
@@ -27,7 +30,7 @@ pub const ReadParams = struct {
 
 pub const WriteParams = struct {
     fd: usize,
-    data: [4096]u8,
+    data: [WRITE_BUFFER_CAPACITY]u8,
     count: usize,
     client_id: u32,
 };

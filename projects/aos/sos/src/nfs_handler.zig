@@ -93,7 +93,7 @@ pub const NfsPool = struct {
             }
         }
 
-        _ = c.printf("[nfs_pool] ERROR: Pool exhausted (%u slots)\n", NFS_POOL_SIZE);
+        _ = c.printf("[nfs_pool] ERROR: Pool exhausted (%u slots)\n", @as(c_uint, NFS_POOL_SIZE));
         return null;
     }
 
@@ -452,7 +452,7 @@ const nfs_context = opaque {};
 const nfsfh = opaque {};
 const nfsdir = opaque {};
 
-const nfs_cb = *const fn (c_int, ?*nfs_context, ?*anyopaque, ?*anyopaque) callconv(.C) void;
+const nfs_cb = *const fn (c_int, ?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) void;
 
 extern fn get_nfs_context() ?*nfs_context;
 extern fn nfs_is_mounted() bool;

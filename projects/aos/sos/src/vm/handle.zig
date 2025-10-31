@@ -123,7 +123,8 @@ pub const VmHandle = struct {
             if (slice.len == 0) break;
 
             const chunk = @min(slice.len, remaining);
-            const src_slice = slice.ptr[0..chunk];
+            const src_ptr: [*]const u8 = @as([*]const u8, @ptrCast(slice.ptr));
+            const src_slice = src_ptr[0..chunk];
             std.mem.copyForwards(u8, dest[copied .. copied + chunk], src_slice);
 
             if (first_zero == null) {
@@ -146,8 +147,8 @@ pub const VmHandle = struct {
             if (slice.len == 0) return VmError.Bounds;
 
             const chunk = @min(slice.len, remaining);
-            const dst_slice = slice.ptr[0..chunk];
-            std.mem.copyForwards(u8, dst_slice, src[copied .. copied + chunk]);
+            const dst_ptr: [*]u8 = @as([*]u8, @ptrCast(slice.ptr));
+            std.mem.copyForwards(u8, dst_ptr[0..chunk], src[copied .. copied + chunk]);
             copied += chunk;
         }
     }

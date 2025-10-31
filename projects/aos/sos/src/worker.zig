@@ -3,6 +3,9 @@ const sel4 = @import("cimports").sel4;
 const sos = @import("cimports").sos;
 const c = @import("cimports").c;
 const types = @import("worker_types.zig");
+const clients = @import("client.zig");
+const file = @import("file.zig");
+const nfs_handler = @import("nfs_handler.zig");
 
 const MAX_WORK_QUEUE = 16;
 
@@ -17,6 +20,28 @@ pub const OpenDirParams = types.OpenDirParams;
 pub const ReadDirParams = types.ReadDirParams;
 pub const FileOpState = types.FileOpState;
 pub const FileOpResult = types.FileOpResult;
+pub const OPEN_PATH_CAPACITY = types.OPEN_PATH_CAPACITY;
+pub const WRITE_BUFFER_CAPACITY = types.WRITE_BUFFER_CAPACITY;
+
+fn mapNfsError(err: anyerror) c_int {
+    return switch (err) {
+        error.NoNFSContext => sos.ENODEV,
+        error.PoolExhausted => sos.EAGAIN,
+        error.NFSOperationFailed => sos.EIO,
+        error.OperationFailed => sos.EIO,
+        else => sos.EIO,
+    };
+}
+
+fn mapFileTableError(err: file.FileTableError) c_int {
+    return switch (err) {
+        file.FileTableError.TableFull => sos.EMFILE,
+        file.FileTableError.InvalidFd,
+        file.FileTableError.SlotUnused,
+        file.FileTableError.MissingHandle,
+        => sos.EINVAL,
+    };
+}
 
 pub const WorkItem = struct {
     file_op: *FileOpState,
@@ -138,10 +163,39 @@ pub const Worker = struct {
         const tag = std.meta.activeTag(file_op.params);
         if (tag != .Open) {
             _ = c.printf("[worker] workerOpenFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            file_op.completeErrno(sos.EINVAL);
             return;
         }
-        // TODO: Implement this
-        _ = c.printf("[worker] workerOpenFile called (not yet implemented)\n");
+
+        var params = &file_op.params.Open;
+        const client_idx: usize = @intCast(params.client_id);
+        const client_ctx = clients.get(client_idx) orelse {
+            _ = c.printf("[worker] workerOpenFile invalid client_id=%u\n", params.client_id);
+            file_op.completeErrno(sos.EINVAL);
+            return;
+        };
+
+        const path_ptr: [*:0]const u8 = @ptrCast(&params.path);
+        _ = c.printf("[worker] open request client=%u path=\"%s\" flags=0x%x\n", params.client_id, path_ptr, params.flags);
+
+        const handle = nfs_handler.openSync(path_ptr, params.flags) catch |err| {
+            const errno = mapNfsError(err);
+            _ = c.printf("[worker] openSync failed errno=%d\n", errno);
+            file_op.completeErrno(errno);
+            return;
+        };
+
+        const table = client_ctx.fileTable();
+        const fd = table.allocFd(handle) catch |alloc_err| {
+            const errno = mapFileTableError(alloc_err);
+            _ = c.printf("[worker] allocFd failed errno=%d\n", errno);
+            nfs_handler.closeSync(handle) catch {};
+            file_op.completeErrno(errno);
+            return;
+        };
+
+        file_op.completeFd(fd);
+        _ = c.printf("[worker] open completed client=%u fd=%zu\n", params.client_id, fd);
     }
 
     fn workerReadFile(self: *Self, file_op: *FileOpState) void {

@@ -67,6 +67,8 @@ extern void worker_init(seL4_CPtr delegate_ep, seL4_CPtr work_ntfn);
 /* Import Zig NFS handler init */
 extern void nfs_handler_init(void);
 
+/* Poll asynchronous file operations */
+extern void checkCompletedFileOps(void);
 /*
  * To differentiate between signals from notification objects and and IPC
  * messages, we assign a badge to the notification object. The badge that we
@@ -189,6 +191,8 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
   seL4_MessageInfo_t reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
 
   while (1) {
+    checkCompletedFileOps();
+
     seL4_Word badge = 0;
     seL4_MessageInfo_t message;
 

@@ -45,6 +45,9 @@ pub const WaitOn = union(enum) {
     IRQ: struct {
         badge: sel4.seL4_Word,
     },
+
+    /// Waiting for a file operation to complete
+    FileOp: struct {},
 };
 
 /// Result of a continuation's resume function
@@ -108,10 +111,41 @@ pub const Continuation = struct {
     }
 
     /// Clean up reply capability and untyped memory
-    fn cleanup(self: *Continuation) void {
+    pub fn cleanup(self: *Continuation) void {
         _ = sos.cspace_delete(&cspace, self.reply);
         sos.cspace_free_slot(&cspace, self.reply);
         sos.ut_free(self.reply_ut);
+    }
+
+    pub fn processFileOpCompletion(self: *Continuation) bool {
+        if (std.meta.activeTag(self.state) != .FileOp) {
+            return false;
+        }
+
+        const file_op = &self.state.FileOp;
+        const tag = std.meta.activeTag(file_op.params);
+
+        const response = switch (tag) {
+            .Open => blk: {
+                const fd_result = switch (file_op.result) {
+                    .Fd => |fd| std.math.cast(c_int, fd) orelse return self.failFileOp(sos.EMFILE),
+                    .Errno => |errno| return self.failFileOp(@intCast(errno)),
+                    .Bytes => return self.failFileOp(sos.EIO),
+                };
+                break :blk libipc.SyscallResponse{ .Open = .{ .result = fd_result } };
+            },
+            else => return self.failFileOp(sos.ENOSYS),
+        };
+
+        self.sendReply(response.serialise());
+        ContinuationPool.free(self);
+        return true;
+    }
+
+    fn failFileOp(self: *Continuation, errno: c_int) bool {
+        self.sendError(errno);
+        ContinuationPool.free(self);
+        return true;
     }
 };
 
@@ -346,6 +380,11 @@ pub const WaitQueues = struct {
                         cont.sendError(sos.ENOSYS);
                         ContinuationPool.free(cont);
                     },
+                    .FileOp => {
+                        _ = c.printf("[continuation] ERROR: FileOp retry path not supported\n");
+                        cont.sendError(sos.ENOSYS);
+                        ContinuationPool.free(cont);
+                    },
                 }
             },
         }
@@ -421,6 +460,93 @@ pub const WaitQueues = struct {
     }
 };
 
+/// Queue managing file-operation continuations awaiting worker completion.
+pub const FileOpQueue = struct {
+    /// Head of intrusive singly linked list of pending file operations.
+    var head: ?*Continuation = null;
+
+    /// Enqueue a continuation for file operation completion tracking.
+    pub fn enqueue(cont: *Continuation) void {
+        cont.next = head;
+        head = cont;
+        cont.wait_on = .{ .FileOp = .{} };
+        _ = c.printf("[continuation] Enqueued file_op continuation %p\n", cont);
+    }
+
+    /// Remove a specific continuation from the queue (no-op if absent).
+    pub fn remove(cont: *Continuation) void {
+        var prev: ?*Continuation = null;
+        var cursor = head;
+        while (cursor) |current| {
+            const next = current.next;
+            if (current == cont) {
+                if (prev) |p| {
+                    p.next = next;
+                } else {
+                    head = next;
+                }
+                current.next = null;
+                return;
+            }
+            prev = current;
+            cursor = next;
+        }
+    }
+
+    /// Poll for the next completed file operation continuation.
+    pub fn pollCompleted() ?*Continuation {
+        var prev: ?*Continuation = null;
+        var cursor = head;
+
+        while (cursor) |cont| {
+            const next = cont.next;
+            if (std.meta.activeTag(cont.state) != .FileOp) {
+                prev = cont;
+                cursor = next;
+                continue;
+            }
+
+            if (cont.state.FileOp.isCompleted()) {
+                if (prev) |p| {
+                    p.next = next;
+                } else {
+                    head = next;
+                }
+                cont.next = null;
+                return cont;
+            }
+
+            prev = cont;
+            cursor = next;
+        }
+
+        return null;
+    }
+
+    /// Cancel all queued file operations for a departing client.
+    pub fn cancelClient(client: *sos.client_t) void {
+        var prev: ?*Continuation = null;
+        var cursor = head;
+
+        while (cursor) |cont| {
+            const next = cont.next;
+            if (cont.client == client) {
+                if (prev) |p| {
+                    p.next = next;
+                } else {
+                    head = next;
+                }
+
+                cont.cleanup();
+                ContinuationPool.free(cont);
+            } else {
+                prev = cont;
+            }
+            cursor = next;
+        }
+    }
+};
+
 /// Initialise the continuation pool from C code.
 pub export fn continuation_bootstrap() callconv(.c) void {
     ContinuationPool.bootstrap();
@@ -439,6 +565,7 @@ pub export fn continuation_resume_timer(timer_id: u32) callconv(.c) void {
 /// Cancel all continuations belonging to a client
 pub export fn continuation_cancel_client(client: *sos.client_t) callconv(.c) void {
     WaitQueues.cancelClient(client);
+    FileOpQueue.cancelClient(client);
 }
 
 const cimports = @import("cimports");
