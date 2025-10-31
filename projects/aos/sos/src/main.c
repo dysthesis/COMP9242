@@ -43,6 +43,8 @@
 #include "irq.h"
 #include "mapping.h"
 #include "network.h"
+#include "sel4/bootinfo_types.h"
+#include "sel4/simple_types.h"
 #include "syscalls.h"
 #include "tests.h"
 #include "threads.h"
@@ -191,6 +193,7 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
   seL4_MessageInfo_t reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
 
   while (1) {
+    // Flush pending operations
     checkCompletedFileOps();
 
     seL4_Word badge = 0;
@@ -851,6 +854,21 @@ void init_muslc(void) {
   muslcsys_install_syscall(__NR_madvise, sys_madvise);
 }
 
+static seL4_CPtr mint_badged_ep(cspace_t *cspace, seL4_CPtr ep,
+                                seL4_Word badge) {
+  seL4_CPtr slot = cspace_alloc_slot(cspace);
+  ZF_LOGF_IF(slot == seL4_CapNull, "no free cspace slot");
+
+  seL4_Error err = cspace_mint(cspace, slot, cspace, ep, seL4_AllRights,
+                               seL4_CapData_Badge_new(badge));
+
+  if (err) {
+    cspace_free_slot(cspace, slot);
+    return seL4_CapNull;
+  }
+  return slot;
+}
+
 NORETURN void *main_continued(UNUSED void *arg) {
   /* Initialise other system compenents here */
   seL4_CPtr ipc_ep, ntfn;
@@ -899,20 +917,20 @@ NORETURN void *main_continued(UNUSED void *arg) {
   ZF_LOGF_IF(delegate_ep_ut == NULL, "Failed to alloc delegation endpoint");
 
   /* Mint badged delegation endpoint */
-  // seL4_CPtr delegate_ep_badged;
-  // seL4_Error err = cspace_mint(&cspace, delegate_ep, &cspace,
-  // &delegate_ep_badged,
-  //                               seL4_AllRights, DELEGATE_EP_BADGE);
-  // ZF_LOGF_IF(err, "Failed to mint badged delegation endpoint");
+  seL4_CPtr delegate_ep_badged =
+      mint_badged_ep(&cspace, delegate_ep, DELEGATE_EP_BADGE);
+
+  ZF_LOGF_IF(delegate_ep_badged == seL4_CapNull,
+             "Failed to mint badged delegation endpoint");
 
   /* Allocate work queue notification */
-  // seL4_CPtr work_ntfn;
-  // ut_t *work_ntfn_ut = alloc_retype(&work_ntfn, seL4_NotificationObject,
-  // seL4_NotificationBits); ZF_LOGF_IF(work_ntfn_ut == NULL, "Failed to alloc
-  // work notification");
+  seL4_CPtr work_ntfn;
+  ut_t *work_ntfn_ut =
+      alloc_retype(&work_ntfn, seL4_NotificationObject, seL4_NotificationBits);
+  ZF_LOGF_IF(work_ntfn_ut == NULL, "Failed to alloc work notification");
 
   /* Initialize worker subsystem */
-  // worker_init(delegate_ep_badged, work_ntfn);
+  worker_init(delegate_ep_badged, work_ntfn);
 
 #ifdef CONFIG_SOS_GDB_ENABLED
   /* Initialize the debugger */
