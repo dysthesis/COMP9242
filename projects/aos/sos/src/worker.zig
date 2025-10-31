@@ -1,83 +1,37 @@
+const std = @import("std");
 const sel4 = @import("cimports").sel4;
 const sos = @import("cimports").sos;
 const c = @import("cimports").c;
+const types = @import("worker_types.zig");
 
 const MAX_WORK_QUEUE = 16;
 
-pub const WorkType = enum(u8) {
-    Open,
-    Close,
-    Read,
-    Write,
-    Stat,
-    OpenDir,
-    ReadDir,
-};
-
-pub const OpenParams = struct {
-    path: [256:0]u8,
-    flags: c_int,
-    client_id: u32,
-};
-
-pub const ReadParams = struct {
-    fd: usize,
-    count: usize,
-    client_buf: usize,
-    client_id: u32,
-};
-
-pub const WriteParams = struct {
-    fd: usize,
-    data: [4096]u8,
-    count: usize,
-    client_id: u32,
-};
-
-pub const CloseParams = struct {
-    fd: usize,
-    client_id: u32,
-};
-
-pub const StatParams = struct {
-    path: [256:0]u8,
-    client_id: u32,
-};
-
-pub const OpenDirParams = struct {
-    path: [256:0]u8,
-    client_id: u32,
-};
-
-pub const ReadDirParams = struct {
-    fd: usize,
-    client_id: u32,
-};
-
-pub const WorkParams = union(WorkType) {
-    Open: OpenParams,
-    Close: CloseParams,
-    Read: ReadParams,
-    Write: WriteParams,
-    Stat: StatParams,
-    OpenDir: OpenDirParams,
-    ReadDir: ReadDirParams,
-};
+pub const WorkType = types.WorkType;
+pub const WorkParams = types.WorkParams;
+pub const OpenParams = types.OpenParams;
+pub const CloseParams = types.CloseParams;
+pub const ReadParams = types.ReadParams;
+pub const WriteParams = types.WriteParams;
+pub const StatParams = types.StatParams;
+pub const OpenDirParams = types.OpenDirParams;
+pub const ReadDirParams = types.ReadDirParams;
+pub const FileOpState = types.FileOpState;
+pub const FileOpResult = types.FileOpResult;
 
 pub const WorkItem = struct {
-    params: *WorkParams,
+    file_op: *FileOpState,
 
     const Self = @This();
 
     pub fn process(self: Self, worker: anytype) void {
-        switch (self.params.*) {
-            .Open => worker.workerOpenFile(self.params),
-            .Read => worker.workerReadFile(self.params),
-            .Write => worker.workerWriteFile(self.params),
-            .Close => worker.workerCloseFile(self.params),
-            .Stat => worker.workerStatFile(self.params),
-            .OpenDir => worker.workerOpenDir(self.params),
-            .ReadDir => worker.workerReadDir(self.params),
+        switch (std.meta.activeTag(self.file_op.params)) {
+            .Open => worker.workerOpenFile(self.file_op),
+            .Close => worker.workerCloseFile(self.file_op),
+            .Read => worker.workerReadFile(self.file_op),
+            .Write => worker.workerWriteFile(self.file_op),
+            .Stat => worker.workerStatFile(self.file_op),
+            .OpenDir => worker.workerOpenDir(self.file_op),
+            .ReadDir => worker.workerReadDir(self.file_op),
         }
     }
 };
@@ -102,7 +56,7 @@ pub const WorkQueue = struct {
 
     /// Enqueue work item. Returns error.QueueFull if no space available.
     /// WARN: Only main thread should call this
-    pub fn enqueue(self: *Self, params: *WorkParams) !void {
+    pub fn enqueue(self: *Self, file_op: *FileOpState) !void {
         const curr_head = @atomicLoad(u32, &self.head, .acquire);
         const next_head = (curr_head + 1) % MAX_WORK_QUEUE;
         const curr_tail = @atomicLoad(u32, &self.tail, .acquire);
@@ -111,7 +65,7 @@ pub const WorkQueue = struct {
             return error.QueueFull;
         }
 
-        self.items[curr_head] = WorkItem{ .params = params };
+        self.items[curr_head] = WorkItem{ .file_op = file_op };
 
         @atomicStore(u32, &self.head, next_head, .release);
         sel4.seL4_Signal(self.notification);
@@ -155,8 +109,8 @@ pub const Worker = struct {
     }
 
     /// Enqueue work item
-    pub fn enqueue(self: *Self, params: *WorkParams) !void {
-        try self.queue.enqueue(params);
+    pub fn enqueue(self: *Self, file_op: *FileOpState) !void {
+        try self.queue.enqueue(file_op);
     }
 
     /// Main worker thread loop
@@ -179,92 +133,78 @@ pub const Worker = struct {
         // TODO: Implement continuation integration
     }
 
-    fn workerOpenFile(self: *Self, params: *WorkParams) void {
+    fn workerOpenFile(self: *Self, file_op: *FileOpState) void {
         _ = self;
-        switch (params.*) {
-            .Open => {},
-            else => {
-                _ = c.printf("[worker] workerOpenFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(params.*)));
-                return;
-            },
+        const tag = std.meta.activeTag(file_op.params);
+        if (tag != .Open) {
+            _ = c.printf("[worker] workerOpenFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            return;
         }
         // TODO: Implement this
         _ = c.printf("[worker] workerOpenFile called (not yet implemented)\n");
     }
 
-    fn workerReadFile(self: *Self, params: *WorkParams) void {
+    fn workerReadFile(self: *Self, file_op: *FileOpState) void {
         _ = self;
-        switch (params.*) {
-            .Read => {},
-            else => {
-                _ = c.printf("[worker] workerReadFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(params.*)));
-                return;
-            },
+        const tag = std.meta.activeTag(file_op.params);
+        if (tag != .Read) {
+            _ = c.printf("[worker] workerReadFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            return;
         }
         // TODO: Implement this
         _ = c.printf("[worker] workerReadFile called (not yet implemented)\n");
     }
 
-    fn workerWriteFile(self: *Self, params: *WorkParams) void {
+    fn workerWriteFile(self: *Self, file_op: *FileOpState) void {
         _ = self;
-        switch (params.*) {
-            .Write => {},
-            else => {
-                _ = c.printf("[worker] workerWriteFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(params.*)));
-                return;
-            },
+        const tag = std.meta.activeTag(file_op.params);
+        if (tag != .Write) {
+            _ = c.printf("[worker] workerWriteFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            return;
         }
         // TODO: Implement this
         _ = c.printf("[worker] workerWriteFile called (not yet implemented)\n");
     }
 
-    fn workerCloseFile(self: *Self, params: *WorkParams) void {
+    fn workerCloseFile(self: *Self, file_op: *FileOpState) void {
         _ = self;
-        switch (params.*) {
-            .Close => {},
-            else => {
-                _ = c.printf("[worker] workerCloseFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(params.*)));
-                return;
-            },
+        const tag = std.meta.activeTag(file_op.params);
+        if (tag != .Close) {
+            _ = c.printf("[worker] workerCloseFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            return;
         }
         // TODO: Implement this
         _ = c.printf("[worker] workerCloseFile called (not yet implemented)\n");
     }
 
-    fn workerStatFile(self: *Self, params: *WorkParams) void {
+    fn workerStatFile(self: *Self, file_op: *FileOpState) void {
         _ = self;
-        switch (params.*) {
-            .Stat => {},
-            else => {
-                _ = c.printf("[worker] workerStatFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(params.*)));
-                return;
-            },
+        const tag = std.meta.activeTag(file_op.params);
+        if (tag != .Stat) {
+            _ = c.printf("[worker] workerStatFile received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            return;
         }
         // TODO: Implement this
         _ = c.printf("[worker] workerStatFile called (not yet implemented)\n");
     }
 
-    fn workerOpenDir(self: *Self, params: *WorkParams) void {
+    fn workerOpenDir(self: *Self, file_op: *FileOpState) void {
         _ = self;
-        switch (params.*) {
-            .OpenDir => {},
-            else => {
-                _ = c.printf("[worker] workerOpenDir received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(params.*)));
-                return;
-            },
+        const tag = std.meta.activeTag(file_op.params);
+        if (tag != .OpenDir) {
+            _ = c.printf("[worker] workerOpenDir received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            return;
         }
         // TODO: Implement this
         _ = c.printf("[worker] workerOpenDir called (not yet implemented)\n");
     }
 
-    fn workerReadDir(self: *Self, params: *WorkParams) void {
+    fn workerReadDir(self: *Self, file_op: *FileOpState) void {
         _ = self;
-        switch (params.*) {
-            .ReadDir => {},
-            else => {
-                _ = c.printf("[worker] workerReadDir received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(params.*)));
-                return;
-            },
+        const tag = std.meta.activeTag(file_op.params);
+        if (tag != .ReadDir) {
+            _ = c.printf("[worker] workerReadDir received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            return;
         }
         // TODO: Implement this
         _ = c.printf("[worker] workerReadDir called (not yet implemented)\n");
@@ -295,9 +235,7 @@ pub export fn worker_main_c(arg: usize) callconv(.c) void {
 }
 
 /// C-callable enqueue function
-pub export fn workerEnqueue(
-    params: *WorkParams,
-) callconv(.c) c_int {
-    global_worker.enqueue(params) catch return -@as(c_int, @intCast(sos.EAGAIN));
+pub export fn workerEnqueue(file_op: *FileOpState) callconv(.c) c_int {
+    global_worker.enqueue(file_op) catch return -@as(c_int, @intCast(sos.EAGAIN));
     return 0;
 }

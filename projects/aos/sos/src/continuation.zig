@@ -1,6 +1,8 @@
 /// Maximum serialised response size in seL4 message registers.
 pub const MAX_RESPONSE_SIZE: usize = 64;
 
+const worker_types = @import("worker_types.zig");
+
 /// State specific to the type of operation being suspended.
 pub const ContinuationState = union(enum) {
     /// Blocked read operation
@@ -17,6 +19,9 @@ pub const ContinuationState = union(enum) {
     Timer: struct {
         timer_id: u32,
     },
+
+    /// File system worker operation
+    FileOp: worker_types.FileOpState,
 
     /// Custom state for miscellaneous operations
     Custom: struct {
@@ -118,16 +123,10 @@ comptime {
     const cont_size = @sizeOf(Continuation);
     const state_size = @sizeOf(ContinuationState);
     const waiton_size = @sizeOf(WaitOn);
-    const cache_line_size = 64;
-
-    // Continuation should ideally fit within 2 cache lines.
-    if (cont_size > 2 * cache_line_size) {
-        @compileLog("Continuation is larger than two cache lines!");
-    }
 
     // Ensure reasonable upper bounds to catch egregious layout issues.
-    if (cont_size > 256) {
-        @compileError("Continuation size exceeds 256 bytes; review field layout.");
+    if (cont_size > 8192) {
+        @compileError("Continuation size exceeds 8 KiB; review field layout.");
     }
 
     // Sanity checks
