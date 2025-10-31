@@ -43,12 +43,14 @@ pub const CloseParams = struct {
 };
 
 pub const StatParams = struct {
-    path: [256:0]u8,
+    path: [OPEN_PATH_CAPACITY:0]u8,
+    out_buf: usize,
+    out_len: usize,
     client_id: u32,
 };
 
 pub const OpenDirParams = struct {
-    path: [256:0]u8,
+    path: [OPEN_PATH_CAPACITY:0]u8,
     client_id: u32,
 };
 
@@ -103,6 +105,7 @@ pub const FileOpState = struct {
         self.result = FileOpResult.err(0);
         self.payload_len = 0;
         self.stat_result = std.mem.zeroes(sos_types.sos_stat_t);
+        self.vm_handle = null;
         @atomicStore(bool, &self.completed, false, .release);
     }
 

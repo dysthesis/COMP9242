@@ -176,6 +176,27 @@ pub const Continuation = struct {
                 };
                 break :blk libipc.SyscallResponse{ .Close = .{ .result = status } };
             },
+            .Stat => blk: {
+                const result_status = switch (file_op.result) {
+                    .Status => |value| value,
+                    .Errno => |errno| return self.failFileOp(@intCast(errno)),
+                    else => return self.failFileOp(sos.EIO),
+                };
+
+                const vm_handle = file_op.vm_handle orelse return self.failFileOp(sos.EFAULT);
+                const params = file_op.params.Stat;
+                if (params.out_len < @sizeOf(sos_types.sos_stat_t)) {
+                    return self.failFileOp(sos.ENOMEM);
+                }
+
+                const stat_bytes = std.mem.asBytes(&file_op.stat_result);
+                vm_handle.copyToClient(stat_bytes[0..@sizeOf(sos_types.sos_stat_t)], params.out_buf) catch |err| {
+                    const errno = vm.vmErrorToErrno(err);
+                    return self.failFileOp(errno);
+                };
+
+                break :blk libipc.SyscallResponse{ .Stat = .{ .result = result_status } };
+            },
             else => return self.failFileOp(sos.ENOSYS),
         };
 
@@ -614,6 +635,7 @@ const cimports = @import("cimports");
 const sos = cimports.sos;
 const sel4 = cimports.sel4;
 const c = cimports.c;
+const sos_types = cimports.sos_types;
 
 const std = @import("std");
 const vm = @import("vm/mod.zig");

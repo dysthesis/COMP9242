@@ -13,6 +13,7 @@ pub const SyscallNum = enum(u8) {
     MyId = 7,
     Brk = 8,
     Mmap = 9,
+    Stat = 10,
 };
 
 pub const SyscallDeserialisationError = error{

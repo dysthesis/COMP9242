@@ -347,6 +347,131 @@ const ServerContext = struct {
         self.reply_ut.* = new_reply_ut.?;
         return null;
     }
+
+    fn startAsyncStat(
+        self: *ServerContext,
+        caller: *sos.client_t,
+        client_ctx: *clients.Client,
+        vm_handle: *vm.VmHandle,
+        path: []const u8,
+        out_addr: usize,
+        out_len: usize,
+    ) ?SyscallResponse {
+        const cont = continuation.ContinuationPool.alloc() orelse {
+            return SyscallResponse{ .Stat = .{ .result = -sos.ENOMEM } };
+        };
+
+        const old_reply_cap = self.reply.*;
+        const old_reply_ut = self.reply_ut.*;
+        const new_reply_ut = sos.alloc_retype(self.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
+        if (new_reply_ut == null) {
+            continuation.ContinuationPool.free(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            return SyscallResponse{ .Stat = .{ .result = -sos.ENOMEM } };
+        }
+
+        cont.client = caller;
+        cont.reply = old_reply_cap;
+        cont.reply_ut = old_reply_ut;
+        cont.resume_fn = fileOpResume;
+        cont.state = .{
+            .FileOp = worker.FileOpState{
+                .params = .{ .Stat = .{
+                    .path = undefined,
+                    .out_buf = out_addr,
+                    .out_len = out_len,
+                    .client_id = @intCast(client_ctx.id),
+                } },
+            },
+        };
+
+        var file_op_state = &cont.state.FileOp;
+        file_op_state.reset();
+        file_op_state.vm_handle = vm_handle;
+
+        var stat_params = &file_op_state.params.Stat;
+        @memset(stat_params.path[0..], 0);
+        std.mem.copyForwards(u8, stat_params.path[0..path.len], path);
+        stat_params.path[path.len] = 0;
+
+        continuation.FileOpQueue.enqueue(cont);
+
+        const enqueue_rc: c_int = worker.workerEnqueue(file_op_state);
+        if (enqueue_rc < 0) {
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Stat = .{ .result = enqueue_rc } };
+        }
+
+        self.have_reply.* = false;
+        self.reply_ut.* = new_reply_ut.?;
+        return null;
+    }
+
+    fn startAsyncClose(
+        self: *ServerContext,
+        caller: *sos.client_t,
+        client_ctx: *clients.Client,
+        fd_index: usize,
+    ) ?SyscallResponse {
+        const table = client_ctx.fileTable();
+        _ = table.getHandle(fd_index) catch |err| {
+            const errno: c_int = mapFileTableError(err);
+            return SyscallResponse{ .Close = .{ .result = -errno } };
+        };
+
+        const cont = continuation.ContinuationPool.alloc() orelse {
+            return SyscallResponse{ .Close = .{ .result = -sos.ENOMEM } };
+        };
+
+        const old_reply_cap = self.reply.*;
+        const old_reply_ut = self.reply_ut.*;
+        const new_reply_ut = sos.alloc_retype(self.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
+        if (new_reply_ut == null) {
+            continuation.ContinuationPool.free(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            return SyscallResponse{ .Close = .{ .result = -sos.ENOMEM } };
+        }
+
+        cont.client = caller;
+        cont.reply = old_reply_cap;
+        cont.reply_ut = old_reply_ut;
+        cont.resume_fn = fileOpResume;
+        cont.state = .{
+            .FileOp = worker.FileOpState{
+                .params = .{ .Close = .{
+                    .fd = fd_index,
+                    .client_id = @intCast(client_ctx.id),
+                } },
+            },
+        };
+
+        var file_op_state = &cont.state.FileOp;
+        file_op_state.reset();
+
+        continuation.FileOpQueue.enqueue(cont);
+
+        const enqueue_rc: c_int = worker.workerEnqueue(file_op_state);
+        if (enqueue_rc < 0) {
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Close = .{ .result = enqueue_rc } };
+        }
+
+        self.have_reply.* = false;
+        self.reply_ut.* = new_reply_ut.?;
+        return null;
+    }
 };
 
 /// Handle a singular syscall
@@ -409,6 +534,7 @@ fn handleDecodedSyscall(ctx: *ServerContext, syscall: Syscall) ?SyscallResponse 
         .Close => |args| handleClose(ctx, args),
         .Read => |args| handleRead(ctx, args),
         .Write => |args| handleWrite(ctx, args),
+        .Stat => |args| handleStat(ctx, args),
         .Usleep => |args| handleUsleep(ctx, args),
         .Timestamp => handleTimestamp(ctx),
         .MyId => handleMyId(ctx),
@@ -487,67 +613,7 @@ fn handleClose(ctx: *ServerContext, args: anytype) ?SyscallResponse {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (0)) } };
     }
 
-    return startAsyncClose(ctx, caller, client_ctx, fd_index);
-}
-
-fn startAsyncClose(
-    ctx: *ServerContext,
-    caller: *sos.client_t,
-    client_ctx: *clients.Client,
-    fd_index: usize,
-) ?SyscallResponse {
-    const table = client_ctx.fileTable();
-    _ = table.getHandle(fd_index) catch |err| {
-        const errno: c_int = mapFileTableError(err);
-        return SyscallResponse{ .Close = .{ .result = -errno } };
-    };
-
-    const cont = continuation.ContinuationPool.alloc() orelse {
-        return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.ENOMEM)) } };
-    };
-
-    const old_reply_cap = ctx.reply.*;
-    const old_reply_ut = ctx.reply_ut.*;
-    const new_reply_ut = sos.alloc_retype(ctx.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
-    if (new_reply_ut == null) {
-        continuation.ContinuationPool.free(cont);
-        ctx.reply.* = old_reply_cap;
-        ctx.reply_ut.* = old_reply_ut;
-        return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.ENOMEM)) } };
-    }
-
-    cont.client = caller;
-    cont.reply = old_reply_cap;
-    cont.reply_ut = old_reply_ut;
-    cont.resume_fn = fileOpResume;
-    cont.state = .{
-        .FileOp = worker.FileOpState{
-            .params = .{ .Close = .{
-                .fd = fd_index,
-                .client_id = @intCast(client_ctx.id),
-            } },
-        },
-    };
-
-    var file_op_state = &cont.state.FileOp;
-    file_op_state.reset();
-
-    continuation.FileOpQueue.enqueue(cont);
-
-    const enqueue_rc: c_int = worker.workerEnqueue(file_op_state);
-    if (enqueue_rc < 0) {
-        continuation.FileOpQueue.remove(cont);
-        ctx.reply.* = old_reply_cap;
-        ctx.reply_ut.* = old_reply_ut;
-        sos.ut_free(new_reply_ut.?);
-        cont.cleanup();
-        continuation.ContinuationPool.free(cont);
-        return SyscallResponse{ .Close = .{ .result = @as(c_int, (enqueue_rc)) } };
-    }
-
-    ctx.have_reply.* = false;
-    ctx.reply_ut.* = new_reply_ut.?;
-    return null;
+    return ctx.startAsyncClose(caller, client_ctx, fd_index);
 }
 
 /// Resume function for blocked read operations
@@ -796,6 +862,50 @@ fn handleWrite(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     return ctx.startAsyncWrite(caller, client_ctx, vm_handle, fd_index, user_buf_addr, req);
 }
 
+fn handleStat(ctx: *ServerContext, args: anytype) ?SyscallResponse {
+    const caller = ctx.caller orelse return .{ .Stat = .{ .result = -sos.EINVAL } };
+    const client_id: usize = @intCast(caller.id);
+    if (client_id >= MAX_CLIENTS) return .{ .Stat = .{ .result = -sos.EINVAL } };
+
+    const client_ctx = clients.get(client_id) orelse return .{ .Stat = .{ .result = -sos.EINVAL } };
+    const state = client_ctx.ioState();
+    ensureStdio(state);
+
+    const path_len = std.math.cast(usize, args.path_len) orelse return .{ .Stat = .{ .result = -sos.EINVAL } };
+    const out_len = std.math.cast(usize, args.out_len) orelse return .{ .Stat = .{ .result = -sos.EINVAL } };
+
+    if (path_len == 0 or path_len > worker.OPEN_PATH_CAPACITY) {
+        return .{ .Stat = .{ .result = -sos.EINVAL } };
+    }
+
+    const stat_size = @sizeOf(sos_types.sos_stat_t);
+    if (out_len < stat_size) {
+        return .{ .Stat = .{ .result = -sos.ENOMEM } };
+    }
+
+    const vm_handle = ctx.vm_handle orelse return .{ .Stat = .{ .result = -sos.EINVAL } };
+
+    var path_buf: [worker.OPEN_PATH_CAPACITY:0]u8 = undefined;
+    @memset(path_buf[0..], 0);
+
+    const copied = vm_handle.copyCStringFromClient(@intCast(args.path_addr), path_buf[0..path_buf.len]) catch |err| {
+        const errno: c_int = vm.vmErrorToErrno(err);
+        return .{ .Stat = .{ .result = -errno } };
+    };
+
+    if (copied == 0) {
+        return .{ .Stat = .{ .result = -sos.EINVAL } };
+    }
+    if (copied >= path_buf.len) {
+        return .{ .Stat = .{ .result = -sos.ENAMETOOLONG } };
+    }
+
+    path_buf[copied] = 0;
+    const path_slice = path_buf[0..copied];
+
+    return ctx.startAsyncStat(caller, client_ctx, vm_handle, path_slice, @intCast(args.out_addr), out_len);
+}
+
 fn handleTimestamp(ctx: *ServerContext) SyscallResponse {
     _ = ctx;
     const timestamp = sos.ts_get_timestamp();
@@ -907,6 +1017,7 @@ const cimports = @import("cimports");
 const c = cimports.c;
 const sel4 = cimports.sel4;
 const sos = cimports.sos;
+const sos_types = cimports.sos_types;
 
 const vm = @import("vm/mod.zig");
 pub const worker = @import("worker.zig");

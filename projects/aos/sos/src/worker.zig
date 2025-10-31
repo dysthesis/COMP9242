@@ -2,6 +2,7 @@ const std = @import("std");
 const sel4 = @import("cimports").sel4;
 const sos = @import("cimports").sos;
 const c = @import("cimports").c;
+const sos_types = @import("cimports").sos_types;
 const types = @import("worker_types.zig");
 const clients = @import("client.zig");
 const file = @import("file.zig");
@@ -321,9 +322,25 @@ pub const Worker = struct {
             file_op.completeErrno(sos.EINVAL);
             return;
         }
-        // TODO: Implement this
-        _ = c.printf("[worker] workerStatFile called (not yet implemented)\n");
-        file_op.completeErrno(sos.ENOSYS);
+        const params = &file_op.params.Stat;
+        _ = clients.get(@intCast(params.client_id)) orelse {
+            file_op.completeErrno(sos.EINVAL);
+            return;
+        };
+
+        if (params.out_len < @sizeOf(sos_types.sos_stat_t)) {
+            file_op.completeErrno(sos.ENOMEM);
+            return;
+        }
+
+        const path_ptr: [*:0]const u8 = @ptrCast(&params.path);
+        nfs_handler.statSync(path_ptr, &file_op.stat_result) catch |err| {
+            const errno = mapNfsError(err);
+            file_op.completeErrno(errno);
+            return;
+        };
+
+        file_op.completeStatus(0);
     }
 
     fn workerOpenDir(self: *Self, file_op: *FileOpState) void {
