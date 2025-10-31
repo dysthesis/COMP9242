@@ -4,6 +4,128 @@ const PAGE_SIZE_4K: usize = sos.PAGE_SIZE_4K;
 const console_name = "console";
 const console_name_ptr: [*c]const u8 = @ptrCast(&console_name[0]);
 
+const NormalisePathError = error{
+    NameTooLong,
+};
+
+const Path = struct {
+    buf: [worker.OPEN_PATH_CAPACITY:0]u8,
+    len: usize,
+
+    pub fn initFromSlice(input: []const u8) NormalisePathError!Path {
+        var self = Path{
+            .buf = [_:0]u8{0} ** worker.OPEN_PATH_CAPACITY,
+            .len = 0,
+        };
+        self.len = try normaliseInto(self.buf[0..], input);
+        return self;
+    }
+
+    pub fn isEmpty(self: *const Path) bool {
+        return self.len == 0;
+    }
+
+    pub fn copyTo(self: *const Path, dest: []u8) NormalisePathError!void {
+        if (self.len >= dest.len) return error.NameTooLong;
+        if (self.len > 0) {
+            std.mem.copyForwards(u8, dest[0..self.len], self.buf[0..self.len]);
+        }
+        dest[self.len] = 0;
+    }
+
+    pub fn cStr(self: *const Path) [*:0]const u8 {
+        return @ptrCast(&self.buf);
+    }
+};
+
+fn normaliseInto(out: []u8, input: []const u8) NormalisePathError!usize {
+    if (out.len == 0) return error.NameTooLong;
+
+    const absolute = input.len > 0 and input[0] == '/';
+    var out_len: usize = 0;
+    var depth: usize = 0;
+    var segment_end: [worker.OPEN_PATH_CAPACITY]usize = undefined;
+    var segments: usize = 0;
+
+    if (absolute) {
+        out[0] = '/';
+        out_len = 1;
+    }
+
+    var i: usize = 0;
+    while (i < input.len) {
+        while (i < input.len and (input[i] == '/' or input[i] == 0)) : (i += 1) {}
+        if (i >= input.len) break;
+
+        const start = i;
+        while (i < input.len and input[i] != '/' and input[i] != 0) : (i += 1) {}
+        const segment = input[start..i];
+
+        if (segment.len == 0 or std.mem.eql(u8, segment, ".")) {
+            continue;
+        }
+
+        if (std.mem.eql(u8, segment, "..")) {
+            if (depth > 0) {
+                depth -= 1;
+                out_len = segment_end[depth];
+                if (absolute and out_len == 0) {
+                    out[out_len] = '/';
+                    out_len = 1;
+                }
+            } else if (!absolute) {
+                if (segments > 0) {
+                    if (out_len >= out.len) return error.NameTooLong;
+                    out[out_len] = '/';
+                    out_len += 1;
+                }
+                if (out_len + 2 >= out.len) return error.NameTooLong;
+                out[out_len] = '.';
+                out[out_len + 1] = '.';
+                out_len += 2;
+                segment_end[depth] = out_len;
+                depth += 1;
+                segments += 1;
+            }
+            continue;
+        }
+
+        const base_len: usize = if (absolute) 1 else 0;
+        if (out_len > base_len and segments > 0) {
+            if (out_len >= out.len) return error.NameTooLong;
+            out[out_len] = '/';
+            out_len += 1;
+        } else if (!absolute and segments > 0) {
+            if (out_len >= out.len) return error.NameTooLong;
+            out[out_len] = '/';
+            out_len += 1;
+        }
+
+        if (out_len + segment.len >= out.len) return error.NameTooLong;
+        std.mem.copyForwards(u8, out[out_len .. out_len + segment.len], segment);
+        out_len += segment.len;
+
+        if (depth >= segment_end.len) return error.NameTooLong;
+        segment_end[depth] = out_len;
+        depth += 1;
+        segments += 1;
+    }
+
+    if (absolute and out_len == 1) {
+        out[out_len] = 0;
+        return out_len;
+    }
+
+    if (!absolute and segments == 0) {
+        out[0] = 0;
+        return 0;
+    }
+
+    if (out_len >= out.len) return error.NameTooLong;
+    out[out_len] = 0;
+    return out_len;
+}
+
 fn mapFileTableError(err: file.FileTableError) c_int {
     return switch (err) {
         file.FileTableError.TableFull => sos.EMFILE,
@@ -239,10 +361,42 @@ const ServerContext = struct {
         var file_op_state = &cont.state.FileOp;
         file_op_state.reset();
 
+        const normalized_path = Path.initFromSlice(path) catch |err| {
+            const errno: c_int = switch (err) {
+                error.NameTooLong => sos.ENAMETOOLONG,
+            };
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Open = .{ .result = -errno } };
+        };
+
+        if (normalized_path.isEmpty()) {
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Open = .{ .result = -sos.EINVAL } };
+        }
+
         var open_params = &file_op_state.params.Open;
-        @memset(open_params.path[0..], 0);
-        std.mem.copyForwards(u8, open_params.path[0..path.len], path);
-        open_params.path[path.len] = 0;
+        normalized_path.copyTo(open_params.path[0..]) catch |err| {
+            const errno: c_int = switch (err) {
+                error.NameTooLong => sos.ENAMETOOLONG,
+            };
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Open = .{ .result = -errno } };
+        };
         open_params.flags = flags;
         open_params.client_id = @intCast(client_ctx.id);
 
@@ -456,10 +610,42 @@ const ServerContext = struct {
         file_op_state.reset();
         file_op_state.vm_handle = vm_handle;
 
+        const normalized_path = Path.initFromSlice(path) catch |err| {
+            const errno: c_int = switch (err) {
+                error.NameTooLong => sos.ENAMETOOLONG,
+            };
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Stat = .{ .result = -errno } };
+        };
+
+        if (normalized_path.isEmpty()) {
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Stat = .{ .result = -sos.EINVAL } };
+        }
+
         var stat_params = &file_op_state.params.Stat;
-        @memset(stat_params.path[0..], 0);
-        std.mem.copyForwards(u8, stat_params.path[0..path.len], path);
-        stat_params.path[path.len] = 0;
+        normalized_path.copyTo(stat_params.path[0..]) catch |err| {
+            const errno: c_int = switch (err) {
+                error.NameTooLong => sos.ENAMETOOLONG,
+            };
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Stat = .{ .result = -errno } };
+        };
 
         continuation.FileOpQueue.enqueue(cont);
 

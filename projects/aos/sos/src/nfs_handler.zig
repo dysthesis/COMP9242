@@ -1,6 +1,9 @@
 const NFS_POOL_SIZE = 4;
 const NFS_TIMEOUT_MS = 10000; // 10 seconds
 
+const O_CREAT: c_int = 0o100;
+const DEFAULT_CREATE_MODE: c_int = 0o600; // rw-------
+
 pub const NfsOperation = enum {
     Open,
     Read,
@@ -190,10 +193,6 @@ pub export fn nfsTimeoutWatchdog() callconv(.c) void {
 }
 
 /// Callback parameter passed to libnfs via private_data
-const CallbackParam = struct {
-    slot: *PoolSlot,
-};
-
 /// Generic NFS callback
 pub export fn nfsGenericCallbackZig(
     err: c_int,
@@ -208,10 +207,9 @@ pub export fn nfsGenericCallbackZig(
         return;
     }
 
-    const param: *CallbackParam = @ptrCast(@alignCast(private_data));
-    const slot = param.slot;
+    const slot: *PoolSlot = @ptrCast(@alignCast(private_data));
 
-    if (err != 0) {
+    if (err < 0) {
         // Operation failed
         _ = c.printf("[nfs_callback] Operation %u failed with error %d\n", @as(c_uint, @intFromEnum(slot.operation)), err);
         slot.status = err;
@@ -295,12 +293,16 @@ pub fn openSync(path: [*:0]const u8, flags: c_int) !*anyopaque {
     defer nfs_pool.release(slot);
 
     slot.operation = .Open;
+    slot.read_buf = null;
+    slot.stat_out = null;
 
-    // Allocate callback param
-    // TODO: This is leaked for now
-    var param = CallbackParam{ .slot = slot };
+    const private_data: ?*anyopaque = @as(?*anyopaque, @ptrCast(slot));
+    const mode: c_int = if ((flags & O_CREAT) != 0)
+        DEFAULT_CREATE_MODE
+    else
+        0;
 
-    const rc = nfs_open_async(nfs_ctx, path, flags, nfs_callback_c_bridge, @ptrCast(&param));
+    const rc = nfs_open2_async(nfs_ctx, path, flags, mode, nfs_callback_c_bridge, private_data);
     if (rc < 0) {
         _ = c.printf("[nfs] nfs_open_async failed: %d\n", rc);
         return error.NFSOperationFailed;
@@ -322,11 +324,16 @@ pub fn readSync(fh: *anyopaque, buf: [*]u8, count: usize) !usize {
 
     slot.operation = .Read;
     slot.read_buf = buf;
-
-    var param = CallbackParam{ .slot = slot };
+    slot.stat_out = null;
 
     const fh_typed: *nfsfh = @ptrCast(@alignCast(fh));
-    const rc = nfs_read_async(nfs_ctx, fh_typed, count, nfs_callback_c_bridge, @ptrCast(&param));
+    const rc = nfs_read_async(
+        nfs_ctx,
+        fh_typed,
+        count,
+        nfs_callback_c_bridge,
+        @as(?*anyopaque, @ptrCast(slot)),
+    );
     if (rc < 0) {
         _ = c.printf("[nfs] nfs_read_async failed: %d\n", rc);
         return error.NFSOperationFailed;
@@ -347,11 +354,18 @@ pub fn writeSync(fh: *anyopaque, buf: [*]const u8, count: usize) !usize {
     defer nfs_pool.release(slot);
 
     slot.operation = .Write;
-
-    var param = CallbackParam{ .slot = slot };
+    slot.read_buf = null;
+    slot.stat_out = null;
 
     const fh_typed: *nfsfh = @ptrCast(@alignCast(fh));
-    const rc = nfs_write_async(nfs_ctx, fh_typed, count, buf, nfs_callback_c_bridge, @ptrCast(&param));
+    const rc = nfs_write_async(
+        nfs_ctx,
+        fh_typed,
+        count,
+        buf,
+        nfs_callback_c_bridge,
+        @as(?*anyopaque, @ptrCast(slot)),
+    );
     if (rc < 0) {
         _ = c.printf("[nfs] nfs_write_async failed: %d\n", rc);
         return error.NFSOperationFailed;
@@ -372,11 +386,16 @@ pub fn closeSync(fh: *anyopaque) !void {
     defer nfs_pool.release(slot);
 
     slot.operation = .Close;
-
-    var param = CallbackParam{ .slot = slot };
+    slot.read_buf = null;
+    slot.stat_out = null;
 
     const fh_typed: *nfsfh = @ptrCast(@alignCast(fh));
-    const rc = nfs_close_async(nfs_ctx, fh_typed, nfs_callback_c_bridge, @ptrCast(&param));
+    const rc = nfs_close_async(
+        nfs_ctx,
+        fh_typed,
+        nfs_callback_c_bridge,
+        @as(?*anyopaque, @ptrCast(slot)),
+    );
     if (rc < 0) {
         _ = c.printf("[nfs] nfs_close_async failed: %d\n", rc);
         return error.NFSOperationFailed;
@@ -396,10 +415,14 @@ pub fn statSync(path: [*:0]const u8, stat_out: *sos_types.sos_stat_t) !void {
 
     slot.operation = .Stat;
     slot.stat_out = stat_out;
+    slot.read_buf = null;
 
-    var param = CallbackParam{ .slot = slot };
-
-    const rc = nfs_stat_async(nfs_ctx, path, nfs_callback_c_bridge, @ptrCast(&param));
+    const rc = nfs_stat_async(
+        nfs_ctx,
+        path,
+        nfs_callback_c_bridge,
+        @as(?*anyopaque, @ptrCast(slot)),
+    );
     if (rc < 0) {
         _ = c.printf("[nfs] nfs_stat_async failed: %d\n", rc);
         return error.NFSOperationFailed;
@@ -418,10 +441,15 @@ pub fn opendirSync(path: [*:0]const u8) !*anyopaque {
     defer nfs_pool.release(slot);
 
     slot.operation = .OpenDir;
+    slot.read_buf = null;
+    slot.stat_out = null;
 
-    var param = CallbackParam{ .slot = slot };
-
-    const rc = nfs_opendir_async(nfs_ctx, path, nfs_callback_c_bridge, @ptrCast(&param));
+    const rc = nfs_opendir_async(
+        nfs_ctx,
+        path,
+        nfs_callback_c_bridge,
+        @as(?*anyopaque, @ptrCast(slot)),
+    );
     if (rc < 0) {
         _ = c.printf("[nfs] nfs_opendir_async failed: %d\n", rc);
         return error.NFSOperationFailed;
@@ -457,7 +485,7 @@ const nfs_cb = *const fn (c_int, ?*anyopaque, ?*anyopaque, ?*anyopaque) callconv
 extern fn get_nfs_context() ?*nfs_context;
 extern fn nfs_is_mounted() bool;
 
-extern fn nfs_open_async(nfs_ctx: ?*nfs_context, path: [*:0]const u8, flags: c_int, cb: nfs_cb, private_data: ?*anyopaque) c_int;
+extern fn nfs_open2_async(nfs_ctx: ?*nfs_context, path: [*:0]const u8, flags: c_int, mode: c_int, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_read_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, count: u64, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_write_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, count: u64, buf: [*]const u8, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_close_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, cb: nfs_cb, private_data: ?*anyopaque) c_int;

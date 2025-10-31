@@ -143,6 +143,8 @@ pub const Continuation = struct {
                     .Status => |status| return self.failFileOp(@intCast(status)),
                 };
 
+                _ = c.printf("[cont] file read complete bytes=%zu\n", bytes);
+
                 if (bytes > file_op.payload.len) {
                     return self.failFileOp(sos.EIO);
                 }
