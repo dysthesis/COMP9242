@@ -49,7 +49,7 @@ pub const WorkItem = struct {
 
     const Self = @This();
 
-    pub fn process(self: Self, worker: anytype) void {
+    pub fn process(self: Self, worker: *Worker) void {
         switch (std.meta.activeTag(self.file_op.params)) {
             .Open => worker.workerOpenFile(self.file_op),
             .Close => worker.workerCloseFile(self.file_op),
@@ -58,6 +58,7 @@ pub const WorkItem = struct {
             .Stat => worker.workerStatFile(self.file_op),
             .OpenDir => worker.workerOpenDir(self.file_op),
             .ReadDir => worker.workerReadDir(self.file_op),
+            .GetDirent => worker.workerGetDirent(self.file_op),
         }
     }
 };
@@ -363,6 +364,17 @@ pub const Worker = struct {
         }
         // TODO: Implement this
         _ = c.printf("[worker] workerReadDir called (not yet implemented)\n");
+    }
+
+    fn workerGetDirent(self: *Self, file_op: *FileOpState) void {
+        _ = self;
+        const tag = std.meta.activeTag(file_op.params);
+        if (tag != .GetDirent) {
+            _ = c.printf("[worker] workerGetDirent received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            return;
+        }
+        // TODO: Implement this
+        _ = c.printf("[worker] workerGetDirent called (not yet implemented)\n");
     }
 };
 

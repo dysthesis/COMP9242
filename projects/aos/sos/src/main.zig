@@ -131,6 +131,72 @@ const ServerContext = struct {
         return .{ .Open = .{ .result = fd } };
     }
 
+    fn startAsyncGetDirent(
+        self: *ServerContext,
+        caller: *sos.client_t,
+        client_ctx: *clients.Client,
+        vm_handle: *vm.VmHandle,
+        index_minus_console: usize,
+        out_addr: usize,
+        out_len: usize,
+    ) ?SyscallResponse {
+        const cont = continuation.ContinuationPool.alloc() orelse {
+            return .{ .GetDirent = .{ .result = -sos.ENOMEM } };
+        };
+
+        const old_reply_cap = self.reply.*;
+        const old_reply_ut = self.reply_ut.*;
+        const new_reply_ut = sos.alloc_retype(self.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
+        if (new_reply_ut == null) {
+            continuation.ContinuationPool.free(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            return .{ .GetDirent = .{ .result = -sos.ENOMEM } };
+        }
+
+        const capacity = @min(out_len - 1, worker.WRITE_BUFFER_CAPACITY);
+
+        cont.client = caller;
+        cont.reply = old_reply_cap;
+        cont.reply_ut = old_reply_ut;
+        cont.resume_fn = fileOpResume;
+        cont.state = .{
+            .FileOp = worker.FileOpState{
+                .params = .{
+                    .GetDirent = .{
+                        .index = index_minus_console,
+                        .capacity = capacity,
+                        .client_id = @intCast(client_ctx.id),
+                        .out_buf = out_addr,
+                        .out_len = out_len,
+                    },
+                },
+            },
+        };
+
+        var state = &cont.state.FileOp;
+        state.reset();
+        state.vm_handle = vm_handle;
+        state.payload_len = 0;
+
+        continuation.FileOpQueue.enqueue(cont);
+
+        const rc: c_int = worker.workerEnqueue(state);
+        if (rc < 0) {
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return .{ .GetDirent = .{ .result = rc } };
+        }
+
+        self.have_reply.* = false;
+        self.reply_ut.* = new_reply_ut.?;
+        return null;
+    }
+
     fn startAsyncOpen(
         self: *ServerContext,
         caller: *sos.client_t,
@@ -540,6 +606,7 @@ fn handleDecodedSyscall(ctx: *ServerContext, syscall: Syscall) ?SyscallResponse 
         .MyId => handleMyId(ctx),
         .Brk => |args| handleBrk(ctx, args),
         .Mmap => |args| handleMmap(ctx, args),
+        .GetDirent => |args| handleGetDirent(ctx, args),
     };
 }
 
@@ -557,6 +624,41 @@ pub export fn checkCompletedFileOps() callconv(.c) void {
             continuation.ContinuationPool.free(cont);
         }
     }
+}
+
+fn handleGetDirent(ctx: *ServerContext, args: anytype) ?SyscallResponse {
+    const caller = ctx.caller orelse return .{ .GetDirent = .{ .result = -sos.EINVAL } };
+    const client_id: usize = @intCast(caller.id);
+    if (client_id >= MAX_CLIENTS) return .{ .GetDirent = .{ .result = -sos.EINVAL } };
+
+    const client_ctx = clients.get(client_id) orelse return .{ .GetDirent = .{ .result = -sos.EINVAL } };
+    _ = client_ctx.ioState();
+
+    const vm_handle = ctx.vm_handle orelse return .{ .GetDirent = .{ .result = -sos.EINVAL } };
+
+    const idx: usize = @intCast(args.index);
+    const out_addr: usize = @intCast(args.buf_addr);
+    const out_len: usize = @intCast(args.buf_size);
+
+    if (out_len == 0) return .{ .GetDirent = .{ .result = -sos.EINVAL } };
+
+    if (idx == 0) {
+        const name = console_name;
+        const need: usize = name.len;
+        if (out_len < need + 1) {
+            return .{ .GetDirent = .{ .result = -sos.ENAMETOOLONG } };
+        }
+        vm_handle.copyToClient(name, out_addr) catch |err| {
+            return .{ .GetDirent = .{ .result = -vm.vmErrorToErrno(err) } };
+        };
+        const nul: [1]u8 = .{0};
+        vm_handle.copyToClient(nul[0..], out_addr + need) catch |err| {
+            return .{ .GetDirent = .{ .result = -vm.vmErrorToErrno(err) } };
+        };
+        return .{ .GetDirent = .{ .result = @intCast(need) } };
+    }
+
+    return ctx.startAsyncGetDirent(caller, client_ctx, vm_handle, idx - 1, out_addr, out_len);
 }
 
 fn handleClose(ctx: *ServerContext, args: anytype) ?SyscallResponse {

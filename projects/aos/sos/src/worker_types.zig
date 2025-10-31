@@ -12,6 +12,7 @@ pub const WorkType = enum(u8) {
     Stat,
     OpenDir,
     ReadDir,
+    GetDirent,
 };
 
 pub const OPEN_PATH_CAPACITY: usize = 256;
@@ -59,6 +60,14 @@ pub const ReadDirParams = struct {
     client_id: u32,
 };
 
+pub const GetDirentParams = struct {
+    index: usize,
+    capacity: usize,
+    client_id: u16,
+    out_buf: usize,
+    out_len: usize,
+};
+
 pub const WorkParams = union(WorkType) {
     Open: OpenParams,
     Close: CloseParams,
@@ -67,6 +76,7 @@ pub const WorkParams = union(WorkType) {
     Stat: StatParams,
     OpenDir: OpenDirParams,
     ReadDir: ReadDirParams,
+    GetDirent: GetDirentParams,
 };
 
 pub const FileOpResult = union(enum) {
