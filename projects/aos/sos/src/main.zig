@@ -145,10 +145,6 @@ const ServerContext = struct {
             return .{ .Open = .{ .result = -sos.EINVAL } };
         }
 
-        if (want_read and sos.global_console.reader_in_use) {
-            return .{ .Open = .{ .result = -sos.EBUSY } };
-        }
-
         var fd: c_int = -1;
         var i: usize = 0;
         while (i < SOS_MAX_OPEN_FILES) : (i += 1) {
