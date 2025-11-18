@@ -906,6 +906,7 @@ NORETURN void *main_continued(UNUSED void *arg) {
   /* Initialise NFS handler pool */
   printf("NFS handler init\n");
   nfs_handler_init();
+  nfs_pagecache_init(get_nfs_context(), NULL);
 
   /* Initialise worker thread infrastructure */
   printf("Worker init\n");

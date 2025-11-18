@@ -280,6 +280,7 @@ void network_init(cspace_t *cspace, void *timer_vaddr, seL4_CPtr irq_ntfn) {
 
   nfs = nfs_init_context();
   ZF_LOGF_IF(nfs == NULL, "Failed to init NFS context");
+  nfs_set_pagecache(nfs, 128);
 
   nfs_set_debug(nfs, 10);
   sprintf(nfs_dir_buf, "%s-%d-root", SOS_NFS_DIR, ip_octet);
