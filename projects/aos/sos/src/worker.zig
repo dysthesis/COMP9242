@@ -32,6 +32,8 @@ fn mapNfsError(err: anyerror) c_int {
         error.PoolExhausted => sos.EAGAIN,
         error.NotFound => sos.ENOENT,
         error.PermissionDenied => sos.EACCES,
+        error.OutOfMemory => sos.ENOMEM,
+        error.NetworkUnreachable => sos.ENETUNREACH,
         error.NFSOperationFailed => sos.EIO,
         error.OperationFailed => sos.EIO,
         else => sos.EIO,
