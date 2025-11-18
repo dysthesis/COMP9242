@@ -407,7 +407,7 @@ pub const Client = struct {
         return (self.metadata_base - allocator.METADATA_REGION_START) / allocator.METADATA_REGION_BYTES;
     }
 
-    pub fn leaseMmapRegion(self: *Self, base: usize, prot: c_int) super.VmError!*region.Region {
+    pub fn leaseMmapRegion(self: *Self, base: usize, prot: c_int, backing: region.Backing) super.VmError!*region.Region {
         if (self.active_mmaps >= super.MAX_MMAP_REGIONS) {
             _ = c.printf("[vm_mmap] no free region slots (active=%lu, max=%lu)\n", @as(c_ulong, @intCast(self.active_mmaps)), @as(c_ulong, @intCast(super.MAX_MMAP_REGIONS)));
             return super.VmError.Capacity;
@@ -423,6 +423,7 @@ pub const Client = struct {
         node.* = .{ .rb = undefined, .reg = .{} };
         node.reg.reset(region.RegionKind.Mmap);
         node.reg.configure(base, region.RegionKind.Mmap, prot);
+        node.reg.backing = backing;
 
         if (self.addr_space.findRegion(base)) |exist| {
             if (exist.reg.contains(base)) {

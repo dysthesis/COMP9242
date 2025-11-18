@@ -12,6 +12,20 @@ const worker = @import("worker.zig");
 
 const VmFaultResult = vm.VmFaultResult;
 
+const PagerInstrumentation = struct {
+    deferred_faults: usize = 0,
+    dedup_hits: usize = 0,
+    job_submissions: usize = 0,
+    job_completions: usize = 0,
+    job_failures: usize = 0,
+};
+
+var pager_stats: PagerInstrumentation = .{};
+
+pub fn pagerStatsSnapshot() PagerInstrumentation {
+    return pager_stats;
+}
+
 const MAX_PAGER_JOBS = pager.MAX_PAGER_REQUESTS;
 const PagerJobMeta = struct {
     key: pager.PagerRequestTable.Key,
@@ -104,6 +118,8 @@ fn tryDeferPager(
         return .fatal;
     };
 
+    pager_stats.deferred_faults += 1;
+
     const cont = continuation.ContinuationPool.alloc() orelse {
         _ = c.printf("[pager] continuation pool exhausted for addr=0x%lx\n", @as(c_ulong, @intCast(page_base)));
         return .fatal;
@@ -136,11 +152,14 @@ fn tryDeferPager(
                 reply.* = old_reply;
                 reply_ut.* = old_reply_ut;
                 sos.ut_free(new_reply_ut.?);
+                pager_stats.job_failures += 1;
                 return .fatal;
             };
+            pager_stats.job_submissions += 1;
         },
         .Duplicate => |info| {
             _ = c.printf("[pager] dedup hit client=%u page=0x%lx\n", client_id, @as(c_ulong, @intCast(info.key.page_base)));
+            pager_stats.dedup_hits += 1;
         },
         .TableFull, .QueueFailed, .InvalidRegion => {
             reply.* = old_reply;
@@ -148,6 +167,7 @@ fn tryDeferPager(
             sos.ut_free(new_reply_ut.?);
             cont.cleanup();
             continuation.ContinuationPool.free(cont);
+            pager_stats.job_failures += 1;
             return .fatal;
         },
     }
@@ -168,7 +188,10 @@ fn submitPageFillJob(
     tracker: *region.Region,
     key: pager.PagerRequestTable.Key,
 ) !void {
-    const slot = acquirePagerJobSlot() orelse return error.JobPoolExhausted;
+    const slot = acquirePagerJobSlot() orelse {
+        pager_stats.job_failures += 1;
+        return error.JobPoolExhausted;
+    };
     cont.state.PageFault.job_slot = slot.index;
 
     pager_job_meta[slot.index] = .{
@@ -246,6 +269,30 @@ pub fn pagerPollCompletions() void {
         if (!job_state.isCompleted()) continue;
         processPagerJob(idx, job_state);
     }
+
+    if (pager_stats.job_completions != 0 and pager_stats.job_completions % 8 == 0) {
+        logPagerStats();
+    }
+}
+
+fn logPagerStats() void {
+    _ = c.printf(
+        "[pager] stats: deferred=%lu dedup=%lu submissions=%lu completions=%lu failures=%lu active=%lu\n",
+        @as(c_ulong, @intCast(pager_stats.deferred_faults)),
+        @as(c_ulong, @intCast(pager_stats.dedup_hits)),
+        @as(c_ulong, @intCast(pager_stats.job_submissions)),
+        @as(c_ulong, @intCast(pager_stats.job_completions)),
+        @as(c_ulong, @intCast(pager_stats.job_failures)),
+        @as(c_ulong, @intCast(activePagerJobs())),
+    );
+}
+
+fn activePagerJobs() usize {
+    var count: usize = 0;
+    for (pager_job_used) |used| {
+        if (used) count += 1;
+    }
+    return count;
 }
 
 fn processPagerJob(idx: usize, job_state: *worker.FileOpState) void {
@@ -302,6 +349,7 @@ fn finalisePagerJob(idx: usize, meta: PagerJobMeta, errno: c_int) void {
 
     pager_job_states[idx].reset();
     releasePagerJobSlot(idx);
+    pager_stats.job_completions += 1;
 }
 
 pub const PagerWaiterResult = union(enum) {

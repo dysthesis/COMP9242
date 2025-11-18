@@ -257,18 +257,34 @@ fn markPageAccess(state: *client.Client, vaddr: usize, write: bool) void {
             _ = c.printf("[vm_mmap] zero length invalid\n");
             return VmError.InvalidArgs;
         }
-        if ((flags & sos.MAP_ANONYMOUS) == 0 or (flags & sos.MAP_PRIVATE) == 0) {
-            _ = c.printf("[vm_mmap] unsupported flags combination flags=0x%x\n", flags);
+        if ((flags & sos.MAP_PRIVATE) == 0) {
+            _ = c.printf("[vm_mmap] MAP_PRIVATE required flags=0x%x\n", flags);
             return VmError.Unsupported;
         }
+        const want_anonymous = (flags & sos.MAP_ANONYMOUS) != 0;
         const unsupported_flags = flags & ~(sos.MAP_ANONYMOUS | sos.MAP_PRIVATE);
         if (unsupported_flags != 0) {
             _ = c.printf("[vm_mmap] extra unsupported flags=0x%x\n", unsupported_flags);
             return VmError.Unsupported;
         }
-        if (addr != 0 or offset != 0 or fd != -1) {
-            _ = c.printf("[vm_mmap] unsupported addr/offset/fd addr=0x%lx offset=0x%lx fd=%d\n", @as(c_ulong, @intCast(addr)), @as(c_ulong, @intCast(offset)), fd);
+        if (addr != 0) {
+            _ = c.printf("[vm_mmap] hint addr unsupported addr=0x%lx\n", @as(c_ulong, @intCast(addr)));
             return VmError.Unsupported;
+        }
+        if (want_anonymous) {
+            if (fd != -1 or offset != 0) {
+                _ = c.printf("[vm_mmap] anonymous mapping must use fd=-1 offset=0\n");
+                return VmError.Unsupported;
+            }
+        } else {
+            if (fd < 0) {
+                _ = c.printf("[vm_mmap] file-backed mmap missing fd\n");
+                return VmError.Unsupported;
+            }
+            if ((offset & (PAGE_SIZE_4K - 1)) != 0) {
+                _ = c.printf("[vm_mmap] file-backed offset must be page-aligned offset=0x%lx\n", @as(c_ulong, @intCast(offset)));
+                return VmError.InvalidArgs;
+            }
         }
 
         const aligned = alignForward(length, PAGE_SIZE_4K);
@@ -290,28 +306,39 @@ fn markPageAccess(state: *client.Client, vaddr: usize, write: bool) void {
         }
 
         const base = state.mmap_next;
-        const tracker = state.leaseMmapRegion(base, prot) catch |err| {
+        const backing_info: region.Backing = if (want_anonymous)
+            .Anonymous
+        else
+            .{ .File = .{ .fd = fd, .offset = offset, .length = aligned } };
+
+        const tracker = state.leaseMmapRegion(base, prot, backing_info) catch |err| {
             return err;
         };
 
-        var cursor = base;
         const end_addr = base + aligned;
-        var map_failed = false;
-        _ = c.printf("[vm_mmap] base=0x%lx end=0x%lx\n", @as(c_ulong, @intCast(base)), @as(c_ulong, @intCast(end_addr)));
-        while (cursor < end_addr) : (cursor += PAGE_SIZE_4K) {
-            _ = c.printf("[vm_mmap] mapping cursor=0x%lx\n", @as(c_ulong, @intCast(cursor)));
-            state.mapAnonymousPage(self, cursor, tracker) catch |err| {
-                const err_code: c_int = vmErrorToErrno(err);
-                _ = c.printf("[vm_mmap] mapAnonymousPage failed cursor=0x%lx errno=%d\n", @as(c_ulong, @intCast(cursor)), err_code);
-                map_failed = true;
-                break;
-            };
-            _ = c.printf("[vm_mmap] mapped cursor=0x%lx\n", @as(c_ulong, @intCast(cursor)));
-        }
+        if (want_anonymous) {
+            var cursor = base;
+            var map_failed = false;
+            _ = c.printf("[vm_mmap] base=0x%lx end=0x%lx\n", @as(c_ulong, @intCast(base)), @as(c_ulong, @intCast(end_addr)));
+            while (cursor < end_addr) : (cursor += PAGE_SIZE_4K) {
+                _ = c.printf("[vm_mmap] mapping cursor=0x%lx\n", @as(c_ulong, @intCast(cursor)));
+                state.mapAnonymousPage(self, cursor, tracker) catch |err| {
+                    const err_code: c_int = vmErrorToErrno(err);
+                    _ = c.printf("[vm_mmap] mapAnonymousPage failed cursor=0x%lx errno=%d\n", @as(c_ulong, @intCast(cursor)), err_code);
+                    map_failed = true;
+                    break;
+                };
+                _ = c.printf("[vm_mmap] mapped cursor=0x%lx\n", @as(c_ulong, @intCast(cursor)));
+            }
 
-        if (map_failed) {
-            state.releaseMmapRegion(tracker);
-            return VmError.MapFailed;
+            if (map_failed) {
+                state.releaseMmapRegion(tracker);
+                return VmError.MapFailed;
+            }
+        } else {
+            tracker.start = base;
+            tracker.end = base + aligned;
+            tracker.mapped = true;
         }
 
         state.mmap_next = end_addr;
@@ -352,8 +379,16 @@ fn markPageAccess(state: *client.Client, vaddr: usize, write: bool) void {
         }
 
         if (state.findMmapRegion(base)) |tracker| {
-            try state.mapAnonymousPage(self, base, tracker);
-            return;
+            switch (tracker.backing) {
+                .Anonymous => {
+                    try state.mapAnonymousPage(self, base, tracker);
+                    return;
+                },
+                .File => {
+                    _ = c.printf("[vm_fault] file-backed page needs pager base=0x%lx\n", @as(c_ulong, @intCast(base)));
+                    return VmError.Unsupported;
+                },
+            }
         }
 
         return VmError.Unsupported;
@@ -457,6 +492,7 @@ const sos = cimports.sos;
 const c = cimports.c;
 const sel4 = cimports.sel4;
 pub const client = @import("client.zig");
+const region = @import("region.zig");
 
 const super = @import("mod.zig");
 const Address = super.Address;
