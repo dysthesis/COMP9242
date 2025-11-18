@@ -711,7 +711,7 @@ pub fn resumePageWaiters(head: ?*page.WaitQueue.Node, errno: c_int) void {
             continue;
         };
 
-        const cont = @as(*Continuation, @ptrCast(cont_ptr));
+        const cont = @as(*Continuation, @ptrFromInt(@intFromPtr(cont_ptr)));
         node.clear();
         const event_ptr: ?*anyopaque = @as(?*anyopaque, @ptrCast(&payload));
         WaitQueues.resumeContinuation(cont, event_ptr);

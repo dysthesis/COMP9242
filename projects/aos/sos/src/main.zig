@@ -779,6 +779,7 @@ pub export fn checkCompletedFileOps() callconv(.c) void {
             continuation.ContinuationPool.free(cont);
         }
     }
+    vm_fault.pagerPollCompletions();
 }
 
 fn handleGetDirent(ctx: *ServerContext, args: anytype) ?SyscallResponse {

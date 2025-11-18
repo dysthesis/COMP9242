@@ -13,8 +13,16 @@ const worker = @import("worker.zig");
 const VmFaultResult = vm.VmFaultResult;
 
 const MAX_PAGER_JOBS = pager.MAX_PAGER_REQUESTS;
+const PagerJobMeta = struct {
+    key: pager.PagerRequestTable.Key,
+    page: *page.MappedPage,
+    tracker: *region.Region,
+    vm_handle: *vm.VmHandle,
+};
+
 var pager_job_states: [MAX_PAGER_JOBS]worker.FileOpState = undefined;
 var pager_job_used: [MAX_PAGER_JOBS]bool = [_]bool{false} ** MAX_PAGER_JOBS;
+var pager_job_meta: [MAX_PAGER_JOBS]?PagerJobMeta = [_]?PagerJobMeta{null} ** MAX_PAGER_JOBS;
 
 pub export fn handle_vm_fault(
     vm_handle: *vm.VmHandle,
@@ -123,7 +131,7 @@ fn tryDeferPager(
     switch (enqueue_result) {
         .Reserved => |info| {
             _ = c.printf("[pager] queued primary fill client=%u page=0x%lx\n", client_id, @as(c_ulong, @intCast(info.key.page_base)));
-            submitPageFillJob(vm_handle, info.page, cont, info.tracker) catch {
+            submitPageFillJob(vm_handle, info.page, cont, info.tracker, info.key) catch {
                 rollbackWaiter(info.key, info.page, cont);
                 reply.* = old_reply;
                 reply_ut.* = old_reply_ut;
@@ -158,15 +166,23 @@ fn submitPageFillJob(
     mapped_page: *page.MappedPage,
     cont: *continuation.Continuation,
     tracker: *region.Region,
+    key: pager.PagerRequestTable.Key,
 ) !void {
     const slot = acquirePagerJobSlot() orelse return error.JobPoolExhausted;
     cont.state.PageFault.job_slot = slot.index;
+
+    pager_job_meta[slot.index] = .{
+        .key = key,
+        .page = mapped_page,
+        .tracker = tracker,
+        .vm_handle = vm_handle,
+    };
 
     var job = slot.state;
     job.reset();
     job.params = .{ .PageFill = .{
         .client_id = @intCast(vm_handle.getClient().id),
-        .page_base = cont.state.PageFault.page_base,
+        .page_base = key.page_base,
         .prot = tracker.prot(),
         .region_kind = tracker.attr.kind,
         .want_write = cont.state.PageFault.want_write,
@@ -178,12 +194,11 @@ fn submitPageFillJob(
 
     const rc = worker.workerEnqueue(job);
     if (rc < 0) {
+        pager_job_meta[slot.index] = null;
         releasePagerJobSlot(slot.index);
         cont.state.PageFault.job_slot = null;
         return error.QueueFull;
     }
-
-    _ = mapped_page;
 }
 
 fn rollbackWaiter(
@@ -197,6 +212,7 @@ fn rollbackWaiter(
     _ = mapped_page.waiters.remove(cont_ptr);
     cont.state.PageFault.wait_node.clear();
     if (cont.state.PageFault.job_slot) |idx| {
+        pager_job_meta[idx] = null;
         releasePagerJobSlot(idx);
         cont.state.PageFault.job_slot = null;
     }
@@ -220,6 +236,72 @@ fn acquirePagerJobSlot() ?PagerJobSlot {
 fn releasePagerJobSlot(idx: usize) void {
     if (idx >= pager_job_used.len) return;
     pager_job_used[idx] = false;
+    pager_job_meta[idx] = null;
+}
+
+pub fn pagerPollCompletions() void {
+    for (&pager_job_used, 0..) |used, idx| {
+        if (!used) continue;
+        const job_state = &pager_job_states[idx];
+        if (!job_state.isCompleted()) continue;
+        processPagerJob(idx, job_state);
+    }
+}
+
+fn processPagerJob(idx: usize, job_state: *worker.FileOpState) void {
+    const meta = pager_job_meta[idx] orelse {
+        job_state.reset();
+        releasePagerJobSlot(idx);
+        return;
+    };
+
+    var resume_errno: c_int = 0;
+    switch (job_state.result) {
+        .Status => |value| {
+            if (value != 0) {
+                resume_errno = value;
+            }
+        },
+        .Errno => |errno| resume_errno = errno,
+        else => resume_errno = sos.EIO,
+    }
+
+    if (resume_errno == 0) {
+        resume_errno = installPagerResult(meta, job_state);
+    }
+
+    finalisePagerJob(idx, meta, resume_errno);
+}
+
+fn installPagerResult(meta: PagerJobMeta, job_state: *worker.FileOpState) c_int {
+    const vm_handle = meta.vm_handle;
+    const page_base = meta.key.page_base;
+    const tracker = meta.tracker;
+    const state = vm_handle.ensureVmState();
+
+    state.mapAnonymousPage(vm_handle, page_base, tracker) catch |err| {
+        return vm.vmErrorToErrno(err);
+    };
+
+    const payload = job_state.payloadSlice();
+    if (payload.len > 0) {
+        vm_handle.copyToClient(payload, page_base) catch |err| {
+            return vm.vmErrorToErrno(err);
+        };
+    }
+
+    return 0;
+}
+
+fn finalisePagerJob(idx: usize, meta: PagerJobMeta, errno: c_int) void {
+    const table = pager.global();
+    _ = table.release(meta.key);
+
+    const wait_head = meta.page.waiters.detachAll();
+    continuation.resumePageWaiters(wait_head, errno);
+
+    pager_job_states[idx].reset();
+    releasePagerJobSlot(idx);
 }
 
 pub const PagerWaiterResult = union(enum) {
