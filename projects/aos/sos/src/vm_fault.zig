@@ -8,8 +8,13 @@ const continuation = @import("continuation.zig");
 const pager = @import("vm/pager.zig");
 const region = @import("vm/region.zig");
 const page = @import("vm/page.zig");
+const worker = @import("worker.zig");
 
 const VmFaultResult = vm.VmFaultResult;
+
+const MAX_PAGER_JOBS = pager.MAX_PAGER_REQUESTS;
+var pager_job_states: [MAX_PAGER_JOBS]worker.FileOpState = undefined;
+var pager_job_used: [MAX_PAGER_JOBS]bool = [_]bool{false} ** MAX_PAGER_JOBS;
 
 pub export fn handle_vm_fault(
     vm_handle: *vm.VmHandle,
@@ -118,7 +123,13 @@ fn tryDeferPager(
     switch (enqueue_result) {
         .Reserved => |info| {
             _ = c.printf("[pager] queued primary fill client=%u page=0x%lx\n", client_id, @as(c_ulong, @intCast(info.key.page_base)));
-            // TODO: submit worker job for info.page once pager plumbing exists.
+            submitPageFillJob(vm_handle, info.page, cont, info.tracker) catch {
+                rollbackWaiter(info.key, info.page, cont);
+                reply.* = old_reply;
+                reply_ut.* = old_reply_ut;
+                sos.ut_free(new_reply_ut.?);
+                return .fatal;
+            };
         },
         .Duplicate => |info| {
             _ = c.printf("[pager] dedup hit client=%u page=0x%lx\n", client_id, @as(c_ulong, @intCast(info.key.page_base)));
@@ -142,14 +153,85 @@ fn findPagerRegion(state: *vm.client.Client, page_base: usize) ?*region.Region {
     return state.findMmapRegion(page_base);
 }
 
+fn submitPageFillJob(
+    vm_handle: *vm.VmHandle,
+    mapped_page: *page.MappedPage,
+    cont: *continuation.Continuation,
+    tracker: *region.Region,
+) !void {
+    const slot = acquirePagerJobSlot() orelse return error.JobPoolExhausted;
+    cont.state.PageFault.job_slot = slot.index;
+
+    var job = slot.state;
+    job.reset();
+    job.params = .{ .PageFill = .{
+        .client_id = @intCast(vm_handle.getClient().id),
+        .page_base = cont.state.PageFault.page_base,
+        .prot = tracker.prot(),
+        .region_kind = tracker.attr.kind,
+        .want_write = cont.state.PageFault.want_write,
+        .prefetch = cont.state.PageFault.prefetch,
+        .source = .Anonymous,
+    } };
+    job.vm_handle = vm_handle;
+    job.payload_len = 0;
+
+    const rc = worker.workerEnqueue(job);
+    if (rc < 0) {
+        releasePagerJobSlot(slot.index);
+        cont.state.PageFault.job_slot = null;
+        return error.QueueFull;
+    }
+
+    _ = mapped_page;
+}
+
+fn rollbackWaiter(
+    key: pager.PagerRequestTable.Key,
+    mapped_page: *page.MappedPage,
+    cont: *continuation.Continuation,
+) void {
+    const table = pager.global();
+    _ = table.release(key);
+    const cont_ptr: *anyopaque = @ptrCast(cont);
+    _ = mapped_page.waiters.remove(cont_ptr);
+    cont.state.PageFault.wait_node.clear();
+    if (cont.state.PageFault.job_slot) |idx| {
+        releasePagerJobSlot(idx);
+        cont.state.PageFault.job_slot = null;
+    }
+}
+
+const PagerJobSlot = struct {
+    index: usize,
+    state: *worker.FileOpState,
+};
+
+fn acquirePagerJobSlot() ?PagerJobSlot {
+    for (&pager_job_used, 0..) |*used, idx| {
+        if (!used.*) {
+            used.* = true;
+            return PagerJobSlot{ .index = idx, .state = &pager_job_states[idx] };
+        }
+    }
+    return null;
+}
+
+fn releasePagerJobSlot(idx: usize) void {
+    if (idx >= pager_job_used.len) return;
+    pager_job_used[idx] = false;
+}
+
 pub const PagerWaiterResult = union(enum) {
     Reserved: struct {
         key: pager.PagerRequestTable.Key,
         page: *page.MappedPage,
+        tracker: *region.Region,
     },
     Duplicate: struct {
         key: pager.PagerRequestTable.Key,
         page: *page.MappedPage,
+        tracker: *region.Region,
     },
     TableFull,
     QueueFailed,
@@ -207,8 +289,8 @@ pub fn enqueuePagerWaiter(
 
     const table = pager.global();
     return switch (table.reserve(key)) {
-        .Inserted => .{ .Reserved = .{ .key = key, .page = mapped_page } },
-        .Duplicate => .{ .Duplicate = .{ .key = key, .page = mapped_page } },
+        .Inserted => .{ .Reserved = .{ .key = key, .page = mapped_page, .tracker = tracker.? } },
+        .Duplicate => .{ .Duplicate = .{ .key = key, .page = mapped_page, .tracker = tracker.? } },
         .TableFull => blk: {
             _ = mapped_page.waiters.remove(cont_ptr);
             cont.state.PageFault.wait_node.clear();

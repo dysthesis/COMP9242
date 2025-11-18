@@ -38,6 +38,7 @@ pub const ContinuationState = union(enum) {
         want_write: bool,
         prefetch: bool,
         wait_node: page.WaitQueue.Node = .{},
+        job_slot: ?usize = null,
     },
 };
 
