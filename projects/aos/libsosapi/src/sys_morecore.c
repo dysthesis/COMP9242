@@ -59,3 +59,13 @@ long sys_mmap(va_list ap)
     }
     return (long)result;
 }
+
+long sys_munmap(va_list ap)
+{
+    void *addr = va_arg(ap, void *);
+    size_t length = va_arg(ap, size_t);
+    (void)addr;
+    (void)length;
+    errno = ENOSYS;
+    return -ENOSYS;
+}
