@@ -394,7 +394,7 @@ const ServerContext = struct {
             return SyscallResponse{ .Read = .{ .result = -sos.ENOMEM } };
         }
 
-        const count = @min(requested, worker.WRITE_BUFFER_CAPACITY);
+        const count = requested;
 
         cont.client = caller;
         cont.reply = old_reply_cap;
@@ -474,7 +474,7 @@ const ServerContext = struct {
             return SyscallResponse{ .Write = .{ .result = -sos.ENOMEM } };
         }
 
-        const count = @min(requested, worker.WRITE_BUFFER_CAPACITY);
+        const count = requested;
 
         cont.client = caller;
         cont.reply = old_reply_cap;
@@ -494,19 +494,7 @@ const ServerContext = struct {
         var file_op_state = &cont.state.FileOp;
         file_op_state.reset();
         file_op_state.vm_handle = vm_handle;
-        file_op_state.payload_len = count;
-
-        if (count > 0) {
-            vm_handle.copyFromClient(user_buf, file_op_state.payload[0..count]) catch |err| {
-                const errno: c_int = vm.vmErrorToErrno(err);
-                self.reply.* = old_reply_cap;
-                self.reply_ut.* = old_reply_ut;
-                sos.ut_free(new_reply_ut.?);
-                cont.cleanup();
-                continuation.ContinuationPool.free(cont);
-                return SyscallResponse{ .Write = .{ .result = -errno } };
-            };
-        }
+        file_op_state.payload_len = 0;
 
         continuation.FileOpQueue.enqueue(cont);
 

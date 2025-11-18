@@ -7,6 +7,7 @@ const types = @import("worker_types.zig");
 const clients = @import("client.zig");
 const file = @import("file.zig");
 const nfs_handler = @import("nfs_handler.zig");
+const vm = @import("vm/mod.zig");
 const ROOT_DIR: [:0]const u8 = "/";
 
 const MAX_WORK_QUEUE = 16;
@@ -292,25 +293,43 @@ pub const Worker = struct {
             return;
         };
 
-        const to_read = @min(params.count, WRITE_BUFFER_CAPACITY);
-        if (to_read == 0) {
-            file_op.payload_len = 0;
-            file_op.completeBytes(0);
-            return;
-        }
-
-        const buf_ptr: [*]u8 = @as([*]u8, @ptrCast(&file_op.payload[0]));
-        const read_bytes = nfs_handler.readSync(handle, buf_ptr, to_read) catch |err| {
-            const errno = mapNfsError(err);
-            file_op.completeErrno(errno);
+        const vm_handle = file_op.vm_handle orelse {
+            file_op.completeErrno(sos.EFAULT);
             return;
         };
 
-        _ = c.printf("[worker] read fd=%zu -> %zu bytes\n", params.fd, read_bytes);
+        var remaining = params.count;
+        var total_read: usize = 0;
 
-        file_op.payload_len = read_bytes;
-        fd_entry.offset += read_bytes;
-        file_op.completeBytes(read_bytes);
+        while (remaining > 0) {
+            const chunk = @min(remaining, WRITE_BUFFER_CAPACITY);
+            const buf_ptr: [*]u8 = @as([*]u8, @ptrCast(&file_op.payload[0]));
+            const read_bytes = nfs_handler.readSync(handle, buf_ptr, chunk) catch |err| {
+                const errno = mapNfsError(err);
+                file_op.completeErrno(errno);
+                return;
+            };
+
+            if (read_bytes == 0) {
+                break;
+            }
+
+            vm_handle.copyToClient(buf_ptr[0..read_bytes], params.client_buf + total_read) catch |err| {
+                const errno = vm.vmErrorToErrno(err);
+                file_op.completeErrno(errno);
+                return;
+            };
+
+            total_read += read_bytes;
+            remaining -= read_bytes;
+            if (read_bytes < chunk) {
+                break;
+            }
+        }
+
+        fd_entry.offset += total_read;
+        file_op.payload_len = 0;
+        file_op.completeBytes(total_read);
     }
 
     fn workerWriteFile(self: *Self, file_op: *FileOpState) void {
@@ -349,21 +368,39 @@ pub const Worker = struct {
             return;
         };
 
-        const to_write = @min(params.count, file_op.payload_len);
-        if (to_write == 0) {
-            file_op.completeBytes(0);
-            return;
-        }
-
-        const buf_ptr: [*]const u8 = @as([*]const u8, @ptrCast(&file_op.payload[0]));
-        const written = nfs_handler.writeSync(handle, buf_ptr, to_write) catch |err| {
-            const errno = mapNfsError(err);
-            file_op.completeErrno(errno);
+        const vm_handle = file_op.vm_handle orelse {
+            file_op.completeErrno(sos.EFAULT);
             return;
         };
 
-        fd_entry.offset += written;
-        file_op.completeBytes(written);
+        var remaining = params.count;
+        var total_written: usize = 0;
+
+        while (remaining > 0) {
+            const chunk = @min(remaining, WRITE_BUFFER_CAPACITY);
+            const buf_slice = file_op.payload[0..chunk];
+            vm_handle.copyFromClient(buf_slice, params.client_buf + total_written) catch |err| {
+                const errno = vm.vmErrorToErrno(err);
+                file_op.completeErrno(errno);
+                return;
+            };
+
+            const buf_ptr: [*]const u8 = @as([*]const u8, @ptrCast(&buf_slice[0]));
+            const written = nfs_handler.writeSync(handle, buf_ptr, chunk) catch |err| {
+                const errno = mapNfsError(err);
+                file_op.completeErrno(errno);
+                return;
+            };
+
+            total_written += written;
+            remaining -= written;
+            if (written < chunk) {
+                break;
+            }
+        }
+
+        fd_entry.offset += total_written;
+        file_op.completeBytes(total_written);
     }
 
     fn workerCloseFile(self: *Self, file_op: *FileOpState) void {

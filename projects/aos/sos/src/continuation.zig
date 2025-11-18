@@ -145,17 +145,21 @@ pub const Continuation = struct {
 
                 _ = c.printf("[cont] file read complete bytes=%zu\n", bytes);
 
-                if (bytes > file_op.payload.len) {
-                    return self.failFileOp(sos.EIO);
-                }
-
                 const vm_handle = file_op.vm_handle orelse return self.failFileOp(sos.EFAULT);
                 const params = file_op.params.Read;
-                const payload_slice = file_op.payload[0..bytes];
-                vm_handle.copyToClient(payload_slice, params.client_buf) catch |err| {
-                    const errno = vm.vmErrorToErrno(err);
-                    return self.failFileOp(errno);
-                };
+                if (bytes > 0) {
+                    if (file_op.payload_len == bytes) {
+                        const payload_slice = file_op.payload[0..bytes];
+                        vm_handle.copyToClient(payload_slice, params.client_buf) catch |err| {
+                            const errno = vm.vmErrorToErrno(err);
+                            return self.failFileOp(errno);
+                        };
+                    } else if (file_op.payload_len == 0) {
+                        // Data already copied by worker.
+                    } else {
+                        return self.failFileOp(sos.EIO);
+                    }
+                }
 
                 const result_bytes = std.math.cast(c_int, bytes) orelse return self.failFileOp(sos.EIO);
                 break :blk libipc.SyscallResponse{ .Read = .{ .result = result_bytes } };
