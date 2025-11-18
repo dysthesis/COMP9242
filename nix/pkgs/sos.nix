@@ -38,13 +38,19 @@ in
     hardeningDisable = ["all"];
     enableParallelBuilding = true;
 
+    preConfigure = ''
+      rm -rf build
+    '';
+
     configurePhase = ''
+      runHook preConfigure
       mkdir -p build
       cmake -S . -B build \
         -DAARCH64=TRUE \
         -DCMAKE_TOOLCHAIN_FILE=kernel/gcc.cmake \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -G Ninja
+      runHook postConfigure
     '';
     postPatch = ''
       patchShebangs kernel/tools || true

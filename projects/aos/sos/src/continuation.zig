@@ -527,7 +527,7 @@ pub const WaitQueues = struct {
                         _ = c.printf(
                             "[continuation] ERROR: Page retry unsupported client=%u page=0x%lx\n",
                             pg.client_id,
-                            @as(c.c_ulong, @intCast(pg.page_base)),
+                            @as(c_ulong, @intCast(pg.page_base)),
                         );
                         cont.sendError(sos.EIO);
                         ContinuationPool.free(cont);
