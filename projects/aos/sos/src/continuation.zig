@@ -2,6 +2,8 @@
 pub const MAX_RESPONSE_SIZE: usize = 64;
 
 const worker_types = @import("worker_types.zig");
+const vm = @import("vm/mod.zig");
+const page = vm.page;
 
 /// State specific to the type of operation being suspended.
 pub const ContinuationState = union(enum) {
@@ -27,6 +29,16 @@ pub const ContinuationState = union(enum) {
     Custom: struct {
         data: ?*anyopaque,
     },
+
+    /// Deferred page fault waiting on pager completion
+    PageFault: struct {
+        vm_handle: *vm.VmHandle,
+        fault_addr: usize,
+        page_base: usize,
+        want_write: bool,
+        prefetch: bool,
+        wait_node: page.WaitQueue.Node = .{},
+    },
 };
 
 /// What we are waiting on. Used to index into the appropriate wait queue.
@@ -48,6 +60,12 @@ pub const WaitOn = union(enum) {
 
     /// Waiting for a file operation to complete
     FileOp: struct {},
+
+    /// Waiting for a pager completion on a virtual page
+    Page: struct {
+        client_id: u32,
+        page_base: usize,
+    },
 };
 
 /// Result of a continuation's resume function
@@ -115,6 +133,11 @@ pub const Continuation = struct {
         _ = sos.cspace_delete(&cspace, self.reply);
         sos.cspace_free_slot(&cspace, self.reply);
         sos.ut_free(self.reply_ut);
+
+        switch (self.state) {
+            .PageFault => |*pf| pf.wait_node.clear(),
+            else => {},
+        }
     }
 
     pub fn processFileOpCompletion(self: *Continuation) bool {
@@ -239,6 +262,30 @@ pub const Continuation = struct {
         return true;
     }
 };
+
+pub const PageFaultEvent = extern struct {
+    errno: c_int = 0,
+};
+
+pub fn pageFaultResume(
+    _: *Continuation,
+    event_data: ?*anyopaque,
+    result: *ContinuationResult,
+) callconv(.c) void {
+    var errno: c_int = 0;
+    if (event_data) |payload| {
+        const info: *const PageFaultEvent = @as(*const PageFaultEvent, @ptrCast(payload));
+        errno = info.errno;
+    }
+
+    if (errno != 0) {
+        result.* = .{ .Error = .{ .errno = errno } };
+        return;
+    }
+
+    const msg = sel4.seL4_MessageInfo_new(0, 0, 0, 0);
+    result.* = .{ .Complete = .{ .response = msg } };
+}
 
 // Global cspace defined in main.c, accessible via extern.
 extern var cspace: sos.cspace_t;
@@ -476,6 +523,15 @@ pub const WaitQueues = struct {
                         cont.sendError(sos.ENOSYS);
                         ContinuationPool.free(cont);
                     },
+                    .Page => |pg| {
+                        _ = c.printf(
+                            "[continuation] ERROR: Page retry unsupported client=%u page=0x%lx\n",
+                            pg.client_id,
+                            @as(c.c_ulong, @intCast(pg.page_base)),
+                        );
+                        cont.sendError(sos.EIO);
+                        ContinuationPool.free(cont);
+                    },
                 }
             },
         }
@@ -638,6 +694,30 @@ pub const FileOpQueue = struct {
     }
 };
 
+pub fn resumePageWaiters(head: ?*page.WaitQueue.Node, errno: c_int) void {
+    if (head == null) {
+        return;
+    }
+
+    var payload = PageFaultEvent{ .errno = errno };
+    var node_opt = head;
+    while (node_opt) |node| {
+        const next = node.next;
+        const cont_ptr = node.cont orelse {
+            _ = c.printf("[pager] WARN: queue node %p missing continuation\n", node);
+            node.clear();
+            node_opt = next;
+            continue;
+        };
+
+        const cont = @as(*Continuation, @ptrCast(cont_ptr));
+        node.clear();
+        const event_ptr: ?*anyopaque = @as(?*anyopaque, @ptrCast(&payload));
+        WaitQueues.resumeContinuation(cont, event_ptr);
+        node_opt = next;
+    }
+}
+
 /// Initialise the continuation pool from C code.
 pub export fn continuation_bootstrap() callconv(.c) void {
     ContinuationPool.bootstrap();
@@ -666,6 +746,5 @@ const c = cimports.c;
 const sos_types = cimports.sos_types;
 
 const std = @import("std");
-const vm = @import("vm/mod.zig");
 const libipc = @import("libipc");
 const file = @import("file.zig");

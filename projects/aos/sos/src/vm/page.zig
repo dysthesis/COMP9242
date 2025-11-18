@@ -1,10 +1,99 @@
 pub const WaitQueue = struct {
-    head: ?*anyopaque = null,
+    pub const Node = struct {
+        cont: ?*anyopaque = null,
+        next: ?*Node = null,
+
+        pub fn clear(self: *Node) void {
+            self.cont = null;
+            self.next = null;
+        }
+    };
+
+    head: ?*Node = null,
+    tail: ?*Node = null,
     count: u16 = 0,
 
     pub fn reset(self: *WaitQueue) void {
         self.head = null;
+        self.tail = null;
         self.count = 0;
+    }
+
+    pub fn isEmpty(self: *const WaitQueue) bool {
+        return self.count == 0;
+    }
+
+    pub fn contains(self: *const WaitQueue, target: *anyopaque) bool {
+        var cursor = self.head;
+        while (cursor) |node| : (cursor = node.next) {
+            if (node.cont == target) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn enqueue(self: *WaitQueue, node: *Node, cont: *anyopaque) bool {
+        if (node.cont != null or node.next != null) {
+            _ = c.printf("[wait_queue] node already enqueued %p\n", node);
+            return false;
+        }
+        if (self.contains(cont)) {
+            _ = c.printf("[wait_queue] duplicate continuation %p\n", cont);
+            return false;
+        }
+
+        node.cont = cont;
+        node.next = null;
+
+        if (self.tail) |tail_node| {
+            tail_node.next = node;
+        } else {
+            self.head = node;
+        }
+        self.tail = node;
+
+        if (self.count < std.math.maxInt(u16)) {
+            self.count += 1;
+        } else {
+            _ = c.printf("[wait_queue] queue length saturated\n");
+        }
+
+        return true;
+    }
+
+    pub fn detachAll(self: *WaitQueue) ?*Node {
+        const head = self.head;
+        self.head = null;
+        self.tail = null;
+        self.count = 0;
+        return head;
+    }
+
+    pub fn remove(self: *WaitQueue, cont: *anyopaque) ?*Node {
+        var prev: ?*Node = null;
+        var cursor = self.head;
+        while (cursor) |node| {
+            const next = node.next;
+            if (node.cont == cont) {
+                if (prev) |p| {
+                    p.next = next;
+                } else {
+                    self.head = next;
+                }
+                if (self.tail == node) {
+                    self.tail = prev;
+                }
+                if (self.count > 0) {
+                    self.count -= 1;
+                }
+                node.clear();
+                return node;
+            }
+            prev = node;
+            cursor = next;
+        }
+        return null;
     }
 };
 
@@ -64,3 +153,4 @@ const c = cimports.c;
 const sel4 = cimports.sel4;
 const sos = cimports.sos;
 const region = @import("region.zig");
+const std = @import("std");

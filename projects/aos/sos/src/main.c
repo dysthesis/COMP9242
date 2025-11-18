@@ -254,10 +254,25 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
         caller->vm_state = vm;
       }
 
-      if (handle_vm_fault(vm, badge, &message)) {
+      vm_fault_result_t fault_result =
+          handle_vm_fault(vm, badge, &message, &have_reply, &reply, &reply_ut);
+
+      switch (fault_result) {
+      case VM_FAULT_HANDLED:
         reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
         have_reply = true;
         continue;
+
+      case VM_FAULT_DEFERRED:
+        ZF_LOGD("Deferred VM fault for badge=0x%lx (reply=%#lx ut=%p)",
+                (unsigned long)badge, (unsigned long)reply, (void *)reply_ut);
+        assert(!have_reply);
+        assert(reply_ut != NULL);
+        continue;
+
+      case VM_FAULT_FATAL:
+      default:
+        break;
       }
 
       goto fault_log;
