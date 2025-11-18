@@ -546,7 +546,8 @@ pub const Worker = struct {
         }
 
         if (!found) {
-            file_op.completeErrno(sos.ENOENT);
+            file_op.payload_len = 0;
+            file_op.completeBytes(0);
             return;
         }
 
