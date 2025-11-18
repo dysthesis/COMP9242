@@ -139,7 +139,7 @@ pub const VmHandle = struct {
         return first_zero orelse copied;
     }
 
-    pub fn copyFromClient(self: *Self, client_va: usize, dest: []u8) VmError!void {
+    pub fn copyFromClient(self: *Self, dest: []u8, client_va: usize) VmError!void {
         var copied: usize = 0;
         while (copied < dest.len) {
             const remaining = dest.len - copied;

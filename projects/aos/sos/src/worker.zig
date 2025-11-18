@@ -212,11 +212,11 @@ pub const Worker = struct {
         }
 
         if (file_exists) {
-            if (want_read and (stat_buf.st_fmode & sos.FM_READ) == 0) {
+            if (want_read and (stat_buf.st_fmode & sos_types.FM_READ) == 0) {
                 file_op.completeErrno(sos.EACCES);
                 return;
             }
-            if (want_write and (stat_buf.st_fmode & sos.FM_WRITE) == 0) {
+            if (want_write and (stat_buf.st_fmode & sos_types.FM_WRITE) == 0) {
                 file_op.completeErrno(sos.EACCES);
                 return;
             }

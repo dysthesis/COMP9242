@@ -130,31 +130,25 @@ const ServerContext = struct {
 
         const expected = "console";
         if (path_slice.len == expected.len and std.mem.eql(u8, path_slice, expected)) {
-            return self.handleConsoleOpen(state, flags, client_id);
+            return self.handleConsoleOpen(client_ctx, state, flags, client_id);
         }
 
         return self.startAsyncOpen(caller, client_ctx, path_slice, flags);
     }
 
-    fn handleConsoleOpen(self: *ServerContext, state: *SosClientIoState, flags: c_int, client_id: usize) SyscallResponse {
+    fn handleConsoleOpen(
+        self: *ServerContext,
+        client_ctx: *clients.Client,
+        state: *SosClientIoState,
+        flags: c_int,
+        client_id: usize,
+    ) SyscallResponse {
         _ = self;
         const accmode = flags & c.O_ACCMODE;
         const want_read = accmode == c.O_RDONLY or accmode == c.O_RDWR;
         const want_write = accmode == c.O_WRONLY or accmode == c.O_RDWR;
         if (!want_read and !want_write) {
             return .{ .Open = .{ .result = -sos.EINVAL } };
-        }
-
-        var fd: c_int = -1;
-        var i: usize = 0;
-        while (i < SOS_MAX_OPEN_FILES) : (i += 1) {
-            if (!state.fds[i].used) {
-                fd = @intCast(i);
-                break;
-            }
-        }
-        if (fd < 0) {
-            return .{ .Open = .{ .result = -sos.EMFILE } };
         }
 
         const console_ops = file.vfs_lookup_ops(console_name_ptr) orelse {
@@ -178,10 +172,49 @@ const ServerContext = struct {
             }
         }
 
+        const table = client_ctx.fileTable();
+        const console_handle: file.FileHandle = console.console_object_ptr orelse unreachable;
+        const fd = table.allocFd(console_handle) catch |alloc_err| {
+            if (console_ops.close) |close_fn| {
+                _ = close_fn(dev_id);
+            }
+            var temp_entry = file.empty_fd;
+            temp_entry.readable = want_read;
+            temp_entry.writable = want_write;
+            console.releaseConsoleAccess(client_id_u16, &temp_entry);
+            const errno = mapFileTableError(alloc_err);
+            return .{ .Open = .{ .result = -errno } };
+        };
+
         const fd_index: usize = @intCast(fd);
+        if (fd_index >= state.fds.len) {
+            table.freeFd(fd_index) catch {};
+            if (console_ops.close) |close_fn| {
+                _ = close_fn(dev_id);
+            }
+            var temp_entry = file.empty_fd;
+            temp_entry.readable = want_read;
+            temp_entry.writable = want_write;
+            console.releaseConsoleAccess(client_id_u16, &temp_entry);
+            return .{ .Open = .{ .result = -sos.EMFILE } };
+        }
+
+        if (state.fds[fd_index].used) {
+            table.freeFd(fd_index) catch {};
+            if (console_ops.close) |close_fn| {
+                _ = close_fn(dev_id);
+            }
+            var temp_entry = file.empty_fd;
+            temp_entry.readable = want_read;
+            temp_entry.writable = want_write;
+            console.releaseConsoleAccess(client_id_u16, &temp_entry);
+            return .{ .Open = .{ .result = -sos.EBUSY } };
+        }
+
         const slot = &state.fds[fd_index];
         setupConsoleFd(slot, console_ops, want_read, want_write, dev_id);
-        return .{ .Open = .{ .result = fd } };
+        state.file_table.entries[fd_index].handle = @ptrCast(slot);
+        return .{ .Open = .{ .result = @as(c_int, @intCast(fd)) } };
     }
 
     fn startAsyncGetDirent(
@@ -265,7 +298,7 @@ const ServerContext = struct {
         flags: c_int,
     ) ?SyscallResponse {
         if (path.len == 0) {
-            return SyscallResponse{ .Open = .{ .result = -sos.EINVAL } };
+        return SyscallResponse{ .Open = .{ .result = -sos.EINVAL } };
         }
 
         const cont = continuation.ContinuationPool.alloc() orelse {
@@ -826,6 +859,11 @@ fn handleClose(ctx: *ServerContext, args: anytype) ?SyscallResponse {
             }
         }
 
+        if (fd_index >= 3) {
+            const table = client_ctx.fileTable();
+            table.freeFd(fd_index) catch {};
+        }
+
         entry.* = empty_fd;
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (0)) } };
     }
@@ -1131,8 +1169,8 @@ fn handleStat(ctx: *ServerContext, args: anytype) ?SyscallResponse {
 
     if (path_slice.len == console_name.len and std.mem.eql(u8, path_slice, console_name)) {
         var console_stat = sos_types.sos_stat_t{
-            .st_type = sos.ST_SPECIAL,
-            .st_fmode = sos.FM_READ | sos.FM_WRITE,
+            .st_type = sos_types.ST_SPECIAL,
+            .st_fmode = sos_types.FM_READ | sos_types.FM_WRITE,
             .st_size = 0,
             .st_ctime = 0,
             .st_atime = 0,

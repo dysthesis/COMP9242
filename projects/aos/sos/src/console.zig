@@ -45,6 +45,8 @@ pub fn ensureStdio(state: *SosClientIoState, client_id: u16) void {
 fn initStdio(state: *SosClientIoState, client_id: u16) void {
     state.* = SosClientIoState{};
     state.file_table.init();
+    state.fds[0] = empty_fd;
+    state.fds[0].used = true;
     const ops = file.vfs_lookup_ops(console_name_ptr) orelse {
         std.debug.panic("console device not registered", .{});
     };

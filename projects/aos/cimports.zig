@@ -4,6 +4,7 @@ pub const c = @cImport({
     @cInclude("stddef.h");
     @cInclude("fcntl.h");
     @cInclude("string.h");
+    @cInclude("poll.h");
 });
 
 pub const sel4 = @cImport({

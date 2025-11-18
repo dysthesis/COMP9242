@@ -472,7 +472,7 @@ pub fn readDirEntry(dir: *anyopaque) ?[*:0]const u8 {
     const nfs_ctx = get_nfs_context() orelse return null;
     const entry = nfs_readdir(nfs_ctx, @ptrCast(dir));
     if (entry == null) return null;
-    return entry.name;
+    return entry.?.name;
 }
 
 pub fn closeDir(dir: *anyopaque) void {
@@ -498,7 +498,7 @@ const nfsfh = opaque {};
 const nfsdir = opaque {};
 const nfsdirent = extern struct {
     next: ?*nfsdirent,
-    name: [*c]u8,
+    name: [*:0]const u8,
 };
 
 const nfs_cb = *const fn (c_int, ?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) void;
@@ -538,7 +538,7 @@ const nfs_stat_64 = extern struct {
 };
 
 fn assignStat(out: *sos_types.sos_stat_t, src: *const nfs_stat_64) void {
-    out.st_type = sos.ST_FILE;
+    out.st_type = sos_types.ST_FILE;
     const fmode_type = @TypeOf(out.st_fmode);
     out.st_fmode = @as(fmode_type, @intCast(modeToFmode(src.nfs_mode)));
 
@@ -554,7 +554,7 @@ fn assignStat(out: *sos_types.sos_stat_t, src: *const nfs_stat_64) void {
 fn convertTimeMs(seconds: u64, nanos: u64) i128 {
     const sec_ms: i128 = @intCast(seconds);
     const ns_part: i128 = @intCast(nanos);
-    return sec_ms * 1000 + ns_part / 1_000_000;
+    return sec_ms * 1000 + @divTrunc(ns_part, 1_000_000);
 }
 
 fn clampToType(comptime T: type, value: i128) T {
@@ -566,9 +566,9 @@ fn clampToType(comptime T: type, value: i128) T {
 
 fn modeToFmode(mode: u64) c_int {
     var fmode: c_int = 0;
-    if ((mode & READ_MODE_MASK) != 0) fmode |= sos.FM_READ;
-    if ((mode & WRITE_MODE_MASK) != 0) fmode |= sos.FM_WRITE;
-    if ((mode & EXEC_MODE_MASK) != 0) fmode |= sos.FM_EXEC;
+    if ((mode & READ_MODE_MASK) != 0) fmode |= sos_types.FM_READ;
+    if ((mode & WRITE_MODE_MASK) != 0) fmode |= sos_types.FM_WRITE;
+    if ((mode & EXEC_MODE_MASK) != 0) fmode |= sos_types.FM_EXEC;
     return fmode;
 }
 
