@@ -111,30 +111,17 @@ pub const NfsPool = struct {
 
     /// Wait for async operation to complete
     pub fn wait(slot: *PoolSlot) i32 {
-        const max_spin_iterations = 1000;
-        var spin_count: u32 = 0;
-        var backoff: u32 = 1;
-
+        ensureCompletionNtfn();
         while (!@atomicLoad(bool, &slot.async_finish, .acquire)) {
-            // Check timeout
             const elapsed = getCurrentTimeMs() - slot.start_time;
             if (elapsed > slot.timeout_ms) {
                 _ = c.printf("[nfs_pool] TIMEOUT after %lums\n", elapsed);
                 return -@as(i32, @intCast(sos.EIO));
             }
 
-            // Busy-wait with exponential backoff
-            if (spin_count < max_spin_iterations) {
-                std.atomic.spinLoopHint();
-                spin_count += 1;
-            } else {
-                // After initial spin, yield to scheduler
-                var i: u32 = 0;
-                while (i < backoff) : (i += 1) {
-                    std.atomic.spinLoopHint();
-                }
-                backoff = @min(backoff * 2, 1000);
-            }
+            nfsServicePoll(c.POLLIN | c.POLLOUT);
+            var badge: sel4.seL4_Word = 0;
+            _ = sel4.seL4_Wait(completion_ntfn, &badge);
         }
 
         return slot.status;
@@ -143,6 +130,16 @@ pub const NfsPool = struct {
 
 var nfs_pool: NfsPool = undefined;
 var pool_initialised: bool = false;
+var completion_ntfn: sel4.seL4_CPtr = sel4.seL4_CapNull;
+var completion_ut: ?*sos.ut_t = null;
+
+fn ensureCompletionNtfn() void {
+    if (completion_ntfn != sel4.seL4_CapNull) return;
+    const ut = sos.alloc_retype(&completion_ntfn, sel4.seL4_NotificationObject, sel4.seL4_NotificationBits) orelse {
+        @panic("Failed to allocate NFS completion notification");
+    };
+    completion_ut = ut;
+}
 
 pub fn init() void {
     if (pool_initialised) return;
@@ -156,6 +153,7 @@ pub fn init() void {
         _ = c.printf("[nfs_handler] WARNING: NFS not yet mounted\n");
     }
 
+    ensureCompletionNtfn();
     nfs_pool = NfsPool.init();
     pool_initialised = true;
 
@@ -283,6 +281,9 @@ pub export fn nfsGenericCallbackZig(
 
     // Signal completion to worker thread
     @atomicStore(bool, &slot.async_finish, true, .release);
+    if (completion_ntfn != sel4.seL4_CapNull) {
+        sel4.seL4_Signal(completion_ntfn);
+    }
 }
 
 extern fn nfs_callback_c_bridge(err: c_int, nfs_ctx: ?*anyopaque, data: ?*anyopaque, private_data: ?*anyopaque) void;
