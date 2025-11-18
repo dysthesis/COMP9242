@@ -210,6 +210,13 @@ const ServerContext = struct {
             return .{ .GetDirent = .{ .result = -sos.ENOMEM } };
         }
 
+        if (out_len <= 1) {
+            continuation.ContinuationPool.free(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            return .{ .GetDirent = .{ .result = -sos.ENAMETOOLONG } };
+        }
+
         const capacity = @min(out_len - 1, worker.WRITE_BUFFER_CAPACITY);
 
         cont.client = caller;
@@ -1140,6 +1147,22 @@ fn handleStat(ctx: *ServerContext, args: anytype) ?SyscallResponse {
 
     path_buf[copied] = 0;
     const path_slice = path_buf[0..copied];
+
+    if (path_slice.len == console_name.len and std.mem.eql(u8, path_slice, console_name)) {
+        var console_stat = sos_types.sos_stat_t{
+            .st_type = sos.ST_SPECIAL,
+            .st_fmode = sos.FM_READ | sos.FM_WRITE,
+            .st_size = 0,
+            .st_ctime = 0,
+            .st_atime = 0,
+        };
+        const stat_bytes = std.mem.asBytes(&console_stat);
+        vm_handle.copyToClient(stat_bytes, @intCast(args.out_addr)) catch |err| {
+            const errno: c_int = vm.vmErrorToErrno(err);
+            return .{ .Stat = .{ .result = -errno } };
+        };
+        return .{ .Stat = .{ .result = 0 } };
+    }
 
     return ctx.startAsyncStat(caller, client_ctx, vm_handle, path_slice, @intCast(args.out_addr), out_len);
 }

@@ -199,6 +199,28 @@ pub const Continuation = struct {
 
                 break :blk libipc.SyscallResponse{ .Stat = .{ .result = result_status } };
             },
+            .GetDirent => blk: {
+                const vm_handle = file_op.vm_handle orelse return self.failFileOp(sos.EFAULT);
+                const params = file_op.params.GetDirent;
+                const to_copy = @min(file_op.payload_len, params.out_len);
+                if (to_copy > 0) {
+                    vm_handle.copyToClient(file_op.payload[0..to_copy], params.out_buf) catch |err| {
+                        const errno = vm.vmErrorToErrno(err);
+                        return self.failFileOp(errno);
+                    };
+                }
+
+                switch (file_op.result) {
+                    .Bytes => |count| {
+                        const result_bytes = std.math.cast(c_int, count) orelse return self.failFileOp(sos.EIO);
+                        break :blk libipc.SyscallResponse{ .GetDirent = .{ .result = result_bytes } };
+                    },
+                    .Errno => |errno| {
+                        return self.failFileOp(@intCast(errno));
+                    },
+                    else => return self.failFileOp(sos.EIO),
+                }
+            },
             else => return self.failFileOp(sos.ENOSYS),
         };
 

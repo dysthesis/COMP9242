@@ -3,6 +3,9 @@ const NFS_TIMEOUT_MS = 10000; // 10 seconds
 
 const O_CREAT: c_int = 0o100;
 const DEFAULT_CREATE_MODE: c_int = 0o600; // rw-------
+const READ_MODE_MASK: u64 = 0o400 | 0o040 | 0o004;
+const WRITE_MODE_MASK: u64 = 0o200 | 0o020 | 0o002;
+const EXEC_MODE_MASK: u64 = 0o100 | 0o010 | 0o001;
 
 pub const NfsOperation = enum {
     Open,
@@ -253,11 +256,9 @@ pub export fn nfsGenericCallbackZig(
             },
             .Stat => {
                 if (data) |stat_data| {
-                    if (slot.stat_out) |_| {
-                        // Copy stat structure from libnfs to our stat_out
-                        // NOTE: libnfs uses struct stat, we use sos_stat_t
-                        const nfs_stat: *anyopaque = @ptrCast(stat_data);
-                        _ = nfs_stat; // TODO: Convert
+                    if (slot.stat_out) |out_ptr| {
+                        const nfs_stat: *const nfs_stat_64 = @ptrCast(@alignCast(stat_data));
+                        assignStat(out_ptr, nfs_stat);
                         slot.status = 0;
                     } else {
                         _ = c.printf("[nfs_callback] Stat succeeded but stat_out is null\n");
@@ -417,20 +418,20 @@ pub fn statSync(path: [*:0]const u8, stat_out: *sos_types.sos_stat_t) !void {
     slot.stat_out = stat_out;
     slot.read_buf = null;
 
-    const rc = nfs_stat_async(
+    const rc = nfs_stat64_async(
         nfs_ctx,
         path,
         nfs_callback_c_bridge,
         @as(?*anyopaque, @ptrCast(slot)),
     );
     if (rc < 0) {
-        _ = c.printf("[nfs] nfs_stat_async failed: %d\n", rc);
+        _ = c.printf("[nfs] nfs_stat64_async failed: %d\n", rc);
         return error.NFSOperationFailed;
     }
 
     const status = NfsPool.wait(slot);
     if (status < 0) {
-        return error.OperationFailed;
+        return errnoToError(-status);
     }
 }
 
@@ -463,6 +464,18 @@ pub fn opendirSync(path: [*:0]const u8) !*anyopaque {
     return slot.result.dir;
 }
 
+pub fn readDirEntry(dir: *anyopaque) ?[*:0]const u8 {
+    const nfs_ctx = get_nfs_context() orelse return null;
+    const entry = nfs_readdir(nfs_ctx, @ptrCast(dir));
+    if (entry == null) return null;
+    return entry.name;
+}
+
+pub fn closeDir(dir: *anyopaque) void {
+    const nfs_ctx = get_nfs_context() orelse return;
+    nfs_closedir(nfs_ctx, @ptrCast(dir));
+}
+
 /// Service NFS events
 pub export fn nfsServicePoll(revents: c_int) callconv(.c) void {
     const nfs_ctx = get_nfs_context() orelse return;
@@ -479,6 +492,10 @@ const std = @import("std");
 const nfs_context = opaque {};
 const nfsfh = opaque {};
 const nfsdir = opaque {};
+const nfsdirent = extern struct {
+    next: ?*nfsdirent,
+    name: [*c]u8,
+};
 
 const nfs_cb = *const fn (c_int, ?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) void;
 
@@ -489,9 +506,72 @@ extern fn nfs_open2_async(nfs_ctx: ?*nfs_context, path: [*:0]const u8, flags: c_
 extern fn nfs_read_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, count: u64, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_write_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, count: u64, buf: [*]const u8, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_close_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, cb: nfs_cb, private_data: ?*anyopaque) c_int;
-extern fn nfs_stat_async(nfs_ctx: ?*nfs_context, path: [*:0]const u8, cb: nfs_cb, private_data: ?*anyopaque) c_int;
+extern fn nfs_stat64_async(nfs_ctx: ?*nfs_context, path: [*:0]const u8, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_opendir_async(nfs_ctx: ?*nfs_context, path: [*:0]const u8, cb: nfs_cb, private_data: ?*anyopaque) c_int;
-extern fn nfs_readdir(nfs_ctx: ?*nfs_context, dir: ?*nfsdir) ?*anyopaque;
+extern fn nfs_readdir(nfs_ctx: ?*nfs_context, dir: ?*nfsdir) ?*nfsdirent;
 extern fn nfs_closedir(nfs_ctx: ?*nfs_context, dir: ?*nfsdir) void;
 extern fn nfs_service(nfs_ctx: ?*nfs_context, revents: c_int) c_int;
 extern fn nfs_get_error(nfs_ctx: ?*nfs_context) [*:0]const u8;
+
+const nfs_stat_64 = extern struct {
+    nfs_dev: u64,
+    nfs_ino: u64,
+    nfs_mode: u64,
+    nfs_nlink: u64,
+    nfs_uid: u64,
+    nfs_gid: u64,
+    nfs_rdev: u64,
+    nfs_size: u64,
+    nfs_blksize: u64,
+    nfs_blocks: u64,
+    nfs_atime: u64,
+    nfs_mtime: u64,
+    nfs_ctime: u64,
+    nfs_atime_nsec: u64,
+    nfs_mtime_nsec: u64,
+    nfs_ctime_nsec: u64,
+    nfs_used: u64,
+};
+
+fn assignStat(out: *sos_types.sos_stat_t, src: *const nfs_stat_64) void {
+    out.st_type = sos.ST_FILE;
+    const fmode_type = @TypeOf(out.st_fmode);
+    out.st_fmode = @as(fmode_type, @intCast(modeToFmode(src.nfs_mode)));
+
+    const size_type = @TypeOf(out.st_size);
+    const size_max = std.math.maxInt(size_type);
+    const clamped_size = if (src.nfs_size > size_max) size_max else src.nfs_size;
+    out.st_size = @intCast(clamped_size);
+
+    out.st_ctime = clampToType(@TypeOf(out.st_ctime), convertTimeMs(src.nfs_ctime, src.nfs_ctime_nsec));
+    out.st_atime = clampToType(@TypeOf(out.st_atime), convertTimeMs(src.nfs_atime, src.nfs_atime_nsec));
+}
+
+fn convertTimeMs(seconds: u64, nanos: u64) i128 {
+    const sec_ms: i128 = @intCast(seconds);
+    const ns_part: i128 = @intCast(nanos);
+    return sec_ms * 1000 + ns_part / 1_000_000;
+}
+
+fn clampToType(comptime T: type, value: i128) T {
+    const min_val: i128 = @intCast(std.math.minInt(T));
+    const max_val: i128 = @intCast(std.math.maxInt(T));
+    const clamped = std.math.clamp(value, min_val, max_val);
+    return @intCast(clamped);
+}
+
+fn modeToFmode(mode: u64) c_int {
+    var fmode: c_int = 0;
+    if ((mode & READ_MODE_MASK) != 0) fmode |= sos.FM_READ;
+    if ((mode & WRITE_MODE_MASK) != 0) fmode |= sos.FM_WRITE;
+    if ((mode & EXEC_MODE_MASK) != 0) fmode |= sos.FM_EXEC;
+    return fmode;
+}
+
+fn errnoToError(errno: i32) anyerror {
+    return switch (errno) {
+        sos.ENOENT => error.NotFound,
+        sos.EACCES => error.PermissionDenied,
+        else => error.OperationFailed,
+    };
+}

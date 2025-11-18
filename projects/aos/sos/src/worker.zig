@@ -7,6 +7,7 @@ const types = @import("worker_types.zig");
 const clients = @import("client.zig");
 const file = @import("file.zig");
 const nfs_handler = @import("nfs_handler.zig");
+const ROOT_DIR: [:0]const u8 = "/";
 
 const MAX_WORK_QUEUE = 16;
 
@@ -28,6 +29,8 @@ fn mapNfsError(err: anyerror) c_int {
     return switch (err) {
         error.NoNFSContext => sos.ENODEV,
         error.PoolExhausted => sos.EAGAIN,
+        error.NotFound => sos.ENOENT,
+        error.PermissionDenied => sos.EACCES,
         error.NFSOperationFailed => sos.EIO,
         error.OperationFailed => sos.EIO,
         else => sos.EIO,
@@ -180,9 +183,41 @@ pub const Worker = struct {
         const access = params.flags & c.O_ACCMODE;
         const want_read = access == c.O_RDONLY or access == c.O_RDWR;
         const want_write = access == c.O_WRONLY or access == c.O_RDWR;
+        const want_create = (params.flags & c.O_CREAT) != 0;
 
         const path_ptr: [*:0]const u8 = @ptrCast(&params.path);
         _ = c.printf("[worker] open request client=%u path=\"%s\" flags=0x%x\n", params.client_id, path_ptr, params.flags);
+
+        var stat_buf: sos_types.sos_stat_t = undefined;
+        var file_exists = true;
+        nfs_handler.statSync(path_ptr, &stat_buf) catch |err| switch (err) {
+            error.NotFound => file_exists = false,
+            error.PermissionDenied => {
+                file_op.completeErrno(sos.EACCES);
+                return;
+            },
+            else => {
+                const errno = mapNfsError(err);
+                file_op.completeErrno(errno);
+                return;
+            },
+        };
+
+        if (!file_exists and !want_create) {
+            file_op.completeErrno(sos.ENOENT);
+            return;
+        }
+
+        if (file_exists) {
+            if (want_read and (stat_buf.st_fmode & sos.FM_READ) == 0) {
+                file_op.completeErrno(sos.EACCES);
+                return;
+            }
+            if (want_write and (stat_buf.st_fmode & sos.FM_WRITE) == 0) {
+                file_op.completeErrno(sos.EACCES);
+                return;
+            }
+        }
 
         const handle = nfs_handler.openSync(path_ptr, params.flags) catch |err| {
             const errno = mapNfsError(err);
@@ -439,8 +474,54 @@ pub const Worker = struct {
             _ = c.printf("[worker] workerGetDirent received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
             return;
         }
-        // TODO: Implement this
-        _ = c.printf("[worker] workerGetDirent called (not yet implemented)\n");
+        const params = &file_op.params.GetDirent;
+        if (params.capacity == 0) {
+            file_op.completeErrno(sos.ENAMETOOLONG);
+            return;
+        }
+
+        const dir_handle = nfs_handler.opendirSync(ROOT_DIR.ptr) catch |err| {
+            const errno = mapNfsError(err);
+            file_op.completeErrno(errno);
+            return;
+        };
+        defer nfs_handler.closeDir(dir_handle);
+
+        var current: usize = 0;
+        var found = false;
+        var selected_name: []const u8 = &[_]u8{};
+
+        while (true) {
+            const name_ptr = nfs_handler.readDirEntry(dir_handle) orelse break;
+            const name_slice = std.mem.sliceTo(name_ptr, 0);
+            if (name_slice.len == 0) continue;
+            if (std.mem.eql(u8, name_slice, ".")) continue;
+            if (std.mem.eql(u8, name_slice, "..")) continue;
+
+            if (current == params.index) {
+                selected_name = name_slice;
+                found = true;
+                break;
+            }
+            current += 1;
+        }
+
+        if (!found) {
+            file_op.completeErrno(sos.ENOENT);
+            return;
+        }
+
+        const copy_len = @min(selected_name.len, params.capacity);
+        std.mem.copyForwards(u8, file_op.payload[0..copy_len], selected_name[0..copy_len]);
+        file_op.payload[copy_len] = 0;
+        file_op.payload_len = copy_len + 1;
+
+        if (selected_name.len > params.capacity) {
+            file_op.completeErrno(sos.ERANGE);
+            return;
+        }
+
+        file_op.completeBytes(copy_len);
     }
 };
 
