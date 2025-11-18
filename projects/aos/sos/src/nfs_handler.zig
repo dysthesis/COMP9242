@@ -6,6 +6,9 @@ const DEFAULT_CREATE_MODE: c_int = 0o600; // rw-------
 const READ_MODE_MASK: u64 = 0o400 | 0o040 | 0o004;
 const WRITE_MODE_MASK: u64 = 0o200 | 0o020 | 0o002;
 const EXEC_MODE_MASK: u64 = 0o100 | 0o010 | 0o001;
+const ERRNO_MAP = std.StaticStringMap(c_int).initComptime(.{
+    .{ "ENOENT", sos.ENOENT },
+});
 
 pub const NfsOperation = enum {
     Open,
@@ -573,6 +576,8 @@ fn errnoToError(errno: i32) anyerror {
     return switch (errno) {
         sos.ENOENT => error.NotFound,
         sos.EACCES => error.PermissionDenied,
+        sos.ENOMEM => error.OutOfMemory,
+        sos.ENETUNREACH => error.NetworkUnreachable,
         else => error.OperationFailed,
     };
 }
