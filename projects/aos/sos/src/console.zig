@@ -27,14 +27,6 @@ fn initStdio(state: *SosClientIoState) void {
 
     var id: c_int = 0;
 
-    if (ops.*.open.?(console_name_ptr, c.O_RDONLY, &id) < 0) {
-        std.debug.panic("console stdin open failed", .{});
-    }
-    setupConsoleFd(&state.fds[0], ops, true, false, id);
-    const stdin_handle: file.FileHandle = @ptrCast(&state.fds[0]);
-    const stdin_fd = state.file_table.allocFd(stdin_handle) catch unreachable;
-    std.debug.assert(stdin_fd == 0);
-
     if (ops.*.open.?(console_name_ptr, c.O_WRONLY, &id) < 0) {
         std.debug.panic("console stdout open failed", .{});
     }

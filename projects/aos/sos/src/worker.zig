@@ -177,6 +177,10 @@ pub const Worker = struct {
             return;
         };
 
+        const access = params.flags & c.O_ACCMODE;
+        const want_read = access == c.O_RDONLY or access == c.O_RDWR;
+        const want_write = access == c.O_WRONLY or access == c.O_RDWR;
+
         const path_ptr: [*:0]const u8 = @ptrCast(&params.path);
         _ = c.printf("[worker] open request client=%u path=\"%s\" flags=0x%x\n", params.client_id, path_ptr, params.flags);
 
@@ -196,6 +200,24 @@ pub const Worker = struct {
             return;
         };
 
+        const io_state = client_ctx.ioState();
+        if (fd >= io_state.fds.len) {
+            _ = c.printf("[worker] fd index %zu out of range\n", fd);
+            nfs_handler.closeSync(handle) catch {};
+            table.freeFd(fd) catch {};
+            file_op.completeErrno(sos.EMFILE);
+            return;
+        }
+        var entry = &io_state.fds[fd];
+        entry.* = file.empty_fd;
+        entry.used = true;
+        entry.readable = want_read;
+        entry.writable = want_write;
+        entry.kind = file.FileKind.regular;
+        entry.obj = handle;
+        entry.offset = 0;
+        entry.refcnt = 1;
+
         file_op.completeFd(fd);
         _ = c.printf("[worker] open completed client=%u fd=%zu\n", params.client_id, fd);
     }
@@ -213,6 +235,20 @@ pub const Worker = struct {
             file_op.completeErrno(sos.EINVAL);
             return;
         };
+        const io_state = client_ctx.ioState();
+        if (params.fd >= io_state.fds.len) {
+            file_op.completeErrno(sos.EBADF);
+            return;
+        }
+        var fd_entry = &io_state.fds[params.fd];
+        if (!fd_entry.used or fd_entry.kind != file.FileKind.regular) {
+            file_op.completeErrno(sos.EBADF);
+            return;
+        }
+        if (!fd_entry.readable) {
+            file_op.completeErrno(sos.EBADF);
+            return;
+        }
 
         const table = client_ctx.fileTable();
         const handle = table.getHandle(params.fd) catch |err| {
@@ -238,6 +274,7 @@ pub const Worker = struct {
         _ = c.printf("[worker] read fd=%zu -> %zu bytes\n", params.fd, read_bytes);
 
         file_op.payload_len = read_bytes;
+        fd_entry.offset += read_bytes;
         file_op.completeBytes(read_bytes);
     }
 
@@ -255,6 +292,20 @@ pub const Worker = struct {
             file_op.completeErrno(sos.EINVAL);
             return;
         };
+        const io_state = client_ctx.ioState();
+        if (params.fd >= io_state.fds.len) {
+            file_op.completeErrno(sos.EBADF);
+            return;
+        }
+        var fd_entry = &io_state.fds[params.fd];
+        if (!fd_entry.used or fd_entry.kind != file.FileKind.regular) {
+            file_op.completeErrno(sos.EBADF);
+            return;
+        }
+        if (!fd_entry.writable) {
+            file_op.completeErrno(sos.EBADF);
+            return;
+        }
 
         const table = client_ctx.fileTable();
         const handle = table.getHandle(params.fd) catch |err| {
@@ -276,6 +327,7 @@ pub const Worker = struct {
             return;
         };
 
+        fd_entry.offset += written;
         file_op.completeBytes(written);
     }
 
@@ -293,6 +345,17 @@ pub const Worker = struct {
             file_op.completeErrno(sos.EINVAL);
             return;
         };
+        const io_state = client_ctx.ioState();
+        const fd_index = params.fd;
+        if (fd_index >= io_state.fds.len) {
+            file_op.completeErrno(sos.EBADF);
+            return;
+        }
+        const entry = &io_state.fds[fd_index];
+        if (!entry.used) {
+            file_op.completeErrno(sos.EBADF);
+            return;
+        }
 
         const table = client_ctx.fileTable();
         const handle = table.getHandle(params.fd) catch |err| {
@@ -313,6 +376,7 @@ pub const Worker = struct {
             file_op.completeErrno(errno);
             return;
         };
+        entry.* = file.empty_fd;
 
         file_op.completeStatus(0);
     }

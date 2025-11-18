@@ -31,6 +31,10 @@ pub const FileTable = struct {
 
     pub fn init(self: *Self) void {
         self.* = Self{};
+        if (self.entries.len > 0) {
+            self.entries[0].used = true;
+            self.entries[0].handle = null;
+        }
     }
 
     fn bumpGeneration(self: *Self) void {
@@ -88,6 +92,7 @@ pub const FileOps = extern struct {
 pub const FileKind = enum(c_int) {
     none = 0,
     dev_console = 1,
+    regular = 2,
 };
 
 pub const File = extern struct {
@@ -99,6 +104,7 @@ pub const File = extern struct {
     ops: ?*const FileOps,
     dev_id: c_int,
     refcnt: u16,
+    offset: usize,
 };
 
 pub const ConsoleDev = extern struct {
@@ -119,7 +125,17 @@ extern fn sos_console_data_ready() callconv(.c) void;
 const console_name: [:0]const u8 = "console";
 pub const console_name_ptr: [*c]const u8 = @ptrCast(console_name.ptr);
 
-pub const empty_fd: File = std.mem.zeroes(File);
+pub const empty_fd: File = File{
+    .used = false,
+    .readable = false,
+    .writable = false,
+    .kind = FileKind.none,
+    .obj = null,
+    .ops = null,
+    .dev_id = 0,
+    .refcnt = 0,
+    .offset = 0,
+};
 const empty_fd_table = [_]File{empty_fd} ** SOS_MAX_OPEN_FILES;
 
 pub const ClientIoState = struct {
@@ -366,12 +382,14 @@ test "FileTable basic operations" {
     var dummy: u32 = 42;
     const handle: FileHandle = @ptrCast(&dummy);
 
-    const fd0 = try table.allocFd(handle);
-    try std.testing.expectEqual(@as(usize, 0), fd0);
+    try std.testing.expectError(FileTableError.MissingHandle, table.getHandle(0));
 
-    const retrieved = try table.getHandle(fd0);
+    const fd1 = try table.allocFd(handle);
+    try std.testing.expectEqual(@as(usize, 1), fd1);
+
+    const retrieved = try table.getHandle(fd1);
     try std.testing.expectEqual(handle, retrieved);
 
-    try table.freeFd(fd0);
-    try std.testing.expectError(FileTableError.SlotUnused, table.getHandle(fd0));
+    try table.freeFd(fd1);
+    try std.testing.expectError(FileTableError.SlotUnused, table.getHandle(fd1));
 }
