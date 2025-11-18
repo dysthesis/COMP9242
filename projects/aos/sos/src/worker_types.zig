@@ -13,6 +13,7 @@ pub const WorkType = enum(u8) {
     OpenDir,
     ReadDir,
     GetDirent,
+    PageFill,
 };
 
 pub const OPEN_PATH_CAPACITY: usize = 256;
@@ -68,6 +69,28 @@ pub const GetDirentParams = struct {
     out_len: usize,
 };
 
+pub const PageFillSource = union(enum) {
+    /// Anonymous memory requiring zero-initialised contents
+    Anonymous,
+
+    /// File-backed mapping requiring data fetched from a file descriptor
+    File: struct {
+        fd: usize,
+        file_offset: usize,
+        length: usize = vm.PAGE_SIZE_4K,
+    },
+};
+
+pub const PageFillParams = struct {
+    client_id: u32,
+    page_base: usize,
+    prot: c_int,
+    region_kind: vm.region.RegionKind,
+    want_write: bool,
+    prefetch: bool,
+    source: PageFillSource,
+};
+
 pub const WorkParams = union(WorkType) {
     Open: OpenParams,
     Close: CloseParams,
@@ -77,6 +100,7 @@ pub const WorkParams = union(WorkType) {
     OpenDir: OpenDirParams,
     ReadDir: ReadDirParams,
     GetDirent: GetDirentParams,
+    PageFill: PageFillParams,
 };
 
 pub const FileOpResult = union(enum) {
@@ -152,6 +176,12 @@ pub const FileOpState = struct {
         return self.payload[0..];
     }
 };
+
+comptime {
+    if (WRITE_BUFFER_CAPACITY < vm.PAGE_SIZE_4K) {
+        @compileError("WRITE_BUFFER_CAPACITY must be at least one page for pager jobs");
+    }
+}
 
 test "FileOpResult helpers" {
     var res = FileOpResult.okFd(5);

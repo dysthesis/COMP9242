@@ -242,6 +242,7 @@ pub const addr_space = @import("addr_space.zig");
 pub const region = @import("region.zig");
 // pub const mapping = @import("mapping.zig");
 pub const page = @import("page.zig");
+pub const pager = @import("pager.zig");
 pub const client = @import("client.zig");
 pub const allocator = @import("allocator.zig");
 pub const page_table = @import("page_table.zig");

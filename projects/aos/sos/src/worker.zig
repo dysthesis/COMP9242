@@ -66,6 +66,7 @@ pub const WorkItem = struct {
             .OpenDir => worker.workerOpenDir(self.file_op),
             .ReadDir => worker.workerReadDir(self.file_op),
             .GetDirent => worker.workerGetDirent(self.file_op),
+            .PageFill => worker.workerPageFill(self.file_op),
         }
     }
 };
@@ -563,6 +564,49 @@ pub const Worker = struct {
         }
 
         file_op.completeBytes(copy_len);
+    }
+
+    fn workerPageFill(self: *Self, file_op: *FileOpState) void {
+        _ = self;
+        const tag = std.meta.activeTag(file_op.params);
+        if (tag != .PageFill) {
+            _ = c.printf("[worker] workerPageFill received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            file_op.completeErrno(sos.EINVAL);
+            return;
+        }
+
+        const params = &file_op.params.PageFill;
+        const vm_handle = file_op.vm_handle orelse {
+            file_op.completeErrno(sos.EFAULT);
+            return;
+        };
+        _ = vm_handle; // Reserved for future mapping work in Step 4.5
+
+        const page_len: usize = vm.PAGE_SIZE_4K;
+        var status: c_int = 0;
+
+        switch (params.source) {
+            .Anonymous => {
+                @memset(file_op.payload[0..page_len], 0);
+                file_op.payload_len = page_len;
+            },
+            .File => |backing| {
+                status = sos.ENOSYS;
+                _ = c.printf(
+                    "[worker] PageFill file-backed source unsupported client=%u fd=%zu offset=0x%lx\n",
+                    params.client_id,
+                    backing.fd,
+                    @as(c_ulong, @intCast(backing.file_offset)),
+                );
+            },
+        }
+
+        if (status == 0) {
+            file_op.completeStatus(0);
+        } else {
+            file_op.payload_len = 0;
+            file_op.completeErrno(status);
+        }
     }
 };
 
