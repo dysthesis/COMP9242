@@ -299,12 +299,7 @@ const ConsoleDevice = struct {
     /// Close semantics for the console
     fn close(self: *ConsoleDevice, id: c_int) c_int {
         _ = self;
-        if ((id & 1) != 0) {
-            global_console.reader_in_use = false;
-        }
-        if ((id & 2) != 0 and global_console.write_refcnt > 0) {
-            global_console.write_refcnt -= 1;
-        }
+        _ = id;
         return 0;
     }
 

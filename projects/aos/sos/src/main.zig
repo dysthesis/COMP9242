@@ -91,8 +91,9 @@ const ServerContext = struct {
         const client_ctx = clients.get(client_id) orelse {
             return SyscallResponse{ .Open = .{ .result = -sos.EINVAL } };
         };
+        const client_id_u16 = @as(u16, @intCast(client_ctx.id));
         const state = client_ctx.ioState();
-        ensureStdio(state);
+        ensureStdio(state, client_id_u16);
 
         const flags: c_int = @intCast(args.arg);
         const user_buf_addr: usize = @intCast(args.buf_addr);
@@ -164,21 +165,21 @@ const ServerContext = struct {
             return .{ .Open = .{ .result = -sos.ENODEV } };
         };
 
+        const client_id_u16 = @as(u16, @intCast(client_id));
+        console.acquireConsoleAccess(client_id_u16, want_read, want_write) catch {
+            return .{ .Open = .{ .result = -sos.EBUSY } };
+        };
+
         var dev_id: c_int = 0;
         if (console_ops.open) |open_fn| {
             const ret = open_fn(console_name_ptr, flags, &dev_id);
             if (ret < 0) {
+                var temp_entry = file.empty_fd;
+                temp_entry.readable = want_read;
+                temp_entry.writable = want_write;
+                console.releaseConsoleAccess(client_id_u16, &temp_entry);
                 return .{ .Open = .{ .result = ret } };
             }
-        }
-
-        const client_id_u16 = @as(@TypeOf(sos.global_console.reader_owner_id), @intCast(client_id));
-        if (want_read) {
-            sos.global_console.reader_in_use = true;
-            sos.global_console.reader_owner_id = client_id_u16;
-        }
-        if (want_write) {
-            sos.global_console.write_refcnt += 1;
         }
 
         const fd_index: usize = @intCast(fd);
@@ -812,7 +813,7 @@ fn handleClose(ctx: *ServerContext, args: anytype) ?SyscallResponse {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EINVAL)) } };
     };
     var state = client_ctx.ioState();
-    ensureStdio(state);
+    ensureStdio(state, client_id_u16);
     if (!state.initialised) {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EBADF)) } };
     }
@@ -828,19 +829,12 @@ fn handleClose(ctx: *ServerContext, args: anytype) ?SyscallResponse {
 
     if (is_console) {
         const entry = &state.fds[fd_index];
-        if (entry.refcnt != 0) {
-            return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EBUSY)) } };
+        if (entry.refcnt > 1) {
+            entry.refcnt -= 1;
+            return SyscallResponse{ .Close = .{ .result = 0 } };
         }
 
-        if (entry.kind == .dev_console and entry.obj == console_object_ptr) {
-            if (entry.readable and sos.global_console.reader_in_use and sos.global_console.reader_owner_id == client_id_u16) {
-                sos.global_console.reader_in_use = false;
-                sos.global_console.reader_owner_id = 0;
-            }
-            if (entry.writable and sos.global_console.write_refcnt > 0) {
-                sos.global_console.write_refcnt -= 1;
-            }
-        }
+        console.releaseConsoleAccess(client_id_u16, entry);
 
         if (entry.ops) |ops_ptr| {
             if (ops_ptr.close) |close_fn| {
@@ -929,8 +923,9 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     if (client_id >= MAX_CLIENTS) return .{ .Read = .{ .result = -sos.EINVAL } };
 
     const client_ctx = clients.get(client_id) orelse return .{ .Read = .{ .result = -sos.EINVAL } };
+    const client_id_u16 = @as(u16, @intCast(client_ctx.id));
     const state = client_ctx.ioState();
-    ensureStdio(state);
+    ensureStdio(state, client_id_u16);
     if (!state.initialised) return .{ .Read = .{ .result = -sos.EBADF } };
 
     const fd_raw: c_int = @intCast(args.arg);
@@ -1050,8 +1045,9 @@ fn handleWrite(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     if (client_id >= MAX_CLIENTS) return .{ .Write = .{ .result = -sos.EINVAL } };
 
     const client_ctx = clients.get(client_id) orelse return .{ .Write = .{ .result = -sos.EINVAL } };
+    const client_id_u16 = @as(u16, @intCast(client_ctx.id));
     const state = client_ctx.ioState();
-    ensureStdio(state);
+    ensureStdio(state, client_id_u16);
     if (!state.initialised) return .{ .Write = .{ .result = -sos.EBADF } };
 
     const fd_raw: c_int = @intCast(args.arg);
@@ -1113,8 +1109,9 @@ fn handleStat(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     if (client_id >= MAX_CLIENTS) return .{ .Stat = .{ .result = -sos.EINVAL } };
 
     const client_ctx = clients.get(client_id) orelse return .{ .Stat = .{ .result = -sos.EINVAL } };
+    const client_id_u16 = @as(u16, @intCast(client_ctx.id));
     const state = client_ctx.ioState();
-    ensureStdio(state);
+    ensureStdio(state, client_id_u16);
 
     const path_len = std.math.cast(usize, args.path_len) orelse return .{ .Stat = .{ .result = -sos.EINVAL } };
     const out_len = std.math.cast(usize, args.out_len) orelse return .{ .Stat = .{ .result = -sos.EINVAL } };
