@@ -77,6 +77,30 @@ pub const Client = struct {
         return self.addr_space.getPtr(vaddr).?;
     }
 
+    pub fn ensurePageRecord(
+        self: *Self,
+        vaddr: usize,
+        tracker: ?*region.Region,
+    ) super.VmError!*page.MappedPage {
+        if (self.findPage(vaddr)) |entry| {
+            if (tracker != null and entry.region == null) {
+                entry.region = tracker;
+            }
+            return entry;
+        }
+
+        const inserted = self.insertPage(vaddr, 0, sel4.seL4_CapNull, null, false, false) catch |err| {
+            return err;
+        };
+        inserted.region = tracker;
+        inserted.resident = false;
+        inserted.dirty = false;
+        inserted.referenced = false;
+        inserted.pagefile_slot = -1;
+        inserted.waiters.reset();
+        return inserted;
+    }
+
     fn isLegalUserMapping(self: *Client, base: Address) bool {
         const addr = base.raw();
         // inside configured heap band and below the current break.
