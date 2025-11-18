@@ -274,7 +274,7 @@ pub fn pageFaultResume(
 ) callconv(.c) void {
     var errno: c_int = 0;
     if (event_data) |payload| {
-        const info: *const PageFaultEvent = @as(*const PageFaultEvent, @ptrCast(payload));
+        const info: *const PageFaultEvent = @ptrFromInt(@intFromPtr(payload));
         errno = info.errno;
     }
 
