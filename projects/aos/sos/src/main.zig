@@ -1300,6 +1300,7 @@ const sos = cimports.sos;
 const sos_types = cimports.sos_types;
 
 const vm = @import("vm/mod.zig");
+const vm_fault = @import("vm_fault.zig");
 pub const worker = @import("worker.zig");
 pub const delegation = @import("delegation.zig");
 pub const nfs_handler = @import("nfs_handler.zig");
@@ -1308,6 +1309,7 @@ comptime {
     _ = delegation;
     _ = nfs_handler;
     _ = continuation;
+    _ = vm_fault;
     _ = &continuation.continuation_bootstrap;
 }
 
