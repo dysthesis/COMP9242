@@ -122,7 +122,7 @@ static void test_frame_table(void) {
   frame_ref_t frames[TEST_FRAMES] = {};
   for (int f = 0; f < TEST_FRAMES; f++) {
     /* Allocate a frame */
-    frames[f] = alloc_frame();
+        frames[f] = alloc_frame(FRAME_OWNER_KERNEL, FRAME_FLAG_PINNED);
     assert(frames[f] != NULL_FRAME);
 
     /* Write to the first and last byte of the frame */
@@ -146,7 +146,7 @@ static void test_frame_table(void) {
   /* Ensure that we get the same frames when we try to realloc */
   frame_ref_t new_frames[TEST_FRAMES] = {};
   for (int f = 0; f < TEST_FRAMES; f++) {
-    new_frames[f] = alloc_frame();
+        new_frames[f] = alloc_frame(FRAME_OWNER_KERNEL, FRAME_FLAG_PINNED);
     assert(new_frames[f] != NULL_FRAME);
 
     int o = 0;

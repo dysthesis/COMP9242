@@ -116,6 +116,7 @@ cscope.out
 # Nix
 .direnv/
 result
+result_logs/
 Justfile
 .cache/
 .zig-cache

@@ -45,6 +45,20 @@ typedef enum {
     ALLOCATED_LIST = 3,
 } list_id_t;
 
+typedef enum {
+    FRAME_OWNER_KERNEL = 0,
+    FRAME_OWNER_USER = 1,
+    FRAME_OWNER_PAGER = 2,
+    FRAME_OWNER_NETWORK = 3,
+} frame_owner_t;
+
+typedef uint32_t frame_flags_t;
+
+#define FRAME_FLAG_EVICTABLE (1u << 0)
+#define FRAME_FLAG_PINNED (1u << 1)
+#define FRAME_FLAG_DIRTY (1u << 2)
+#define FRAME_FLAG_REFERENCED (1u << 3)
+
 /* Array of names for each of the lists above. */
 extern char *frame_table_list_names[];
 
@@ -53,17 +67,16 @@ extern char *frame_table_list_names[];
 
 /* The actual representation of a frame in the frame table. */
 typedef struct frame frame_t;
-PACKED struct frame {
-    /* Page used to map frame into SOS memory. */
-    seL4_ARM_Page sos_page: 20;
-    /* Index in frame table of previous element in list. */
-    frame_ref_t prev : 19;
-    /* Index in frame table of next element in list. */
-    frame_ref_t next : 19;
-    /* Indicates which list the frame is in. */
-    list_id_t list_id : 2;
-    /* Unused bits */
-    size_t unused : 4;
+struct frame {
+    seL4_ARM_Page sos_page;
+    frame_ref_t prev;
+    frame_ref_t next;
+    list_id_t list_id;
+    frame_owner_t owner;
+    frame_flags_t flags;
+    uint16_t pin_count;
+    uint16_t reserved16;
+    uint32_t swap_slot;
 };
 compile_time_assert("Small CPtr size", 20 >= INITIAL_TASK_CSPACE_BITS);
 
@@ -103,7 +116,7 @@ cspace_t *frame_table_cspace(void);
  * You will need to modify the frame table to deal with the case where
  * only a limited number of frames may be held by the frame table.
  */
-frame_ref_t alloc_frame(void);
+frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags);
 
 /*
  * Free a frame allocated by the frame table.

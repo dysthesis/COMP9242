@@ -52,6 +52,11 @@ pub const Client = struct {
             }
             entry.owns_frame = entry.owns_frame or owns_frame;
             entry.owns_cap = entry.owns_cap or owns_cap;
+            entry.resident = frame_ref != 0;
+            entry.dirty = false;
+            entry.referenced = false;
+            entry.pagefile_slot = -1;
+            entry.waiters.reset();
             return entry;
         }
 
@@ -61,6 +66,10 @@ pub const Client = struct {
             .cap_owner = cap_owner,
             .owns_frame = owns_frame,
             .owns_cap = owns_cap,
+            .resident = frame_ref != 0,
+            .dirty = false,
+            .referenced = false,
+            .pagefile_slot = -1,
         }) catch {
             return super.VmError.Capacity;
         };
@@ -113,7 +122,7 @@ pub const Client = struct {
             return super.VmError.ClientContext;
         }
 
-        const frame_ref = sos.alloc_frame();
+        const frame_ref = sos.alloc_frame(sos.FRAME_OWNER_USER, sos.FRAME_FLAG_EVICTABLE);
         if (frame_ref == 0) {
             _ = c.printf("[vm_map] alloc_frame failed caller=0x%lx\n", @as(c_ulong, @intCast(@intFromPtr(caller))));
             return super.VmError.OutOfFrames;
@@ -161,7 +170,7 @@ pub const Client = struct {
         };
         _ = c.printf("[vm_map] map_frame success slot=%lu frame_ref=%lu vaddr=0x%lx\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
 
-        _ = self.insertPage(vaddr, frame_ref, slot, &cspace, true, true) catch |err| {
+        const inserted = self.insertPage(vaddr, frame_ref, slot, &cspace, true, true) catch |err| {
             if (err == super.VmError.Capacity) {
                 const meta_used = self.metadata_cursor - self.metadata_base;
                 _ = c.printf("[vm_meta] capacity hit vaddr=0x%lx mapped_count=%lu used_bytes=%lu limit_bytes=%lu pages=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(self.mapped_count)), @as(c_ulong, @intCast(meta_used)), @as(c_ulong, @intCast(allocator.METADATA_REGION_BYTES)), @as(c_ulong, @intCast(self.metadata_page_count)));
@@ -171,6 +180,12 @@ pub const Client = struct {
             sos.free_frame(frame_ref);
             return err;
         };
+        inserted.region = tracker;
+        inserted.resident = true;
+        inserted.dirty = false;
+        inserted.referenced = false;
+        inserted.pagefile_slot = -1;
+        inserted.waiters.reset();
         self.mapped_count = self.addr_space.num_mapped();
         // self.addr_space.recordLeafMap(vaddr);
 
@@ -213,7 +228,7 @@ pub const Client = struct {
 
         try mapping.map_owned_frame(&self.addr_space, cap_slot, vaddr, rights, attrs);
 
-        _ = self.insertPage(vaddr, frame_ref, cap_slot, &super.cspace, owns_frame, owns_cap) catch |err| {
+        const inserted = self.insertPage(vaddr, frame_ref, cap_slot, &super.cspace, owns_frame, owns_cap) catch |err| {
             self.addr_space.recordLeafUnmap(vaddr);
             const unmap_err = sel4.seL4_ARM_Page_Unmap(cap_slot);
             if (unmap_err != sel4.seL4_NoError) {
@@ -228,6 +243,12 @@ pub const Client = struct {
             }
             return err;
         };
+        inserted.region = null;
+        inserted.resident = frame_ref != 0;
+        inserted.dirty = false;
+        inserted.referenced = false;
+        inserted.pagefile_slot = -1;
+        inserted.waiters.reset();
 
         self.mapped_count = self.addr_space.num_mapped();
     }
@@ -312,7 +333,7 @@ pub const Client = struct {
                 return allocator.MetadataAllocError.OutOfMemory;
             }
 
-            const frame_ref = sos.alloc_frame();
+            const frame_ref = sos.alloc_frame(sos.FRAME_OWNER_KERNEL, sos.FRAME_FLAG_PINNED);
             if (frame_ref == 0) {
                 _ = c.printf("[vm_meta] alloc_frame failed\n");
                 return allocator.MetadataAllocError.OutOfMemory;

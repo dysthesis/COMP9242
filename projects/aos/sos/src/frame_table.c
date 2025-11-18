@@ -114,7 +114,7 @@ cspace_t *frame_table_cspace(void)
     return frame_table.cspace;
 }
 
-frame_ref_t alloc_frame(void)
+frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags)
 {
     frame_t *frame = pop_front(&frame_table.free);
 
@@ -123,7 +123,13 @@ frame_ref_t alloc_frame(void)
     }
 
     if (frame != NULL) {
+        frame->owner = owner;
+        frame->flags = flags;
+        frame->pin_count = (flags & FRAME_FLAG_PINNED) ? 1 : 0;
+        frame->swap_slot = 0;
         push_back(&frame_table.allocated, frame);
+    } else {
+        return NULL_FRAME;
     }
 
     return ref_from_frame(frame);
@@ -135,6 +141,10 @@ void free_frame(frame_ref_t frame_ref)
         frame_t *frame = frame_from_ref(frame_ref);
 
         remove_frame(&frame_table.allocated, frame);
+        frame->owner = FRAME_OWNER_KERNEL;
+        frame->flags = 0;
+        frame->pin_count = 0;
+        frame->swap_slot = 0;
         push_front(&frame_table.free, frame);
     }
 }
@@ -306,7 +316,14 @@ static frame_t *alloc_fresh_frame(void)
 
     *frame = (frame_t) {
         .sos_page = sos_page,
+        .prev = NULL_FRAME,
+        .next = NULL_FRAME,
         .list_id = NO_LIST,
+        .owner = FRAME_OWNER_KERNEL,
+        .flags = 0,
+        .pin_count = 0,
+        .reserved16 = 0,
+        .swap_slot = 0,
     };
 
     ZF_LOGD("Frame table contains %lu/%lu frames", frame_table.used, frame_table.capacity);

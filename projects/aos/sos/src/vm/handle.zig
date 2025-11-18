@@ -113,6 +113,7 @@ pub const VmHandle = struct {
 
     pub fn copyCStringFromClient(self: *Self, client_va: usize, dest: []u8) VmError!usize {
         if (dest.len == 0) return 0;
+        const state = self.ensureVmState();
 
         var copied: usize = 0;
         var first_zero: ?usize = null;
@@ -126,6 +127,7 @@ pub const VmHandle = struct {
             const src_ptr: [*]const u8 = @as([*]const u8, @ptrCast(slice.ptr));
             const src_slice = src_ptr[0..chunk];
             std.mem.copyForwards(u8, dest[copied .. copied + chunk], src_slice);
+            markPageAccess(state, client_va + copied, false);
 
             if (first_zero == null) {
                 if (std.mem.indexOfScalar(u8, src_slice, 0)) |idx| {
@@ -140,6 +142,7 @@ pub const VmHandle = struct {
     }
 
     pub fn copyFromClient(self: *Self, dest: []u8, client_va: usize) VmError!void {
+        const state = self.ensureVmState();
         var copied: usize = 0;
         while (copied < dest.len) {
             const remaining = dest.len - copied;
@@ -149,6 +152,7 @@ pub const VmHandle = struct {
             const chunk = @min(slice.len, remaining);
             const src_ptr: [*]const u8 = @as([*]const u8, @ptrCast(slice.ptr));
             std.mem.copyForwards(u8, dest[copied .. copied + chunk], src_ptr[0..chunk]);
+            markPageAccess(state, client_va + copied, false);
             copied += chunk;
         }
 
@@ -158,6 +162,7 @@ pub const VmHandle = struct {
     }
 
     pub fn copyToClient(self: *Self, src: []const u8, client_va: usize) VmError!void {
+        const state = self.ensureVmState();
         var copied: usize = 0;
         while (copied < src.len) {
             const remaining = src.len - copied;
@@ -167,6 +172,7 @@ pub const VmHandle = struct {
             const chunk = @min(slice.len, remaining);
             const dst_ptr: [*]u8 = @as([*]u8, @ptrCast(slice.ptr));
             std.mem.copyForwards(u8, dst_ptr[0..chunk], src[copied .. copied + chunk]);
+            markPageAccess(state, client_va + copied, true);
             copied += chunk;
         }
     }
@@ -193,6 +199,16 @@ pub const VmHandle = struct {
         validate(self);
         return self.client.?;
     }
+
+fn markPageAccess(state: *client.Client, vaddr: usize, write: bool) void {
+    const base = Address.init(vaddr).pageBase(PAGE_SIZE_4K).raw();
+    if (state.findPage(base)) |page_entry| {
+        page_entry.referenced = true;
+        if (write) {
+            page_entry.dirty = true;
+        }
+    }
+}
 
     pub fn getState(self: *Self) *client.Client {
         validate(self);

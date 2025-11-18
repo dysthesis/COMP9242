@@ -356,7 +356,7 @@ static int map_process_stack_page(uintptr_t vaddr) {
     return -1;
   }
 
-  frame_ref_t frame = alloc_frame();
+  frame_ref_t frame = alloc_frame(FRAME_OWNER_USER, FRAME_FLAG_EVICTABLE);
   if (frame == NULL_FRAME) {
     ZF_LOGE("Failed to allocate stack frame");
     return -1;
@@ -596,7 +596,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
   }
 
   /* Create an IPC buffer backing frame */
-  user_process.ipc_buffer_frame = alloc_frame();
+  user_process.ipc_buffer_frame = alloc_frame(FRAME_OWNER_USER, FRAME_FLAG_EVICTABLE);
   if (user_process.ipc_buffer_frame == NULL_FRAME) {
     ZF_LOGE("Failed to allocate IPC buffer frame");
     goto out;

@@ -1,3 +1,13 @@
+pub const WaitQueue = struct {
+    head: ?*anyopaque = null,
+    count: u16 = 0,
+
+    pub fn reset(self: *WaitQueue) void {
+        self.head = null;
+        self.count = 0;
+    }
+};
+
 /// Bookkeeping for a page mapped into a client address space.
 pub const MappedPage = struct {
     frame_ref: usize,
@@ -5,6 +15,12 @@ pub const MappedPage = struct {
     cap_owner: ?*sos.cspace_t,
     owns_frame: bool,
     owns_cap: bool,
+    region: ?*region.Region = null,
+    resident: bool = false,
+    dirty: bool = false,
+    referenced: bool = false,
+    pagefile_slot: i32 = -1,
+    waiters: WaitQueue = .{},
 
     pub const Self = @This();
 
@@ -27,6 +43,12 @@ pub const MappedPage = struct {
         if (self.owns_frame and self.frame_ref != 0) {
             sos.free_frame(self.frame_ref);
         }
+        self.region = null;
+        self.resident = false;
+        self.dirty = false;
+        self.referenced = false;
+        self.pagefile_slot = -1;
+        self.waiters.reset();
     }
 };
 
@@ -41,3 +63,4 @@ const cimports = @import("cimports");
 const c = cimports.c;
 const sel4 = cimports.sel4;
 const sos = cimports.sos;
+const region = @import("region.zig");

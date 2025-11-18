@@ -11,6 +11,7 @@ const vm = @import("vm/mod.zig");
 const ROOT_DIR: [:0]const u8 = "/";
 
 const MAX_WORK_QUEUE = 16;
+pub const WORKER_COUNT: usize = 4;
 
 pub const WorkType = types.WorkType;
 pub const WorkParams = types.WorkParams;
@@ -565,8 +566,12 @@ pub const Worker = struct {
     }
 };
 
-// Global worker instance
-var global_worker: Worker = undefined;
+var workers: [WORKER_COUNT]Worker = undefined;
+var worker_notifications: [WORKER_COUNT]sel4.seL4_CPtr = [_]sel4.seL4_CPtr{sel4.seL4_CapNull} ** WORKER_COUNT;
+var worker_notification_ut: [WORKER_COUNT]?*sos.ut_t = [_]?*sos.ut_t{null} ** WORKER_COUNT;
+var worker_initialized = false;
+var active_worker_count: usize = 0;
+var enqueue_rr = std.atomic.Value(usize).init(0);
 
 /// Thread spawner defined in threads.c
 extern fn spawn_worker_thread(
@@ -576,20 +581,69 @@ extern fn spawn_worker_thread(
 
 /// Initialise worker subsystem (C-callable)
 pub export fn worker_init(delegate_ep_arg: sel4.seL4_CPtr, work_ntfn: sel4.seL4_CPtr) callconv(.c) void {
-    global_worker = Worker.init(delegate_ep_arg, work_ntfn);
+    if (worker_initialized) {
+        return;
+    }
 
-    spawn_worker_thread(worker_main_c, delegate_ep_arg);
-    _ = c.printf("[worker] Worker thread spawned with delegate_ep=%lu\n", delegate_ep_arg);
+    var idx: usize = 0;
+    while (idx < WORKER_COUNT) : (idx += 1) {
+        var ntfn = work_ntfn;
+        if (idx == 0) {
+            worker_notification_ut[idx] = null;
+        } else {
+            const allocated = sos.alloc_retype(&ntfn, sel4.seL4_NotificationObject, sel4.seL4_NotificationBits);
+            if (allocated == null) {
+                _ = c.printf("[worker] Failed to allocate notification for worker %u, stopping pool init\n", @as(c_uint, @intCast(idx)));
+                break;
+            }
+            worker_notification_ut[idx] = allocated;
+        }
+
+        workers[idx] = Worker.init(delegate_ep_arg, ntfn);
+        worker_notifications[idx] = ntfn;
+        spawn_worker_thread(worker_main_c, idx);
+        _ = c.printf("[worker] Worker thread %u spawned (delegate_ep=%lu, ntfn=%lu)\n", @as(c_uint, @intCast(idx)), delegate_ep_arg, ntfn);
+        active_worker_count += 1;
+    }
+
+    if (active_worker_count == 0) {
+        workers[0] = Worker.init(delegate_ep_arg, work_ntfn);
+        worker_notifications[0] = work_ntfn;
+        worker_notification_ut[0] = null;
+        spawn_worker_thread(worker_main_c, 0);
+        active_worker_count = 1;
+    }
+
+    worker_initialized = true;
 }
 
 /// C wrapper for worker main loop
 pub export fn worker_main_c(arg: usize) callconv(.c) void {
-    _ = arg; // delegate_ep already stored in global_worker
-    global_worker.run();
+    const idx = arg;
+    if (!worker_initialized or idx >= active_worker_count) {
+        _ = c.printf("[worker] Worker main invoked with invalid index %zu\n", idx);
+        return;
+    }
+    workers[idx].run();
 }
 
 /// C-callable enqueue function
 pub export fn workerEnqueue(file_op: *FileOpState) callconv(.c) c_int {
-    global_worker.enqueue(file_op) catch return -@as(c_int, @intCast(sos.EAGAIN));
-    return 0;
+    if (!worker_initialized or active_worker_count == 0) {
+        return -@as(c_int, @intCast(sos.EINVAL));
+    }
+
+    const total = active_worker_count;
+    const base = enqueue_rr.fetchAdd(1, .acq_rel);
+
+    var offset: usize = 0;
+    while (offset < total) : (offset += 1) {
+        const idx = (base + offset) % total;
+        workers[idx].enqueue(file_op) catch |err| switch (err) {
+            error.QueueFull => continue,
+        };
+        return 0;
+    }
+
+    return -@as(c_int, @intCast(sos.EAGAIN));
 }
