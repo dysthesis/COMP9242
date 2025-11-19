@@ -85,7 +85,7 @@ extern void checkCompletedFileOps(void);
 #define IRQ_IDENT_BADGE_BITS MASK(seL4_BadgeBits - 1ul)
 #define DELEGATE_EP_BADGE (1UL << 30)
 
-#define APP_NAME "sosh"
+#define APP_NAME "vm_test"
 #define APP_PRIORITY (0)
 #define APP_EP_BADGE (101)
 
@@ -611,7 +611,8 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
   }
 
   /* Create an IPC buffer backing frame */
-  user_process.ipc_buffer_frame = alloc_frame(FRAME_OWNER_USER, FRAME_FLAG_EVICTABLE);
+  user_process.ipc_buffer_frame =
+      alloc_frame(FRAME_OWNER_USER, FRAME_FLAG_EVICTABLE);
   if (user_process.ipc_buffer_frame == NULL_FRAME) {
     ZF_LOGE("Failed to allocate IPC buffer frame");
     goto out;

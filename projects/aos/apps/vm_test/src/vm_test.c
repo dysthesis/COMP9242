@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,38 +78,61 @@ static void pt_test(void) {
 }
 
 #define FILE_TEST_PAGES 8
-#define FILE_TEST_NAME "pager_test.bin"
+/* SOS exposes a flat namespace via NFS; slash characters are rejected during
+ * path normalisation, so we stick to a bare filename and rely on the runtime
+ * deployment to place us on a writable share. */
+#define FILE_TEST_TEMPLATE "pager_test.XXXXXX"
 
-static void file_mmap_test(void) {
+static void log_errno(const char *label, const char *path) {
+  printf("[file_mmap_test] %s (path=%s) failed errno=%d (%s)\n",
+         label, path, errno, strerror(errno));
+}
+
+static int write_page_byte(int fd, uint8_t value) {
+  for (size_t offset = 0; offset < PAGE_SIZE_4K; offset++) {
+    ssize_t written = write(fd, &value, sizeof(value));
+    if (written != sizeof(value)) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static bool file_mmap_test(void) {
   printf("[file_mmap_test] begin\n");
   const size_t length = FILE_TEST_PAGES * PAGE_SIZE_4K;
-  int fd = open(FILE_TEST_NAME, O_RDWR | O_CREAT | O_TRUNC, 0644);
+  char path[] = FILE_TEST_TEMPLATE;
+  int fd = mkstemp(path);
   if (fd < 0) {
-    printf("[file_mmap_test] open failed errno=%d\n", errno);
-    abort();
+    log_errno("mkstemp", FILE_TEST_TEMPLATE);
+    return false;
   }
+  printf("[file_mmap_test] using backing file %s\n", path);
+
+  bool success = false;
+  uint8_t *mapped = MAP_FAILED;
 
   for (size_t page = 0; page < FILE_TEST_PAGES; page++) {
     uint8_t byte = (uint8_t)page;
-    for (size_t offset = 0; offset < PAGE_SIZE_4K; offset++) {
-      if (write(fd, &byte, sizeof(byte)) != sizeof(byte)) {
-        printf("[file_mmap_test] write failed errno=%d\n", errno);
-        abort();
-      }
+    if (write_page_byte(fd, byte) != 0) {
+      log_errno("write", path);
+      goto cleanup;
     }
   }
 
   if (lseek(fd, 0, SEEK_SET) != 0) {
-    printf("[file_mmap_test] lseek failed errno=%d\n", errno);
-    abort();
+    log_errno("lseek", path);
+    goto cleanup;
   }
 
-  uint8_t *mapped = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+  mapped = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
   if (mapped == MAP_FAILED) {
-    printf("[file_mmap_test] mmap failed errno=%d\n", errno);
-    abort();
+    log_errno("mmap", path);
+    goto cleanup;
   }
+
   close(fd);
+  fd = -1;
 
   for (size_t page = 0; page < FILE_TEST_PAGES; page++) {
     uint8_t expected = (uint8_t)page;
@@ -118,25 +142,44 @@ static void file_mmap_test(void) {
     if (value != expected) {
       printf("[file_mmap_test] mismatch at page=%zu value=%u expected=%u\n",
              page, value, expected);
-      abort();
+      goto cleanup;
     }
   }
 
   if (munmap(mapped, length) != 0) {
-    printf("[file_mmap_test] munmap failed errno=%d\n", errno);
-    abort();
+    log_errno("munmap", path);
+    goto cleanup;
+  }
+  mapped = MAP_FAILED;
+
+  success = true;
+
+cleanup:
+  if (mapped != MAP_FAILED) {
+    munmap(mapped, length);
+  }
+  if (fd >= 0) {
+    close(fd);
+  }
+  if (unlink(path) != 0) {
+    log_errno("unlink", path);
   }
 
-  if (unlink(FILE_TEST_NAME) != 0) {
-    printf("[file_mmap_test] unlink failed errno=%d\n", errno);
+  if (success) {
+    printf("[file_mmap_test] end\n");
+  } else {
+    printf("[file_mmap_test] failed; see logs above for details\n");
   }
-  printf("[file_mmap_test] end\n");
+  return success;
 }
 
 int main(void) {
   printf("[vm_test] entering main\n");
   pt_test();
-  file_mmap_test();
+  if (!file_mmap_test()) {
+    printf("[vm_test] file_mmap_test failed\n");
+    return 1;
+  }
   printf("[vm_test] main complete, exiting successfully\n");
   return 0;
 }
