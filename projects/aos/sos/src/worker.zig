@@ -231,19 +231,39 @@ pub const Worker = struct {
             return;
         };
 
+        const io_state = client_ctx.ioState();
+        const handle_ref = io_state.allocHandleRef(handle) catch {
+            nfs_handler.closeSync(handle) catch {};
+            file_op.completeErrno(sos.EMFILE);
+            return;
+        };
+
         const table = client_ctx.fileTable();
-        const fd = table.allocFd(handle) catch |alloc_err| {
+        const fd = table.allocFd(@ptrCast(handle_ref)) catch |alloc_err| {
             const errno = mapFileTableError(alloc_err);
             _ = c.printf("[worker] allocFd failed errno=%d\n", errno);
-            nfs_handler.closeSync(handle) catch {};
+            const release = io_state.releaseHandleRef(handle_ref);
+            switch (release) {
+                .Active => {},
+                .Closed => |raw| {
+                    nfs_handler.closeSync(raw) catch {};
+                },
+            }
             file_op.completeErrno(errno);
             return;
         };
 
-        const io_state = client_ctx.ioState();
+        file.setHandleFdHint(handle_ref, @intCast(fd));
+
         if (fd >= io_state.fds.len) {
             _ = c.printf("[worker] fd index %zu out of range\n", fd);
-            nfs_handler.closeSync(handle) catch {};
+            const release = io_state.releaseHandleRef(handle_ref);
+            switch (release) {
+                .Active => {},
+                .Closed => |raw| {
+                    nfs_handler.closeSync(raw) catch {};
+                },
+            }
             table.freeFd(fd) catch {};
             file_op.completeErrno(sos.EMFILE);
             return;
@@ -254,7 +274,7 @@ pub const Worker = struct {
         entry.readable = want_read;
         entry.writable = want_write;
         entry.kind = file.FileKind.regular;
-        entry.obj = handle;
+        entry.obj = @ptrCast(handle_ref);
         entry.offset = 0;
         entry.refcnt = 1;
 
@@ -291,11 +311,16 @@ pub const Worker = struct {
         }
 
         const table = client_ctx.fileTable();
-        const handle = table.getHandle(params.fd) catch |err| {
+        const handle_ptr = table.getHandle(params.fd) catch |err| {
             const errno = mapFileTableError(err);
             file_op.completeErrno(errno);
             return;
         };
+        const handle_ref = file.handleRefFromOpaque(handle_ptr) orelse {
+            file_op.completeErrno(sos.EBADF);
+            return;
+        };
+        const handle = file.rawFileHandle(handle_ref);
 
         const vm_handle = file_op.vm_handle orelse {
             file_op.completeErrno(sos.EFAULT);
@@ -366,11 +391,16 @@ pub const Worker = struct {
         }
 
         const table = client_ctx.fileTable();
-        const handle = table.getHandle(params.fd) catch |err| {
+        const handle_ptr = table.getHandle(params.fd) catch |err| {
             const errno = mapFileTableError(err);
             file_op.completeErrno(errno);
             return;
         };
+        const handle_ref = file.handleRefFromOpaque(handle_ptr) orelse {
+            file_op.completeErrno(sos.EBADF);
+            return;
+        };
+        const handle = file.rawFileHandle(handle_ref);
 
         const vm_handle = file_op.vm_handle orelse {
             file_op.completeErrno(sos.EFAULT);
@@ -434,18 +464,26 @@ pub const Worker = struct {
         }
 
         const table = client_ctx.fileTable();
-        const handle = table.getHandle(params.fd) catch |err| {
+        const handle_ptr = table.getHandle(params.fd) catch |err| {
             const errno = mapFileTableError(err);
             file_op.completeErrno(errno);
             return;
         };
-
-        const close_result = nfs_handler.closeSync(handle) catch |err| {
-            const errno = mapNfsError(err);
-            file_op.completeErrno(errno);
+        const handle_ref = file.handleRefFromOpaque(handle_ptr) orelse {
+            file_op.completeErrno(sos.EBADF);
             return;
         };
-        _ = close_result;
+        const release = io_state.releaseHandleRef(handle_ref);
+        switch (release) {
+            .Active => {},
+            .Closed => |raw| {
+                nfs_handler.closeSync(raw) catch |err| {
+                    const errno = mapNfsError(err);
+                    file_op.completeErrno(errno);
+                    return;
+                };
+            },
+        }
 
         table.freeFd(params.fd) catch |err| {
             const errno = mapFileTableError(err);

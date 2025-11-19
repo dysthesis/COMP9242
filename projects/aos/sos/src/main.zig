@@ -1220,9 +1220,13 @@ fn handleBrk(ctx: *ServerContext, args: anytype) SyscallResponse {
 }
 
 fn handleMmap(ctx: *ServerContext, args: anytype) SyscallResponse {
-    if (ctx.caller == null) {
+    const caller = ctx.caller orelse {
         return SyscallResponse{ .Mmap = .{ .result = -@as(i64, sos.EINVAL) } };
-    }
+    };
+    const client_id: usize = @intCast(caller.id);
+    const client_ctx = clients.get(client_id) orelse {
+        return SyscallResponse{ .Mmap = .{ .result = -@as(i64, sos.EINVAL) } };
+    };
     const handle = ctx.vm_handle orelse {
         return SyscallResponse{ .Mmap = .{ .result = -@as(i64, sos.EINVAL) } };
     };
@@ -1233,7 +1237,7 @@ fn handleMmap(ctx: *ServerContext, args: anytype) SyscallResponse {
     const fd: c_int = @intCast(wordToI64(args.fd));
     const offset: usize = @intCast(args.offset);
 
-    const base = handle.mmap(addr, length, prot, flags, fd, offset) catch |err| {
+    const base = handle.mmap(client_ctx, addr, length, prot, flags, fd, offset) catch |err| {
         const errno = vm.vmErrorToErrno(err);
         return SyscallResponse{ .Mmap = .{ .result = -@as(i64, errno) } };
     };

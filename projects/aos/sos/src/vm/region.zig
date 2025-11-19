@@ -102,8 +102,8 @@ pub const Region = struct {
         return dataToProt(self.attr.data);
     }
 
-    pub fn setFileBacking(self: *Region, fd: c_int_t, offset: usize, length: usize) void {
-        self.backing = .{ .File = .{ .fd = fd, .offset = offset, .length = length } };
+    pub fn setFileBacking(self: *Region, fd: c_int_t, offset: usize, length: usize, handle_ref: ?*anyopaque) void {
+        self.backing = .{ .File = .{ .fd = fd, .offset = offset, .length = length, .handle_ref = handle_ref } };
     }
 };
 
@@ -113,6 +113,7 @@ pub const Backing = union(enum) {
         fd: c_int_t,
         offset: usize,
         length: usize,
+        handle_ref: ?*anyopaque,
     },
 };
 

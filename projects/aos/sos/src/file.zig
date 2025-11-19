@@ -8,6 +8,120 @@ const MAX_CLIENTS: usize = sos.MAX_CLIENTS;
 const super = @import("main.zig");
 const SOS_MAX_OPEN_FILES = super.SOS_MAX_OPEN_FILES;
 
+const EXTRA_HANDLE_SLOTS: usize = 64;
+const HANDLE_POOL_CAPACITY: usize = SOS_MAX_OPEN_FILES + EXTRA_HANDLE_SLOTS;
+comptime {
+    if (HANDLE_POOL_CAPACITY == 0) {
+        @compileError("HANDLE_POOL_CAPACITY must be non-zero");
+    }
+}
+
+const SpinLock = struct {
+    state: u8 = 0,
+
+    fn guard(self: *SpinLock) Guard {
+        self.lock();
+        return Guard{ .lock = self };
+    }
+
+    fn lock(self: *SpinLock) void {
+        while (true) {
+            if (@cmpxchgStrong(u8, &self.state, 0, 1, .acq_rel, .acquire) == null) {
+                return;
+            }
+        }
+    }
+
+    fn unlock(self: *SpinLock) void {
+        @atomicStore(u8, &self.state, 0, .release);
+    }
+
+    fn reset(self: *SpinLock) void {
+        @atomicStore(u8, &self.state, 0, .release);
+    }
+
+    const Guard = struct {
+        lock: *SpinLock,
+
+        fn release(self: Guard) void {
+            self.lock.unlock();
+        }
+    };
+};
+
+pub const FileHandleRef = struct {
+    pool_slot: usize = 0,
+    raw_handle: FileHandle = null,
+    fd_hint: c_int = -1,
+    refcnt: usize = 0,
+};
+
+pub const HandleRelease = union(enum) {
+    Active,
+    Closed: FileHandle,
+};
+
+const HandlePoolError = error{Exhausted};
+
+const HandlePool = struct {
+    slots: [HANDLE_POOL_CAPACITY]FileHandleRef = [_]FileHandleRef{FileHandleRef{}} ** HANDLE_POOL_CAPACITY,
+    used: [HANDLE_POOL_CAPACITY]bool = [_]bool{false} ** HANDLE_POOL_CAPACITY,
+    lock: SpinLock = .{},
+
+    fn reset(self: *HandlePool) void {
+        self.used = [_]bool{false} ** HANDLE_POOL_CAPACITY;
+        for (&self.slots) |*slot| {
+            slot.* = FileHandleRef{};
+        }
+        self.lock.reset();
+    }
+
+    fn alloc(self: *HandlePool, raw_handle: FileHandle) HandlePoolError!*FileHandleRef {
+        const guard = self.lock.guard();
+        defer guard.release();
+        for (&self.slots, 0..) |*slot, idx| {
+            if (self.used[idx]) continue;
+            self.used[idx] = true;
+            slot.* = FileHandleRef{
+                .pool_slot = idx,
+                .raw_handle = raw_handle,
+                .fd_hint = -1,
+                .refcnt = 1,
+            };
+            return slot;
+        }
+        return HandlePoolError.Exhausted;
+    }
+
+    fn retain(self: *HandlePool, slot: *FileHandleRef) void {
+        const guard = self.lock.guard();
+        defer guard.release();
+        if (slot.refcnt == std.math.maxInt(usize)) {
+            @panic("file handle refcount overflow");
+        }
+        slot.refcnt += 1;
+    }
+
+    fn release(self: *HandlePool, slot: *FileHandleRef) HandleRelease {
+        const guard = self.lock.guard();
+        defer guard.release();
+        if (slot.refcnt == 0) {
+            return HandleRelease.Active;
+        }
+        slot.refcnt -= 1;
+        if (slot.refcnt == 0) {
+            const raw = slot.raw_handle;
+            const idx = slot.pool_slot;
+            slot.* = FileHandleRef{};
+            if (idx < self.used.len) {
+                self.used[idx] = false;
+            }
+            return HandleRelease{ .Closed = raw };
+        }
+        return HandleRelease.Active;
+    }
+};
+
 pub const FileHandle = *anyopaque;
 
 pub const FileTableError = error{
@@ -142,7 +256,39 @@ pub const ClientIoState = struct {
     initialised: bool = false,
     fds: [SOS_MAX_OPEN_FILES]File = empty_fd_table,
     file_table: FileTable = FileTable{},
+    handle_pool: HandlePool = HandlePool{},
+
+    pub fn reset(self: *ClientIoState) void {
+        self.* = ClientIoState{};
+        self.file_table.init();
+        self.handle_pool.reset();
+    }
+
+    pub fn allocHandleRef(self: *ClientIoState, raw_handle: FileHandle) HandlePoolError!*FileHandleRef {
+        return self.handle_pool.alloc(raw_handle);
+    }
+
+    pub fn retainHandleRef(self: *ClientIoState, slot: *FileHandleRef) void {
+        self.handle_pool.retain(slot);
+    }
+
+    pub fn releaseHandleRef(self: *ClientIoState, slot: *FileHandleRef) HandleRelease {
+        return self.handle_pool.release(slot);
+    }
 };
+
+pub inline fn handleRefFromOpaque(ptr: ?*anyopaque) ?*FileHandleRef {
+    if (ptr == null) return null;
+    return @ptrCast(@alignCast(ptr.?));
+}
+
+pub inline fn rawFileHandle(ref: *FileHandleRef) FileHandle {
+    return ref.raw_handle;
+}
+
+pub inline fn setHandleFdHint(ref: *FileHandleRef, fd: c_int) void {
+    ref.fd_hint = fd;
+}
 
 pub var client_io_state: [MAX_CLIENTS]ClientIoState = [_]ClientIoState{ClientIoState{}} ** MAX_CLIENTS;
 

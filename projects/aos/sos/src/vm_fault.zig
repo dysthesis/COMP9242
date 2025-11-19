@@ -203,6 +203,24 @@ fn submitPageFillJob(
 
     var job = slot.state;
     job.reset();
+    var source: worker.PageFillSource = .Anonymous;
+    switch (tracker.backing) {
+        .Anonymous => {},
+        .File => |info| {
+            if (info.handle_ref) |handle_ptr| {
+                var delta: usize = 0;
+                if (key.page_base >= tracker.start) {
+                    delta = key.page_base - tracker.start;
+                }
+                source = .{ .File = .{
+                    .fd = info.fd,
+                    .file_offset = info.offset + delta,
+                    .length = vm.PAGE_SIZE_4K,
+                    .handle_ref = handle_ptr,
+                } };
+            }
+        },
+    }
     job.params = .{ .PageFill = .{
         .client_id = @intCast(vm_handle.getClient().id),
         .page_base = key.page_base,
@@ -210,7 +228,7 @@ fn submitPageFillJob(
         .region_kind = tracker.attr.kind,
         .want_write = cont.state.PageFault.want_write,
         .prefetch = cont.state.PageFault.prefetch,
-        .source = .Anonymous,
+        .source = source,
     } };
     job.vm_handle = vm_handle;
     job.payload_len = 0;
