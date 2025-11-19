@@ -3,7 +3,6 @@ const cimports = @import("cimports");
 const c = cimports.c;
 const sos_types = cimports.sos_types;
 const vm = @import("vm/mod.zig");
-const file = @import("file.zig");
 
 pub const WorkType = enum(u8) {
     Open,
@@ -79,7 +78,7 @@ pub const PageFillSource = union(enum) {
         fd: c_int,
         file_offset: usize,
         length: usize = vm.PAGE_SIZE_4K,
-        handle_ref: file.FileHandle = null,
+        handle_ref: ?*anyopaque = null,
     },
 };
 

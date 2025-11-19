@@ -5,8 +5,7 @@ const c = cimports.c;
 const sos = cimports.sos;
 const MAX_CLIENTS: usize = sos.MAX_CLIENTS;
 
-const super = @import("main.zig");
-const SOS_MAX_OPEN_FILES = super.SOS_MAX_OPEN_FILES;
+const SOS_MAX_OPEN_FILES: usize = 32;
 
 const EXTRA_HANDLE_SLOTS: usize = 64;
 const HANDLE_POOL_CAPACITY: usize = SOS_MAX_OPEN_FILES + EXTRA_HANDLE_SLOTS;
@@ -51,7 +50,7 @@ const SpinLock = struct {
 
 pub const FileHandleRef = struct {
     pool_slot: usize = 0,
-    raw_handle: FileHandle = null,
+    raw_handle: ?FileHandle = null,
     fd_hint: c_int = -1,
     refcnt: usize = 0,
 };
@@ -116,7 +115,10 @@ const HandlePool = struct {
             if (idx < self.used.len) {
                 self.used[idx] = false;
             }
-            return HandleRelease{ .Closed = raw };
+            if (raw) |handle| {
+                return HandleRelease{ .Closed = handle };
+            }
+            return HandleRelease.Active;
         }
         return HandleRelease.Active;
     }
@@ -283,7 +285,7 @@ pub inline fn handleRefFromOpaque(ptr: ?*anyopaque) ?*FileHandleRef {
 }
 
 pub inline fn rawFileHandle(ref: *FileHandleRef) FileHandle {
-    return ref.raw_handle;
+    return ref.raw_handle orelse @panic("FileHandleRef missing raw handle");
 }
 
 pub inline fn setHandleFdHint(ref: *FileHandleRef, fd: c_int) void {

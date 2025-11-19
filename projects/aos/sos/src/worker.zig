@@ -26,6 +26,7 @@ pub const FileOpState = types.FileOpState;
 pub const FileOpResult = types.FileOpResult;
 pub const OPEN_PATH_CAPACITY = types.OPEN_PATH_CAPACITY;
 pub const WRITE_BUFFER_CAPACITY = types.WRITE_BUFFER_CAPACITY;
+pub const PageFillSource = types.PageFillSource;
 
 fn mapNfsError(err: anyerror) c_int {
     return switch (err) {

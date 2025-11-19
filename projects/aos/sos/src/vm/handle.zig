@@ -3,7 +3,6 @@ pub const VmHandle = struct {
     idx: usize,
     generation: u8,
     client: ?*sos.client_t,
-    client_ctx: ?*client.Client = null,
 
     pub const Access = enum { readOnly, writeOnly };
     pub const UserSlice = struct {
@@ -201,26 +200,15 @@ pub const VmHandle = struct {
         return self.client.?;
     }
 
-    pub fn clientContext(self: *Self) *client.Client {
-        if (self.client_ctx) |ctx| {
-            return ctx;
-        }
-        const cl = self.getClient();
-        const idx = vmStateIndex(cl);
-        const ctx = clients.get(idx) orelse unreachable;
-        self.client_ctx = ctx;
-        return ctx;
-    }
-
-fn markPageAccess(state: *client.Client, vaddr: usize, write: bool) void {
-    const base = Address.init(vaddr).pageBase(PAGE_SIZE_4K).raw();
-    if (state.findPage(base)) |page_entry| {
-        page_entry.referenced = true;
-        if (write) {
-            page_entry.dirty = true;
+    fn markPageAccess(state: *client.Client, vaddr: usize, write: bool) void {
+        const base = Address.init(vaddr).pageBase(PAGE_SIZE_4K).raw();
+        if (state.findPage(base)) |page_entry| {
+            page_entry.referenced = true;
+            if (write) {
+                page_entry.dirty = true;
+            }
         }
     }
-}
 
     pub fn getState(self: *Self) *client.Client {
         validate(self);
@@ -261,7 +249,7 @@ fn markPageAccess(state: *client.Client, vaddr: usize, write: bool) void {
         return requested;
     }
 
-    pub fn mmap(self: *Self, client_ctx: *client.Client, addr: usize, length: usize, prot: c_int, flags: c_int, fd: c_int, offset: usize) VmError!usize {
+    pub fn mmap(self: *Self, client_ctx: *clients.Client, addr: usize, length: usize, prot: c_int, flags: c_int, fd: c_int, offset: usize) VmError!usize {
         _ = c.printf("[vm_mmap] entered mmap...\n");
         const caller_ptr: c_ulong = @intCast(@intFromPtr(self.getClient()));
         _ = c.printf("[vm_mmap] enter caller=0x%lx addr=0x%lx length=0x%lx prot=0x%x flags=0x%x fd=%d offset=0x%lx\n", caller_ptr, @as(c_ulong, @intCast(addr)), @as(c_ulong, @intCast(length)), prot, flags, fd, @as(c_ulong, @intCast(offset)));
@@ -318,19 +306,17 @@ fn markPageAccess(state: *client.Client, vaddr: usize, write: bool) void {
         }
 
         const base = state.mmap_next;
-        var file_handle_ref: ?*file.FileHandleRef = null;
+        var retained_handle: ?*anyopaque = null;
         if (!want_anonymous) {
-            const io_state = client_ctx.ioState();
-            const table = client_ctx.fileTable();
-            const handle_ptr = table.getHandle(@intCast(fd)) catch {
+            const retained = client_ctx.retainFileHandleOpaque(@intCast(fd)) catch {
+                _ = c.printf("[vm_mmap] retainFileHandleOpaque failed fd=%d\n", fd);
                 return VmError.InvalidArgs;
             };
-            const ref = file.handleRefFromOpaque(handle_ptr) orelse {
-                return VmError.InvalidArgs;
-            };
-            io_state.retainHandleRef(ref);
-            file_handle_ref = ref;
+            retained_handle = retained;
         }
+        errdefer if (retained_handle) |ref| {
+            client_ctx.releaseFileHandleOpaque(ref);
+        };
 
         const backing_info: region.Backing = if (want_anonymous)
             .Anonymous
@@ -339,7 +325,7 @@ fn markPageAccess(state: *client.Client, vaddr: usize, write: bool) void {
                 .fd = fd,
                 .offset = offset,
                 .length = aligned,
-                .handle_ref = if (file_handle_ref) |ref| @ptrCast(ref) else null,
+                .handle_ref = retained_handle,
             } };
 
         const tracker = state.leaseMmapRegion(base, prot, backing_info) catch |err| {
@@ -512,7 +498,6 @@ pub var vm_handles: [MAX_CLIENTS]VmHandle = [_]VmHandle{VmHandle{
     .idx = 0,
     .generation = 0,
     .client = null,
-    .client_ctx = null,
 }} ** MAX_CLIENTS;
 pub var vm_handle_active: [MAX_CLIENTS]bool = [_]bool{false} ** MAX_CLIENTS;
 
@@ -524,6 +509,7 @@ const sos = cimports.sos;
 const c = cimports.c;
 const sel4 = cimports.sel4;
 pub const client = @import("client.zig");
+const clients = @import("../client.zig");
 const region = @import("region.zig");
 const super = @import("mod.zig");
 const Address = super.Address;
@@ -534,6 +520,7 @@ const HEAP_BASE = super.HEAP_BASE;
 const HEAP_LIMIT = super.HEAP_LIMIT;
 pub const MMAP_LIMIT = super.MMAP_BASE;
 const alignForward = super.alignForward;
+const vmStateIndex = super.vmStateIndex;
 const vmErrorToErrno = super.vmErrorToErrno;
 
 const std = @import("std");

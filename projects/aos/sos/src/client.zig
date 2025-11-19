@@ -14,6 +14,23 @@ pub const Client = struct {
     pub fn vmState(self: *Client) *vm.Client {
         return self.vm_state;
     }
+
+    pub fn retainFileHandleOpaque(self: *Client, fd: usize) FileHandleError!*anyopaque {
+        const table = self.fileTable();
+        const stored = table.getHandle(fd) catch {
+            return FileHandleError.InvalidFd;
+        };
+        const handle_ref = file.handleRefFromOpaque(stored) orelse {
+            return FileHandleError.MissingHandle;
+        };
+        self.io_state.retainHandleRef(handle_ref);
+        return @ptrCast(handle_ref);
+    }
+
+    pub fn releaseFileHandleOpaque(self: *Client, handle_ptr: *anyopaque) void {
+        const handle_ref: *file.FileHandleRef = @ptrCast(@alignCast(handle_ptr));
+        _ = self.io_state.releaseHandleRef(handle_ref);
+    }
 };
 
 var contexts: [sos.MAX_CLIENTS]Client = undefined;
@@ -53,3 +70,8 @@ const sos = cimports.sos;
 
 const file = @import("file.zig");
 const vm = @import("vm/mod.zig");
+
+pub const FileHandleError = error{
+    InvalidFd,
+    MissingHandle,
+};
