@@ -116,6 +116,7 @@ pub const Backing = union(enum) {
     },
 };
 
+
 /// Convert protection booleans into a POSIX-style mask.
 pub fn encodeProtFlags(readable: bool, writable: bool, executable: bool) c_int_t {
     var prot: c_int_t = 0;
