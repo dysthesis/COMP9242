@@ -21,6 +21,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <utils/time.h>
+#include <errno.h>
 #include <syscalls.h>
 /* Your OS header file */
 #include <sos.h>
@@ -284,6 +285,22 @@ static int benchmark(int argc, char *argv[])
     }
 }
 
+static int pager_stats_cmd(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    sos_pager_stats_t stats = {0};
+    if (sos_pager_stats(&stats) < 0) {
+        printf("pager_stats failed: errno=%d\n", sos_errno);
+        return 1;
+    }
+    printf("Pager stats: deferred=%" PRIu64 " dedup_hits=%" PRIu64 " submissions=%" PRIu64
+           " completions=%" PRIu64 " failures=%" PRIu64 "\n",
+           stats.deferred_faults, stats.dedup_hits, stats.job_submissions,
+           stats.job_completions, stats.job_failures);
+    return 0;
+}
+
 struct command {
     char *name;
     int (*command)(int argc, char **argv);
@@ -293,7 +310,7 @@ struct command commands[] = { { "dir", dir }, { "ls", dir }, { "cat", cat }, {
         "cp", cp
     }, { "ps", ps }, { "exec", exec }, {"sleep", second_sleep}, {"msleep", milli_sleep},
     {"time", second_time}, {"mtime", micro_time}, {"kill", kill},
-    {"benchmark", benchmark}
+    {"benchmark", benchmark}, {"pager_stats", pager_stats_cmd}
 };
 
 int main(void)

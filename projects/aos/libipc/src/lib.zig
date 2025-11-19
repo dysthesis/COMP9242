@@ -15,6 +15,7 @@ pub const SyscallNum = enum(u8) {
     Mmap = 9,
     Stat = 10,
     GetDirent = 11,
+    PagerStats = 12,
 };
 
 pub const SyscallDeserialisationError = error{

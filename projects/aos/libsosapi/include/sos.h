@@ -56,6 +56,14 @@ typedef struct {
   char command[N_NAME]; /* Name of exectuable */
 } sos_process_t;
 
+typedef struct {
+  uint64_t deferred_faults;
+  uint64_t dedup_hits;
+  uint64_t job_submissions;
+  uint64_t job_completions;
+  uint64_t job_failures;
+} sos_pager_stats_t;
+
 /* I/O system calls */
 
 int sos_open(const char *path, fmode_t mode);
@@ -129,6 +137,8 @@ void sos_usleep(int usec);
  */
 
 extern int sos_errno;
+
+int sos_pager_stats(sos_pager_stats_t *stats);
 
 /*************************************************************************/
 /*                                   */

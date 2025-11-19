@@ -298,7 +298,7 @@ const ServerContext = struct {
         flags: c_int,
     ) ?SyscallResponse {
         if (path.len == 0) {
-        return SyscallResponse{ .Open = .{ .result = -sos.EINVAL } };
+            return SyscallResponse{ .Open = .{ .result = -sos.EINVAL } };
         }
 
         const cont = continuation.ContinuationPool.alloc() orelse {
@@ -762,6 +762,7 @@ fn handleDecodedSyscall(ctx: *ServerContext, syscall: Syscall) ?SyscallResponse 
         .Brk => |args| handleBrk(ctx, args),
         .Mmap => |args| handleMmap(ctx, args),
         .GetDirent => |args| handleGetDirent(ctx, args),
+        .PagerStats => handlePagerStats(ctx),
     };
 }
 
@@ -815,6 +816,17 @@ fn handleGetDirent(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     }
 
     return ctx.startAsyncGetDirent(caller, client_ctx, vm_handle, idx - 1, out_addr, out_len);
+}
+
+fn handlePagerStats(_: *ServerContext) ?SyscallResponse {
+    const snapshot = vm_fault.pagerStatsSnapshot();
+    return SyscallResponse{ .PagerStats = .{
+        .deferred_faults = @as(u64, @intCast(snapshot.deferred_faults)),
+        .dedup_hits = @as(u64, @intCast(snapshot.dedup_hits)),
+        .job_submissions = @as(u64, @intCast(snapshot.job_submissions)),
+        .job_completions = @as(u64, @intCast(snapshot.job_completions)),
+        .job_failures = @as(u64, @intCast(snapshot.job_failures)),
+    } };
 }
 
 fn handleClose(ctx: *ServerContext, args: anytype) ?SyscallResponse {

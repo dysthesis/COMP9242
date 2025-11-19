@@ -26,6 +26,7 @@ pub const Syscall = union(lib.SyscallNum) {
         buf_addr: usize,
         buf_size: usize,
     },
+    PagerStats: struct {},
 
     fn serialise(self: Syscall) sel4.seL4_MessageInfo_t {
         return switch (self) {
@@ -110,6 +111,13 @@ pub const Syscall = union(lib.SyscallNum) {
                 sel4.seL4_SetMR(6, args.offset);
                 break :blk sel4.seL4_MessageInfo_new(0, 0, 0, 7);
             },
+            .PagerStats => blk: {
+                sel4.seL4_SetMR(0, @as(sel4.seL4_Word, @intFromEnum(lib.SyscallNum.PagerStats)));
+                sel4.seL4_SetMR(1, 0);
+                sel4.seL4_SetMR(2, 0);
+                sel4.seL4_SetMR(3, 0);
+                break :blk sel4.seL4_MessageInfo_new(0, 0, 0, 4);
+            },
         };
     }
 
@@ -126,6 +134,7 @@ pub const Syscall = union(lib.SyscallNum) {
             .Mmap => .Mmap,
             .Stat => .Stat,
             .GetDirent => .GetDirent,
+            .PagerStats => .PagerStats,
         };
     }
 
@@ -207,6 +216,7 @@ pub const Syscall = union(lib.SyscallNum) {
                     .buf_size = sel4.seL4_GetMR(3),
                 },
             },
+            .PagerStats => Syscall{ .PagerStats = .{} },
         };
     }
 };

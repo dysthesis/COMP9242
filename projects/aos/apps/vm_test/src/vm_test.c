@@ -2,6 +2,11 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <utils/page.h>
 
 #define NBLOCKS 9
@@ -71,9 +76,67 @@ static void pt_test(void) {
   printf("[pt_test] end\n");
 }
 
+#define FILE_TEST_PAGES 8
+#define FILE_TEST_NAME "pager_test.bin"
+
+static void file_mmap_test(void) {
+  printf("[file_mmap_test] begin\n");
+  const size_t length = FILE_TEST_PAGES * PAGE_SIZE_4K;
+  int fd = open(FILE_TEST_NAME, O_RDWR | O_CREAT | O_TRUNC, 0644);
+  if (fd < 0) {
+    printf("[file_mmap_test] open failed errno=%d\n", errno);
+    abort();
+  }
+
+  for (size_t page = 0; page < FILE_TEST_PAGES; page++) {
+    uint8_t byte = (uint8_t)page;
+    for (size_t offset = 0; offset < PAGE_SIZE_4K; offset++) {
+      if (write(fd, &byte, sizeof(byte)) != sizeof(byte)) {
+        printf("[file_mmap_test] write failed errno=%d\n", errno);
+        abort();
+      }
+    }
+  }
+
+  if (lseek(fd, 0, SEEK_SET) != 0) {
+    printf("[file_mmap_test] lseek failed errno=%d\n", errno);
+    abort();
+  }
+
+  uint8_t *mapped = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+  if (mapped == MAP_FAILED) {
+    printf("[file_mmap_test] mmap failed errno=%d\n", errno);
+    abort();
+  }
+  close(fd);
+
+  for (size_t page = 0; page < FILE_TEST_PAGES; page++) {
+    uint8_t expected = (uint8_t)page;
+    uint8_t value = mapped[page * PAGE_SIZE_4K];
+    printf("[file_mmap_test] page=%zu addr=%p value=%u expected=%u\n",
+           page, (void *)&mapped[page * PAGE_SIZE_4K], value, expected);
+    if (value != expected) {
+      printf("[file_mmap_test] mismatch at page=%zu value=%u expected=%u\n",
+             page, value, expected);
+      abort();
+    }
+  }
+
+  if (munmap(mapped, length) != 0) {
+    printf("[file_mmap_test] munmap failed errno=%d\n", errno);
+    abort();
+  }
+
+  if (unlink(FILE_TEST_NAME) != 0) {
+    printf("[file_mmap_test] unlink failed errno=%d\n", errno);
+  }
+  printf("[file_mmap_test] end\n");
+}
+
 int main(void) {
   printf("[vm_test] entering main\n");
   pt_test();
+  file_mmap_test();
   printf("[vm_test] main complete, exiting successfully\n");
   return 0;
 }

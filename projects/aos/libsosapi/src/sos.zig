@@ -410,6 +410,27 @@ pub export fn sos_usleep(usec: c_int) callconv(.c) void {
     clearErrno();
 }
 
+pub export fn sos_pager_stats(out: ?*sos_types.sos_pager_stats_t) callconv(.c) c_int {
+    if (out == null) {
+        return setErrno(sos.EINVAL);
+    }
+
+    const syscall = Syscall{ .PagerStats = .{} };
+    const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| return handleCallError(err);
+    return switch (reply) {
+        .PagerStats => |payload| blk: {
+            out.?.deferred_faults = payload.deferred_faults;
+            out.?.dedup_hits = payload.dedup_hits;
+            out.?.job_submissions = payload.job_submissions;
+            out.?.job_completions = payload.job_completions;
+            out.?.job_failures = payload.job_failures;
+            clearErrno();
+            break :blk 0;
+        },
+        else => unreachable,
+    };
+}
+
 pub export fn sos_time_stamp() callconv(.c) i64 {
     const syscall = Syscall{ .Timestamp = .{} };
     const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| {
