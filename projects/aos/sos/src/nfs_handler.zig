@@ -14,6 +14,7 @@ pub const NfsOperation = enum {
     Open,
     Read,
     Write,
+    Pread,
     Close,
     Stat,
     OpenDir,
@@ -232,6 +233,21 @@ pub export fn nfsGenericCallbackZig(
             .Read => {
                 if (data) |read_data| {
                     if (slot.read_buf) |buf| {
+                        const bytes_read: usize = @intCast(err);
+                        @memcpy(buf[0..bytes_read], @as([*]u8, @ptrCast(read_data))[0..bytes_read]);
+                        slot.status = @intCast(bytes_read);
+                    } else {
+                        _ = c.printf("[nfs_callback] Read succeeded but read_buf is null\n");
+                        slot.status = -@as(i32, @intCast(sos.EIO));
+                    }
+                } else {
+                    _ = c.printf("[nfs_callback] Read succeeded but data is null\n");
+                    slot.status = -@as(i32, @intCast(sos.EIO));
+                }
+            },
+            .Pread => {
+                if (data) |read_data| {
+                    if (slot.read_buf) |buf| {
                         // libnfs provides data buffer in callback for reads
                         // Copy from libnfs buffer to our buffer
                         const bytes_read: usize = @intCast(err); // For read, err contains bytes read
@@ -341,6 +357,37 @@ pub fn readSync(fh: *anyopaque, buf: [*]u8, count: usize) !usize {
     );
     if (rc < 0) {
         _ = c.printf("[nfs] nfs_read_async failed: %d\n", rc);
+        return error.NFSOperationFailed;
+    }
+
+    const status = NfsPool.wait(slot);
+    if (status < 0) {
+        return error.OperationFailed;
+    }
+
+    return @intCast(status);
+}
+
+pub fn preadSync(fh: *anyopaque, buf: [*]u8, offset: usize, count: usize) !usize {
+    const nfs_ctx = get_nfs_context() orelse return error.NoNFSContext;
+    const slot = nfs_pool.acquire() orelse return error.PoolExhausted;
+    defer nfs_pool.release(slot);
+
+    slot.operation = .Pread;
+    slot.read_buf = buf;
+    slot.stat_out = null;
+
+    const fh_typed: *nfsfh = @ptrCast(@alignCast(fh));
+    const rc = nfs_pread_async(
+        nfs_ctx,
+        fh_typed,
+        @intCast(offset),
+        count,
+        nfs_callback_c_bridge,
+        @as(?*anyopaque, @ptrCast(slot)),
+    );
+    if (rc < 0) {
+        _ = c.printf("[nfs] nfs_pread_async failed: %d\n", rc);
         return error.NFSOperationFailed;
     }
 
@@ -508,6 +555,7 @@ extern fn nfs_is_mounted() bool;
 
 extern fn nfs_open2_async(nfs_ctx: ?*nfs_context, path: [*:0]const u8, flags: c_int, mode: c_int, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_read_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, count: u64, cb: nfs_cb, private_data: ?*anyopaque) c_int;
+extern fn nfs_pread_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, offset: u64, count: u64, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_write_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, count: u64, buf: [*]const u8, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_close_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_stat64_async(nfs_ctx: ?*nfs_context, path: [*:0]const u8, cb: nfs_cb, private_data: ?*anyopaque) c_int;

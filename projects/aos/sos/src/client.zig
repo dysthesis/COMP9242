@@ -28,8 +28,12 @@ pub const Client = struct {
     }
 
     pub fn releaseFileHandleOpaque(self: *Client, handle_ptr: *anyopaque) void {
-        const handle_ref: *file.FileHandleRef = @ptrCast(@alignCast(handle_ptr));
-        _ = self.io_state.releaseHandleRef(handle_ref);
+        const handle_ref = file.handleRefFromOpaque(handle_ptr) orelse return;
+        const release = self.io_state.releaseHandleRef(handle_ref);
+        switch (release) {
+            .Closed => |raw| closeRetainedHandle(raw),
+            else => {},
+        }
     }
 };
 
@@ -67,11 +71,33 @@ test "client contexts bootstrap" {
 const std = @import("std");
 const cimports = @import("cimports");
 const sos = cimports.sos;
+const c = cimports.c;
 
 const file = @import("file.zig");
 const vm = @import("vm/mod.zig");
+const nfs_handler = @import("nfs_handler.zig");
 
 pub const FileHandleError = error{
     InvalidFd,
     MissingHandle,
 };
+
+fn closeRetainedHandle(handle: file.FileHandle) void {
+    nfs_handler.closeSync(handle) catch |err| {
+        _ = c.printf("[client] closeSync failed err=%d\n", @as(c_int, @intCast(mapNfsError(err))));
+    };
+}
+
+fn mapNfsError(err: anyerror) c_int {
+    return switch (err) {
+        error.NoNFSContext => sos.ENODEV,
+        error.PoolExhausted => sos.EAGAIN,
+        error.NotFound => sos.ENOENT,
+        error.PermissionDenied => sos.EACCES,
+        error.OutOfMemory => sos.ENOMEM,
+        error.NetworkUnreachable => sos.ENETUNREACH,
+        error.NFSOperationFailed => sos.EIO,
+        error.OperationFailed => sos.EIO,
+        else => sos.EIO,
+    };
+}

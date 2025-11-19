@@ -3,6 +3,7 @@ const cimports = @import("cimports");
 const sel4 = cimports.sel4;
 const sos = cimports.sos;
 const c_int_t = i32;
+const file = @import("../file.zig");
 
 /// Indicator for region type
 pub const RegionKind = enum(u4) {
@@ -102,8 +103,23 @@ pub const Region = struct {
         return dataToProt(self.attr.data);
     }
 
-    pub fn setFileBacking(self: *Region, fd: c_int_t, offset: usize, length: usize, handle_ref: ?*anyopaque) void {
-        self.backing = .{ .File = .{ .fd = fd, .offset = offset, .length = length, .handle_ref = handle_ref } };
+    pub fn setFileBacking(
+        self: *Region,
+        fd: c_int_t,
+        offset: usize,
+        length: usize,
+        handle_ref: ?*anyopaque,
+        owner: ?*file.ClientIoState,
+    ) void {
+        self.backing = .{
+            .File = .{
+                .fd = fd,
+                .offset = offset,
+                .length = length,
+                .handle_ref = handle_ref,
+                .handle_owner = owner,
+            },
+        };
     }
 };
 
@@ -114,9 +130,9 @@ pub const Backing = union(enum) {
         offset: usize,
         length: usize,
         handle_ref: ?*anyopaque,
+        handle_owner: ?*file.ClientIoState,
     },
 };
-
 
 /// Convert protection booleans into a POSIX-style mask.
 pub fn encodeProtFlags(readable: bool, writable: bool, executable: bool) c_int_t {

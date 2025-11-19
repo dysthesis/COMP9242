@@ -326,6 +326,7 @@ pub const Client = struct {
     }
 
     fn releaseAllPages(self: *Self) void {
+        self.releaseAllFileBackings();
         var it = self.addr_space.iterator();
         while (it.next()) |kv| {
             const vaddr = kv.key_ptr.*;
@@ -336,6 +337,33 @@ pub const Client = struct {
         self.mapped_count = 0;
         if (self.addr_space.hasLivePagingNodes()) {
             _ = c.printf("[vm_teardown] warning: paging nodes remain after release\n");
+        }
+    }
+
+    fn releaseAllFileBackings(self: *Self) void {
+        var it = self.addr_space.regions.iter();
+        while (it.next()) |node| {
+            switch (node.reg.backing) {
+                .Anonymous => {},
+                .File => |info| {
+                    releaseFileBackingHandle(info.handle_owner, info.handle_ref);
+                    node.reg.backing = .Anonymous;
+                },
+            }
+        }
+    }
+
+    fn releaseFileBackingHandle(owner: ?*file.ClientIoState, handle_ptr: ?*anyopaque) void {
+        const io_state = owner orelse return;
+        const handle_ref = file.handleRefFromOpaque(handle_ptr) orelse return;
+        const release = io_state.releaseHandleRef(handle_ref);
+        switch (release) {
+            .Closed => |raw| {
+                nfs_handler.closeSync(raw) catch {
+                    _ = c.printf("[vm_mmap] closeSync failed\n");
+                };
+            },
+            else => {},
         }
     }
 
@@ -446,6 +474,13 @@ pub const Client = struct {
         if (!tracker.used) return;
 
         const node: *RegionNode = @alignCast(@fieldParentPtr("reg", tracker));
+        switch (tracker.backing) {
+            .Anonymous => {},
+            .File => |info| {
+                releaseFileBackingHandle(info.handle_owner, info.handle_ref);
+                tracker.backing = .Anonymous;
+            },
+        }
 
         self.addr_space.removeRegion(node);
         self.addr_space.alloc.destroy(node);
@@ -478,6 +513,8 @@ const cimports = @import("cimports");
 const sel4 = cimports.sel4;
 const c = cimports.c;
 const sos = cimports.sos;
+const file = @import("../file.zig");
+const nfs_handler = @import("../nfs_handler.zig");
 
 extern fn sos_metadata_base_runtime() usize;
 

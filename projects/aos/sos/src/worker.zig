@@ -619,33 +619,40 @@ pub const Worker = struct {
             file_op.completeErrno(sos.EFAULT);
             return;
         };
-        _ = vm_handle; // Reserved for future mapping work in Step 4.5
+        _ = vm_handle;
 
         const page_len: usize = vm.PAGE_SIZE_4K;
-        var status: c_int = 0;
+        @memset(file_op.payload[0..page_len], 0);
 
         switch (params.source) {
             .Anonymous => {
-                @memset(file_op.payload[0..page_len], 0);
                 file_op.payload_len = page_len;
             },
             .File => |backing| {
-                status = sos.ENOSYS;
-                _ = c.printf(
-                    "[worker] PageFill file-backed source unsupported client=%u fd=%zu offset=0x%lx\n",
-                    params.client_id,
-                    backing.fd,
-                    @as(c_ulong, @intCast(backing.file_offset)),
-                );
+                const handle_ref = file.handleRefFromOpaque(backing.handle_ref) orelse {
+                    file_op.completeErrno(sos.EBADF);
+                    return;
+                };
+                const raw_handle = file.rawFileHandle(handle_ref);
+                const buf_ptr: [*]u8 = @as([*]u8, @ptrCast(&file_op.payload[0]));
+                const read_bytes = nfs_handler.preadSync(
+                    raw_handle,
+                    buf_ptr,
+                    backing.file_offset,
+                    page_len,
+                ) catch |err| {
+                    file_op.completeErrno(mapNfsError(err));
+                    return;
+                };
+                if (read_bytes < page_len) {
+                    const rest = buf_ptr[read_bytes..page_len];
+                    @memset(rest, 0);
+                }
+                file_op.payload_len = page_len;
             },
         }
 
-        if (status == 0) {
-            file_op.completeStatus(0);
-        } else {
-            file_op.payload_len = 0;
-            file_op.completeErrno(status);
-        }
+        file_op.completeStatus(0);
     }
 };
 
