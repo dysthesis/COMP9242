@@ -75,7 +75,7 @@ pub const PageFillSource = union(enum) {
 
     /// File-backed mapping requiring data fetched from a file descriptor
     File: struct {
-        fd: usize,
+        fd: c_int,
         file_offset: usize,
         length: usize = vm.PAGE_SIZE_4K,
     },
