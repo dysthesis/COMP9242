@@ -14,6 +14,8 @@ pub const WorkType = enum(u8) {
     ReadDir,
     GetDirent,
     PageFill,
+    Lseek,
+    Unlink,
 };
 
 pub const OPEN_PATH_CAPACITY: usize = 256;
@@ -39,6 +41,13 @@ pub const WriteParams = struct {
     client_id: u32,
 };
 
+pub const LseekParams = struct {
+    fd: usize,
+    offset: i64,
+    whence: c_int,
+    client_id: u32,
+};
+
 pub const CloseParams = struct {
     fd: usize,
     client_id: u32,
@@ -58,6 +67,11 @@ pub const OpenDirParams = struct {
 
 pub const ReadDirParams = struct {
     fd: usize,
+    client_id: u32,
+};
+
+pub const UnlinkParams = struct {
+    path: [OPEN_PATH_CAPACITY:0]u8,
     client_id: u32,
 };
 
@@ -102,6 +116,8 @@ pub const WorkParams = union(WorkType) {
     ReadDir: ReadDirParams,
     GetDirent: GetDirentParams,
     PageFill: PageFillParams,
+    Lseek: LseekParams,
+    Unlink: UnlinkParams,
 };
 
 pub const FileOpResult = union(enum) {
@@ -109,6 +125,7 @@ pub const FileOpResult = union(enum) {
     Bytes: usize,
     Errno: i32,
     Status: i32,
+    Offset: i64,
 
     pub fn okFd(fd: usize) FileOpResult {
         return .{ .Fd = fd };
@@ -124,6 +141,10 @@ pub const FileOpResult = union(enum) {
 
     pub fn status(value: i32) FileOpResult {
         return .{ .Status = value };
+    }
+
+    pub fn offset(value: i64) FileOpResult {
+        return .{ .Offset = value };
     }
 };
 
@@ -163,6 +184,10 @@ pub const FileOpState = struct {
 
     pub fn completeStatus(self: *FileOpState, value: i32) void {
         self.finish(FileOpResult.status(value));
+    }
+
+    pub fn completeOffset(self: *FileOpState, value: i64) void {
+        self.finish(FileOpResult.offset(value));
     }
 
     pub fn isCompleted(self: *const FileOpState) bool {

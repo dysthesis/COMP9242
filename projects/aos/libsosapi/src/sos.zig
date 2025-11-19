@@ -235,6 +235,24 @@ pub export fn sos_write(file: c_int, buf: [*c]const u8, nbyte: usize) callconv(.
     return @as(c_int, @intCast(total));
 }
 
+pub export fn sos_lseek(file: c_int, offset: i64, whence: c_int) callconv(.c) i64 {
+    const syscall = Syscall{
+        .Lseek = .{
+            .fd = signedIntToWord(file),
+            .offset = signedIntToWord(offset),
+            .whence = signedIntToWord(whence),
+        },
+    };
+    const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| return switch (handleCallError(err)) {
+        -1 => -@as(i64, sos.EINVAL),
+        else => -@as(i64, sos.EINVAL),
+    };
+    return switch (reply) {
+        .Lseek => |payload| handleVmReturn(payload.result),
+        else => unreachable,
+    };
+}
+
 fn handleVmReturn(raw: i64) i64 {
     if (raw < 0) {
         sos_errno = @intCast(-raw);
@@ -342,6 +360,33 @@ pub export fn sos_stat(path: [*c]const u8, buf: ?*sos_types.sos_stat_t) callconv
     const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| return handleCallError(err);
     return switch (reply) {
         .Stat => |payload| handleResult(payload.result),
+        else => unreachable,
+    };
+}
+
+pub export fn sos_unlink(path: [*c]const u8) callconv(.c) c_int {
+    if (path == null) {
+        return setErrno(sos.EINVAL);
+    }
+
+    const path_bytes: [*]const u8 = @ptrCast(path);
+    const len = strnlen(path_bytes, MAX_IO_BUF);
+    if (len == 0) {
+        return setErrno(sos.EINVAL);
+    }
+    if (len >= MAX_IO_BUF) {
+        return setErrno(sos.ENAMETOOLONG);
+    }
+
+    const syscall = Syscall{
+        .Unlink = .{
+            .path_addr = usizeToWord(@intFromPtr(path_bytes)),
+            .path_len = usizeToWord(len + 1),
+        },
+    };
+    const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| return handleCallError(err);
+    return switch (reply) {
+        .Unlink => |payload| handleResult(payload.result),
         else => unreachable,
     };
 }

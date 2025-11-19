@@ -375,8 +375,18 @@ pub const VmHandle = struct {
         const base_addr = Address.init(fault_addr).pageBase(PAGE_SIZE_4K);
         const base = base_addr.raw();
 
-        if (state.findPage(base) != null) {
-            return;
+        // Check if page record exists and is actually mapped in hardware
+        if (state.findPage(base)) |page_entry| {
+            if (page_entry.resident) {
+                // Page is already mapped, fault should not have occurred.
+                // This can happen if TLB is stale, so we just return success.
+                return;
+            }
+            // Page record exists but not resident. This means a deferred page
+            // fault is already in progress. Return Unsupported to trigger
+            // deduplication in the pager.
+            _ = c.printf("[vm_fault] found non-resident page at 0x%lx (deferred fault in progress)\n", @as(c_ulong, @intCast(base)));
+            return VmError.Unsupported;
         }
 
         const min_stack = state.stack_guard + PAGE_SIZE_4K;
@@ -519,7 +529,7 @@ const bootstrapVmStates = super.bootstrapVmStates;
 const VmError = super.VmError;
 const HEAP_BASE = super.HEAP_BASE;
 const HEAP_LIMIT = super.HEAP_LIMIT;
-pub const MMAP_LIMIT = super.MMAP_BASE;
+pub const MMAP_LIMIT = super.MMAP_LIMIT;
 const alignForward = super.alignForward;
 const vmStateIndex = super.vmStateIndex;
 const vmErrorToErrno = super.vmErrorToErrno;

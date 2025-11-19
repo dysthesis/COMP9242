@@ -93,6 +93,12 @@ int sos_write(int file, const char *buf, size_t nbyte);
  * Returns -1 on error (invalid file).
  */
 
+int64_t sos_lseek(int file, int64_t offset, int whence);
+/* Repositions file offset. Returns new offset on success, -1 on error. */
+
+int sos_unlink(const char *path);
+/* Remove a file. Returns 0 on success, -1 on error. */
+
 int sos_getdirent(int pos, char *name, size_t nbyte);
 /* Reads name of entry "pos" in directory into "name", max "nbyte" bytes.
  * Returns number of bytes returned, zero if "pos" is next free entry,

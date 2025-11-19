@@ -65,6 +65,8 @@ pub const SyscallResponse = union(lib.SyscallNum) {
         job_completions: u64,
         job_failures: u64,
     },
+    Lseek: struct { result: i64 },
+    Unlink: struct { result: c_int },
 
     pub fn deserialise(tag: lib.SyscallNum, msg: sel4.seL4_MessageInfo_t) lib.SyscallCallError!SyscallResponse {
         const len = sel4.seL4_MessageInfo_get_length(msg);
@@ -97,6 +99,8 @@ pub const SyscallResponse = union(lib.SyscallNum) {
                     .job_failures = wordToU64(sel4.seL4_GetMR(4)),
                 },
             },
+            .Lseek => SyscallResponse{ .Lseek = .{ .result = wordToI64(mr0) } },
+            .Unlink => SyscallResponse{ .Unlink = .{ .result = wordToCInt(mr0) } },
         };
     }
 
@@ -127,6 +131,8 @@ pub const SyscallResponse = union(lib.SyscallNum) {
                     .Stat => |payload| cIntToWord(payload.result),
                     .GetDirent => |payload| cIntToWord(payload.result),
                     .PagerStats => unreachable,
+                    .Lseek => |payload| i64ToWord(payload.result),
+                    .Unlink => |payload| cIntToWord(payload.result),
                 };
                 sel4.seL4_SetMR(0, word);
                 return sel4.seL4_MessageInfo_new(0, 0, 0, 1);

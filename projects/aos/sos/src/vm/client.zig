@@ -56,7 +56,8 @@ pub const Client = struct {
             entry.dirty = false;
             entry.referenced = false;
             entry.pagefile_slot = -1;
-            entry.waiters.reset();
+            // Do not reset waiters, as threads may be waiting for this page
+            // entry.waiters.reset();
             return entry;
         }
 
@@ -136,9 +137,15 @@ pub const Client = struct {
 
         _ = c.printf("[vm_map] enter caller=0x%lx vaddr=0x%lx read=%d write=%d exec=%d mapped_count=%lu\n", @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(vaddr)), @as(c_int, if (readable) 1 else 0), @as(c_int, if (writable) 1 else 0), @as(c_int, if (executable) 1 else 0), @as(c_ulong, @intCast(self.mapped_count)));
 
-        if (self.findPage(vaddr) != null) {
-            _ = c.printf("[vm_map] already mapped vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
-            return;
+        // Check if page exists and is actually mapped in hardware
+        if (self.findPage(vaddr)) |page_entry| {
+            if (page_entry.resident) {
+                _ = c.printf("[vm_map] already mapped vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
+                return;
+            }
+            // Page record exists but not resident, so we continue to perform
+            // the actual hardware mapping below
+            _ = c.printf("[vm_map] mapping non-resident page vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
         }
 
         const proc_vspace = sos.client_get_vspace(caller);

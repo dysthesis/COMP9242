@@ -383,6 +383,95 @@ const ServerContext = struct {
         return null;
     }
 
+    fn startAsyncUnlink(
+        self: *ServerContext,
+        caller: *sos.client_t,
+        client_ctx: *clients.Client,
+        path: []const u8,
+    ) ?SyscallResponse {
+        if (path.len == 0) {
+            return SyscallResponse{ .Unlink = .{ .result = -sos.EINVAL } };
+        }
+
+        const cont = continuation.ContinuationPool.alloc() orelse {
+            return SyscallResponse{ .Unlink = .{ .result = -sos.ENOMEM } };
+        };
+
+        const old_reply_cap = self.reply.*;
+        const old_reply_ut = self.reply_ut.*;
+        const new_reply_ut = sos.alloc_retype(self.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
+        if (new_reply_ut == null) {
+            continuation.ContinuationPool.free(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            return SyscallResponse{ .Unlink = .{ .result = -sos.ENOMEM } };
+        }
+
+        cont.client = caller;
+        cont.reply = old_reply_cap;
+        cont.reply_ut = old_reply_ut;
+        cont.resume_fn = fileOpResume;
+        cont.state = .{
+            .FileOp = worker.FileOpState{
+                .params = .{ .Unlink = .{
+                    .path = undefined,
+                    .client_id = @intCast(client_ctx.id),
+                } },
+            },
+        };
+
+        var file_op_state = &cont.state.FileOp;
+        file_op_state.reset();
+
+        const normalized_path = Path.initFromSlice(path) catch |err| {
+            const errno: c_int = switch (err) {
+                error.NameTooLong => sos.ENAMETOOLONG,
+                error.InvalidComponent => sos.EPERM,
+                error.Empty => sos.EINVAL,
+            };
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Unlink = .{ .result = -errno } };
+        };
+
+        var unlink_params = &file_op_state.params.Unlink;
+        normalized_path.copyTo(unlink_params.path[0..]) catch |err| {
+            const errno: c_int = switch (err) {
+                error.NameTooLong => sos.ENAMETOOLONG,
+                error.InvalidComponent => sos.EPERM,
+                error.Empty => sos.EINVAL,
+            };
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Unlink = .{ .result = -errno } };
+        };
+
+        continuation.FileOpQueue.enqueue(cont);
+
+        const enqueue_rc: c_int = worker.workerEnqueue(file_op_state);
+        if (enqueue_rc < 0) {
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Unlink = .{ .result = enqueue_rc } };
+        }
+
+        self.have_reply.* = false;
+        self.reply_ut.* = new_reply_ut.?;
+        return null;
+    }
+
     fn startAsyncRead(
         self: *ServerContext,
         caller: *sos.client_t,
@@ -536,6 +625,78 @@ const ServerContext = struct {
             cont.cleanup();
             continuation.ContinuationPool.free(cont);
             return SyscallResponse{ .Write = .{ .result = enqueue_rc } };
+        }
+
+        self.have_reply.* = false;
+        self.reply_ut.* = new_reply_ut.?;
+        return null;
+    }
+
+    fn startAsyncLseek(
+        self: *ServerContext,
+        caller: *sos.client_t,
+        client_ctx: *clients.Client,
+        fd_index: usize,
+        offset: i64,
+        whence: c_int,
+    ) ?SyscallResponse {
+        const table = client_ctx.fileTable();
+        _ = table.getHandle(fd_index) catch |err| {
+            const errno: c_int = mapFileTableError(err);
+            return SyscallResponse{ .Lseek = .{ .result = -@as(i64, errno) } };
+        };
+        const io_state = client_ctx.ioState();
+        if (fd_index >= io_state.fds.len) {
+            return SyscallResponse{ .Lseek = .{ .result = -@as(i64, sos.EBADF) } };
+        }
+        const fd_entry = io_state.fds[fd_index];
+        if (!fd_entry.used or fd_entry.kind != file.FileKind.regular) {
+            return SyscallResponse{ .Lseek = .{ .result = -@as(i64, sos.EBADF) } };
+        }
+
+        const cont = continuation.ContinuationPool.alloc() orelse {
+            return SyscallResponse{ .Lseek = .{ .result = -@as(i64, sos.ENOMEM) } };
+        };
+
+        const old_reply_cap = self.reply.*;
+        const old_reply_ut = self.reply_ut.*;
+        const new_reply_ut = sos.alloc_retype(self.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
+        if (new_reply_ut == null) {
+            continuation.ContinuationPool.free(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            return SyscallResponse{ .Lseek = .{ .result = -@as(i64, sos.ENOMEM) } };
+        }
+
+        cont.client = caller;
+        cont.reply = old_reply_cap;
+        cont.reply_ut = old_reply_ut;
+        cont.resume_fn = fileOpResume;
+        cont.state = .{
+            .FileOp = worker.FileOpState{
+                .params = .{ .Lseek = .{
+                    .fd = fd_index,
+                    .offset = offset,
+                    .whence = whence,
+                    .client_id = @intCast(client_ctx.id),
+                } },
+            },
+        };
+
+        var file_op_state = &cont.state.FileOp;
+        file_op_state.reset();
+
+        continuation.FileOpQueue.enqueue(cont);
+
+        const enqueue_rc: c_int = worker.workerEnqueue(file_op_state);
+        if (enqueue_rc < 0) {
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Lseek = .{ .result = @as(i64, enqueue_rc) } };
         }
 
         self.have_reply.* = false;
@@ -763,6 +924,8 @@ fn handleDecodedSyscall(ctx: *ServerContext, syscall: Syscall) ?SyscallResponse 
         .Mmap => |args| handleMmap(ctx, args),
         .GetDirent => |args| handleGetDirent(ctx, args),
         .PagerStats => handlePagerStats(ctx),
+        .Lseek => |args| handleLseek(ctx, args),
+        .Unlink => |args| handleUnlink(ctx, args),
     };
 }
 
@@ -842,7 +1005,7 @@ fn handleClose(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     const client_ctx = clients.get(client_id) orelse {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EINVAL)) } };
     };
-    var state = client_ctx.ioState();
+    const state = client_ctx.ioState();
     ensureStdio(state, client_id_u16);
     if (!state.initialised) {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EBADF)) } };
@@ -937,7 +1100,7 @@ fn readResumeFn(cont: *continuation.Continuation, event_data: ?*anyopaque, resul
         return;
     }
 
-    // Success - copy to user buffer
+    // Success, copy to user buffer
     if (read_result > 0) {
         const copied = state.vm_handle.copyToUserBuffer(state.user_buf_addr, &temp_buf, @intCast(read_result));
         if (!copied) {
@@ -946,7 +1109,7 @@ fn readResumeFn(cont: *continuation.Continuation, event_data: ?*anyopaque, resul
         }
     }
 
-    // Serialize response
+    // Serialise response
     const resp = SyscallResponse{ .Read = .{ .result = @intCast(read_result) } };
     const msg = resp.serialise();
     result.* = .{ .Complete = .{ .response = msg } };
@@ -1138,6 +1301,30 @@ fn handleWrite(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     return ctx.startAsyncWrite(caller, client_ctx, vm_handle, fd_index, user_buf_addr, req);
 }
 
+fn handleLseek(ctx: *ServerContext, args: anytype) ?SyscallResponse {
+    const caller = ctx.caller orelse return .{ .Lseek = .{ .result = -@as(i64, sos.EINVAL) } };
+    const client_id: usize = @intCast(caller.id);
+    if (client_id >= MAX_CLIENTS) return .{ .Lseek = .{ .result = -@as(i64, sos.EINVAL) } };
+
+    const client_ctx = clients.get(client_id) orelse return .{ .Lseek = .{ .result = -@as(i64, sos.EINVAL) } };
+    const client_id_u16 = @as(u16, @intCast(client_ctx.id));
+    const state = client_ctx.ioState();
+    ensureStdio(state, client_id_u16);
+    if (!state.initialised) return .{ .Lseek = .{ .result = -@as(i64, sos.EBADF) } };
+
+    const fd_raw: c_int = @intCast(wordToI64(args.fd));
+    if (fd_raw < 0 or fd_raw >= SOS_MAX_OPEN_FILES) return .{ .Lseek = .{ .result = -@as(i64, sos.EBADF) } };
+    const fd_index: usize = @intCast(fd_raw);
+
+    const whence_raw: c_int = @intCast(wordToI64(args.whence));
+    if (whence_raw != c.SEEK_SET and whence_raw != c.SEEK_CUR and whence_raw != c.SEEK_END) {
+        return .{ .Lseek = .{ .result = -@as(i64, sos.EINVAL) } };
+    }
+
+    const offset = wordToI64(args.offset);
+    return ctx.startAsyncLseek(caller, client_ctx, fd_index, offset, whence_raw);
+}
+
 fn handleStat(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     const caller = ctx.caller orelse return .{ .Stat = .{ .result = -sos.EINVAL } };
     const client_id: usize = @intCast(caller.id);
@@ -1197,6 +1384,39 @@ fn handleStat(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     }
 
     return ctx.startAsyncStat(caller, client_ctx, vm_handle, path_slice, @intCast(args.out_addr), out_len);
+}
+
+fn handleUnlink(ctx: *ServerContext, args: anytype) ?SyscallResponse {
+    const caller = ctx.caller orelse return .{ .Unlink = .{ .result = -sos.EINVAL } };
+    const client_id: usize = @intCast(caller.id);
+    if (client_id >= MAX_CLIENTS) return .{ .Unlink = .{ .result = -sos.EINVAL } };
+
+    const client_ctx = clients.get(client_id) orelse return .{ .Unlink = .{ .result = -sos.EINVAL } };
+    const vm_handle = ctx.vm_handle orelse return .{ .Unlink = .{ .result = -sos.EINVAL } };
+
+    const buf_addr: usize = @intCast(args.path_addr);
+    const buf_len: usize = @intCast(args.path_len);
+    if (buf_len == 0 or buf_len > worker.OPEN_PATH_CAPACITY) {
+        return .{ .Unlink = .{ .result = -sos.EINVAL } };
+    }
+
+    var path_buf: [worker.OPEN_PATH_CAPACITY:0]u8 = undefined;
+    @memset(path_buf[0..], 0);
+
+    const copied = vm_handle.copyCStringFromClient(buf_addr, path_buf[0..path_buf.len]) catch |err| {
+        const errno: c_int = vm.vmErrorToErrno(err);
+        return .{ .Unlink = .{ .result = -errno } };
+    };
+
+    if (copied == 0) {
+        return .{ .Unlink = .{ .result = -sos.EINVAL } };
+    }
+    if (copied >= path_buf.len) {
+        return .{ .Unlink = .{ .result = -sos.ENAMETOOLONG } };
+    }
+
+    const path_slice = path_buf[0..copied];
+    return ctx.startAsyncUnlink(caller, client_ctx, path_slice);
 }
 
 fn handleTimestamp(ctx: *ServerContext) SyscallResponse {

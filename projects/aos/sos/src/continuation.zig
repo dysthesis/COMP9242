@@ -156,6 +156,7 @@ pub const Continuation = struct {
                     .Errno => |errno| return self.failFileOp(@intCast(errno)),
                     .Bytes => return self.failFileOp(sos.EIO),
                     .Status => |status| return self.failFileOp(@intCast(status)),
+                    .Offset => return self.failFileOp(sos.EIO),
                 };
                 break :blk libipc.SyscallResponse{ .Open = .{ .result = fd_result } };
             },
@@ -165,6 +166,7 @@ pub const Continuation = struct {
                     .Errno => |errno| return self.failFileOp(@intCast(errno)),
                     .Fd => return self.failFileOp(sos.EIO),
                     .Status => |status| return self.failFileOp(@intCast(status)),
+                    .Offset => return self.failFileOp(sos.EIO),
                 };
 
                 _ = c.printf("[cont] file read complete bytes=%zu\n", bytes);
@@ -194,6 +196,7 @@ pub const Continuation = struct {
                     .Errno => |errno| return self.failFileOp(@intCast(errno)),
                     .Fd => return self.failFileOp(sos.EIO),
                     .Status => |status| return self.failFileOp(@intCast(status)),
+                    .Offset => return self.failFileOp(sos.EIO),
                 };
                 const result_bytes = std.math.cast(c_int, bytes) orelse return self.failFileOp(sos.EIO);
                 break :blk libipc.SyscallResponse{ .Write = .{ .result = result_bytes } };
@@ -202,6 +205,7 @@ pub const Continuation = struct {
                 const status = switch (file_op.result) {
                     .Status => |value| value,
                     .Errno => |errno| return self.failFileOp(@intCast(errno)),
+                    .Offset => return self.failFileOp(sos.EIO),
                     else => return self.failFileOp(sos.EIO),
                 };
                 break :blk libipc.SyscallResponse{ .Close = .{ .result = status } };
@@ -210,6 +214,7 @@ pub const Continuation = struct {
                 const result_status = switch (file_op.result) {
                     .Status => |value| value,
                     .Errno => |errno| return self.failFileOp(@intCast(errno)),
+                    .Offset => return self.failFileOp(sos.EIO),
                     else => return self.failFileOp(sos.EIO),
                 };
 
@@ -248,6 +253,22 @@ pub const Continuation = struct {
                     },
                     else => return self.failFileOp(sos.EIO),
                 }
+            },
+            .Lseek => blk: {
+                const offset = switch (file_op.result) {
+                    .Offset => |value| value,
+                    .Errno => |errno| return self.failFileOp(@intCast(errno)),
+                    else => return self.failFileOp(sos.EIO),
+                };
+                break :blk libipc.SyscallResponse{ .Lseek = .{ .result = offset } };
+            },
+            .Unlink => blk: {
+                const status = switch (file_op.result) {
+                    .Status => |value| value,
+                    .Errno => |errno| return self.failFileOp(@intCast(errno)),
+                    else => return self.failFileOp(sos.EIO),
+                };
+                break :blk libipc.SyscallResponse{ .Unlink = .{ .result = status } };
             },
             else => return self.failFileOp(sos.ENOSYS),
         };
@@ -696,14 +717,23 @@ pub const FileOpQueue = struct {
 };
 
 pub fn resumePageWaiters(head: ?*page.WaitQueue.Node, errno: c_int) void {
+    // Log entry
+    const head_ptr = if (head) |h| @intFromPtr(h) else 0;
+    _ = c.printf("[pager] resumePageWaiters: entered head=0x%lx errno=%d\n", @as(c_ulong, head_ptr), errno);
+
     if (head == null) {
+        _ = c.printf("[pager] resumePageWaiters: wait queue is empty, no waiters to resume\n");
         return;
     }
 
     var payload = PageFaultEvent{ .errno = errno };
     var node_opt = head;
+    var resumed_count: u32 = 0;
+
     while (node_opt) |node| {
         const next = node.next;
+        _ = c.printf("[pager] resumePageWaiters: processing node=%p cont=%p\n", node, node.cont);
+
         const cont_ptr = node.cont orelse {
             _ = c.printf("[pager] WARN: queue node %p missing continuation\n", node);
             node.clear();
@@ -712,11 +742,18 @@ pub fn resumePageWaiters(head: ?*page.WaitQueue.Node, errno: c_int) void {
         };
 
         const cont = @as(*Continuation, @ptrFromInt(@intFromPtr(cont_ptr)));
+        _ = c.printf("[pager] resumePageWaiters: resuming continuation %p client=%u\n", cont, @as(c_uint, cont.client.id));
+
         node.clear();
         const event_ptr: ?*anyopaque = @as(?*anyopaque, @ptrCast(&payload));
         WaitQueues.resumeContinuation(cont, event_ptr);
+
+        resumed_count += 1;
+        _ = c.printf("[pager] resumePageWaiters: resumed continuation %p successfully\n", cont);
         node_opt = next;
     }
+
+    _ = c.printf("[pager] resumePageWaiters: completed, resumed %u waiters\n", resumed_count);
 }
 
 /// Initialise the continuation pool from C code.

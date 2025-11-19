@@ -21,6 +21,7 @@ const PagerInstrumentation = struct {
 };
 
 var pager_stats: PagerInstrumentation = .{};
+var last_logged_completions: usize = 0;
 
 pub fn pagerStatsSnapshot() PagerInstrumentation {
     return pager_stats;
@@ -89,9 +90,8 @@ pub export fn handle_vm_fault(
                 reply,
                 reply_ut,
             );
-            if (attempt == .deferred) {
-                return .deferred;
-            }
+            // Propagate result from pager (handled, deferred, or fatal)
+            return attempt;
         }
 
         _ = c.printf("[vm_fault] handler error=%d\n", vm.vmErrorToErrno(err));
@@ -212,12 +212,16 @@ fn submitPageFillJob(
                 if (key.page_base >= tracker.start) {
                     delta = key.page_base - tracker.start;
                 }
+                const file_offset = info.offset + delta;
+                _ = c.printf("[pager] submitPageFillJob: file-backed fd=%d offset=%zu handle_ref=%p\n", info.fd, file_offset, handle_ptr);
                 source = .{ .File = .{
                     .fd = info.fd,
-                    .file_offset = info.offset + delta,
+                    .file_offset = file_offset,
                     .length = vm.PAGE_SIZE_4K,
                     .handle_ref = handle_ptr,
                 } };
+            } else {
+                _ = c.printf("[pager] submitPageFillJob: WARNING file region has no handle_ref\n");
             }
         },
     }
@@ -235,11 +239,13 @@ fn submitPageFillJob(
 
     const rc = worker.workerEnqueue(job);
     if (rc < 0) {
+        _ = c.printf("[pager] submitPageFillJob: enqueue failed rc=%d\n", rc);
         pager_job_meta[slot.index] = null;
         releasePagerJobSlot(slot.index);
         cont.state.PageFault.job_slot = null;
         return error.QueueFull;
     }
+    _ = c.printf("[pager] submitPageFillJob: enqueued successfully rc=%d\n", rc);
 }
 
 fn rollbackWaiter(
@@ -281,15 +287,25 @@ fn releasePagerJobSlot(idx: usize) void {
 }
 
 pub fn pagerPollCompletions() void {
+    var found_completed: usize = 0;
     for (&pager_job_used, 0..) |used, idx| {
         if (!used) continue;
         const job_state = &pager_job_states[idx];
         if (!job_state.isCompleted()) continue;
+        found_completed += 1;
+        _ = c.printf("[pager] pagerPollCompletions: found completed job idx=%zu\n", idx);
         processPagerJob(idx, job_state);
     }
+    if (found_completed > 0) {
+        _ = c.printf("[pager] pagerPollCompletions: processed %zu completed jobs\n", found_completed);
+    }
 
-    if (pager_stats.job_completions != 0 and pager_stats.job_completions % 8 == 0) {
+    // Log stats when completions crosses a multiple of 8, not every poll
+    if (pager_stats.job_completions != last_logged_completions and
+        pager_stats.job_completions % 8 == 0)
+    {
         logPagerStats();
+        last_logged_completions = pager_stats.job_completions;
     }
 }
 
@@ -314,12 +330,15 @@ fn activePagerJobs() usize {
 }
 
 fn processPagerJob(idx: usize, job_state: *worker.FileOpState) void {
+    _ = c.printf("[pager] processPagerJob: idx=%zu\n", idx);
     const meta = pager_job_meta[idx] orelse {
+        _ = c.printf("[pager] processPagerJob: no meta for idx=%zu\n", idx);
         job_state.reset();
         releasePagerJobSlot(idx);
         return;
     };
 
+    _ = c.printf("[pager] processPagerJob: page=0x%lx\n", @as(c_ulong, @intCast(meta.key.page_base)));
     var resume_errno: c_int = 0;
     switch (job_state.result) {
         .Status => |value| {
@@ -332,7 +351,11 @@ fn processPagerJob(idx: usize, job_state: *worker.FileOpState) void {
     }
 
     if (resume_errno == 0) {
+        _ = c.printf("[pager] processPagerJob: installing result\n");
         resume_errno = installPagerResult(meta, job_state);
+        _ = c.printf("[pager] processPagerJob: install returned errno=%d\n", resume_errno);
+    } else {
+        _ = c.printf("[pager] processPagerJob: skipping install due to errno=%d\n", resume_errno);
     }
 
     finalisePagerJob(idx, meta, resume_errno);
@@ -359,11 +382,20 @@ fn installPagerResult(meta: PagerJobMeta, job_state: *worker.FileOpState) c_int 
 }
 
 fn finalisePagerJob(idx: usize, meta: PagerJobMeta, errno: c_int) void {
+    _ = c.printf("[pager] finalizePagerJob: idx=%zu errno=%d\n", idx, errno);
     const table = pager.global();
     _ = table.release(meta.key);
 
+    // Check wait queue state before detaching
+    const waiter_count = meta.page.waiters.count;
+    _ = c.printf("[pager] finalizePagerJob: page=0x%lx waiter_count=%u\n", @as(c_ulong, @intCast(meta.key.page_base)), @as(c_uint, waiter_count));
+
     const wait_head = meta.page.waiters.detachAll();
+    const head_ptr = if (wait_head) |h| @intFromPtr(h) else 0;
+    _ = c.printf("[pager] finalizePagerJob: detached wait_head=0x%lx\n", @as(c_ulong, head_ptr));
+
     continuation.resumePageWaiters(wait_head, errno);
+    _ = c.printf("[pager] finalisePagerJob: resumePageWaiters returned\n");
 
     pager_job_states[idx].reset();
     releasePagerJobSlot(idx);
@@ -424,10 +456,17 @@ pub fn enqueuePagerWaiter(
         return .QueueFailed;
     };
 
+    // Log before enqueue attempt
+    _ = c.printf("[pager] enqueuePagerWaiter: page=0x%lx cont=%p current_waiters=%u\n", @as(c_ulong, @intCast(pf_state.page_base)), cont, @as(c_uint, mapped_page.waiters.count));
+
     const cont_ptr: *anyopaque = @ptrCast(cont);
     if (!mapped_page.waiters.enqueue(&cont.state.PageFault.wait_node, cont_ptr)) {
+        _ = c.printf("[pager] enqueuePagerWaiter: FAILED to enqueue continuation %p\n", cont);
         return .QueueFailed;
     }
+
+    // Log successful enqueue
+    _ = c.printf("[pager] enqueuePagerWaiter: SUCCESS enqueued cont=%p, new_count=%u\n", cont, @as(c_uint, mapped_page.waiters.count));
 
     const client = vm_handle.getClient();
     const key = pager.PagerRequestTable.Key{

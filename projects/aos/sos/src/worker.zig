@@ -58,7 +58,9 @@ pub const WorkItem = struct {
     const Self = @This();
 
     pub fn process(self: Self, worker: *Worker) void {
-        switch (std.meta.activeTag(self.file_op.params)) {
+        const tag = std.meta.activeTag(self.file_op.params);
+        _ = c.printf("[worker] WorkItem.process: tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+        switch (tag) {
             .Open => worker.workerOpenFile(self.file_op),
             .Close => worker.workerCloseFile(self.file_op),
             .Read => worker.workerReadFile(self.file_op),
@@ -67,7 +69,12 @@ pub const WorkItem = struct {
             .OpenDir => worker.workerOpenDir(self.file_op),
             .ReadDir => worker.workerReadDir(self.file_op),
             .GetDirent => worker.workerGetDirent(self.file_op),
-            .PageFill => worker.workerPageFill(self.file_op),
+            .PageFill => {
+                _ = c.printf("[worker] WorkItem.process: dispatching to workerPageFill\n");
+                worker.workerPageFill(self.file_op);
+            },
+            .Lseek => worker.workerLseek(self.file_op),
+            .Unlink => worker.workerUnlink(self.file_op),
         }
     }
 };
@@ -104,6 +111,7 @@ pub const WorkQueue = struct {
         self.items[curr_head] = WorkItem{ .file_op = file_op };
 
         @atomicStore(u32, &self.head, next_head, .release);
+        _ = c.printf("[worker] WorkQueue.enqueue: signaling ntfn=%lu head=%u tail=%u\n", self.notification, next_head, curr_tail);
         sel4.seL4_Signal(self.notification);
     }
 
@@ -125,9 +133,14 @@ pub const WorkQueue = struct {
     }
 
     pub fn drain(self: *Self, worker: *Worker) void {
+        _ = c.printf("[worker] drain: checking queue head=%u tail=%u\n", @atomicLoad(u32, &self.head, .acquire), @atomicLoad(u32, &self.tail, .acquire));
+        var count: usize = 0;
         while (self.dequeue()) |item| {
+            count += 1;
+            _ = c.printf("[worker] drain: processing item %zu\n", count);
             item.process(worker);
         }
+        _ = c.printf("[worker] drain: processed %zu items\n", count);
     }
 };
 
@@ -155,7 +168,9 @@ pub const Worker = struct {
 
         while (true) {
             // Wait for work notification
+            _ = c.printf("[worker] entering seL4_Wait on ntfn=%lu\n", self.queue.notification);
             _ = sel4.seL4_Wait(self.queue.notification, null);
+            _ = c.printf("[worker] seL4_Wait returned, draining queue\n");
 
             self.queue.drain(self);
 
@@ -496,6 +511,86 @@ pub const Worker = struct {
         file_op.completeStatus(0);
     }
 
+    fn workerLseek(self: *Self, file_op: *FileOpState) void {
+        _ = self;
+        const tag = std.meta.activeTag(file_op.params);
+        if (tag != .Lseek) {
+            _ = c.printf("[worker] workerLseek received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            file_op.completeErrno(sos.EINVAL);
+            return;
+        }
+
+        const params = &file_op.params.Lseek;
+        const client_ctx = clients.get(@intCast(params.client_id)) orelse {
+            file_op.completeErrno(sos.EINVAL);
+            return;
+        };
+        const io_state = client_ctx.ioState();
+        if (params.fd >= io_state.fds.len) {
+            file_op.completeErrno(sos.EBADF);
+            return;
+        }
+        var fd_entry = &io_state.fds[params.fd];
+        if (!fd_entry.used or fd_entry.kind != file.FileKind.regular) {
+            file_op.completeErrno(sos.EBADF);
+            return;
+        }
+
+        const table = client_ctx.fileTable();
+        const handle_ptr = table.getHandle(params.fd) catch |err| {
+            const errno = mapFileTableError(err);
+            file_op.completeErrno(errno);
+            return;
+        };
+        const handle_ref = file.handleRefFromOpaque(handle_ptr) orelse {
+            file_op.completeErrno(sos.EBADF);
+            return;
+        };
+        const handle = file.rawFileHandle(handle_ref);
+
+        if (params.whence != c.SEEK_SET and params.whence != c.SEEK_CUR and params.whence != c.SEEK_END) {
+            file_op.completeErrno(sos.EINVAL);
+            return;
+        }
+
+        const seek_result = nfs_handler.lseekSync(handle, params.offset, params.whence) catch |err| {
+            const errno = mapNfsError(err);
+            file_op.completeErrno(errno);
+            return;
+        };
+
+        const signed_offset = std.math.cast(i64, seek_result) orelse {
+            file_op.completeErrno(sos.EOVERFLOW);
+            return;
+        };
+        const offset_usize = std.math.cast(usize, seek_result) orelse {
+            file_op.completeErrno(sos.EOVERFLOW);
+            return;
+        };
+
+        fd_entry.offset = offset_usize;
+        file_op.completeOffset(signed_offset);
+    }
+
+    fn workerUnlink(self: *Self, file_op: *FileOpState) void {
+        _ = self;
+        const tag = std.meta.activeTag(file_op.params);
+        if (tag != .Unlink) {
+            _ = c.printf("[worker] workerUnlink received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            file_op.completeErrno(sos.EINVAL);
+            return;
+        }
+
+        const params = &file_op.params.Unlink;
+        const path_ptr: [*:0]const u8 = @ptrCast(&params.path);
+        nfs_handler.unlinkSync(path_ptr) catch |err| {
+            const errno = mapNfsError(err);
+            file_op.completeErrno(errno);
+            return;
+        };
+        file_op.completeStatus(0);
+    }
+
     fn workerStatFile(self: *Self, file_op: *FileOpState) void {
         _ = self;
         const tag = std.meta.activeTag(file_op.params);
@@ -615,6 +710,8 @@ pub const Worker = struct {
         }
 
         const params = &file_op.params.PageFill;
+        _ = c.printf("[worker] workerPageFill: entry client=%u page=0x%lx\n", params.client_id, @as(c_ulong, @intCast(params.page_base)));
+
         const vm_handle = file_op.vm_handle orelse {
             file_op.completeErrno(sos.EFAULT);
             return;
@@ -624,16 +721,25 @@ pub const Worker = struct {
         const page_len: usize = vm.PAGE_SIZE_4K;
         @memset(file_op.payload[0..page_len], 0);
 
+        const is_file = params.source == .File;
+        const source_str: [*:0]const u8 = if (is_file) "File" else "Anonymous";
+        _ = c.printf("[worker] workerPageFill: source=%s\n", source_str);
+
         switch (params.source) {
             .Anonymous => {
                 file_op.payload_len = page_len;
             },
             .File => |backing| {
+                _ = c.printf("[worker] workerPageFill: file-backed fd=%d offset=%zu len=%zu\n", backing.fd, backing.file_offset, backing.length);
+
                 const handle_ref = file.handleRefFromOpaque(backing.handle_ref) orelse {
+                    _ = c.printf("[worker] workerPageFill: ERROR handle_ref is null\n");
                     file_op.completeErrno(sos.EBADF);
                     return;
                 };
                 const raw_handle = file.rawFileHandle(handle_ref);
+                _ = c.printf("[worker] workerPageFill: calling preadSync handle=%p offset=%zu\n", raw_handle, backing.file_offset);
+
                 const buf_ptr: [*]u8 = @as([*]u8, @ptrCast(&file_op.payload[0]));
                 const read_bytes = nfs_handler.preadSync(
                     raw_handle,
@@ -641,9 +747,12 @@ pub const Worker = struct {
                     backing.file_offset,
                     page_len,
                 ) catch |err| {
+                    _ = c.printf("[worker] workerPageFill: preadSync failed with error\n");
                     file_op.completeErrno(mapNfsError(err));
                     return;
                 };
+                _ = c.printf("[worker] workerPageFill: preadSync returned %zu bytes\n", read_bytes);
+
                 if (read_bytes < page_len) {
                     const rest = buf_ptr[read_bytes..page_len];
                     @memset(rest, 0);
@@ -652,6 +761,7 @@ pub const Worker = struct {
             },
         }
 
+        _ = c.printf("[worker] workerPageFill: completing successfully payload_len=%zu\n", file_op.payload_len);
         file_op.completeStatus(0);
     }
 };

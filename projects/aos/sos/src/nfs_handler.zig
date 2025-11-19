@@ -18,6 +18,8 @@ pub const NfsOperation = enum {
     Close,
     Stat,
     OpenDir,
+    Unlink,
+    Lseek,
 };
 
 /// Pool slot for async/sync conversion
@@ -31,6 +33,8 @@ pub const PoolSlot = struct {
         dir: *anyopaque,
         data: *anyopaque,
     },
+
+    seek_value: u64,
 
     operation: NfsOperation,
     read_buf: ?[*]u8,
@@ -49,6 +53,7 @@ pub const PoolSlot = struct {
             .operation = .Open,
             .read_buf = null,
             .stat_out = null,
+            .seek_value = 0,
             .start_time = 0,
             .timeout_ms = NFS_TIMEOUT_MS,
         };
@@ -60,6 +65,7 @@ pub const PoolSlot = struct {
         self.status = 0;
         self.read_buf = null;
         self.stat_out = null;
+        self.seek_value = 0;
     }
 
     pub fn checkTimeout(self: *PoolSlot, current_time: u64) bool {
@@ -114,8 +120,11 @@ pub const NfsPool = struct {
     }
 
     /// Wait for async operation to complete
+    /// NOTE: This runs in the worker context, so it MUST NOT block on seL4_Wait.
+    /// Instead, it actively polls the network stack until the operation completes.
     pub fn wait(slot: *PoolSlot) i32 {
-        ensureCompletionNtfn();
+        _ = c.printf("[nfs_pool] wait: entering active poll loop for slot=%p\n", slot);
+        var poll_count: u32 = 0;
         while (!@atomicLoad(bool, &slot.async_finish, .acquire)) {
             const elapsed = getCurrentTimeMs() - slot.start_time;
             if (elapsed > slot.timeout_ms) {
@@ -123,27 +132,23 @@ pub const NfsPool = struct {
                 return -@as(i32, @intCast(sos.EIO));
             }
 
+            // Actively service the network stack to process NFS responses
+            // without blocking the syscall loop
             nfsServicePoll(c.POLLIN | c.POLLOUT);
-            var badge: sel4.seL4_Word = 0;
-            _ = sel4.seL4_Wait(completion_ntfn, &badge);
+
+            poll_count += 1;
+            if (poll_count % 10000 == 0) {
+                _ = c.printf("[nfs_pool] wait: still polling slot=%p count=%u elapsed=%lums\n", slot, poll_count, elapsed);
+            }
         }
 
+        _ = c.printf("[nfs_pool] wait: completed slot=%p status=%d after %u polls\n", slot, slot.status, poll_count);
         return slot.status;
     }
 };
 
 var nfs_pool: NfsPool = undefined;
 var pool_initialised: bool = false;
-var completion_ntfn: sel4.seL4_CPtr = sel4.seL4_CapNull;
-var completion_ut: ?*sos.ut_t = null;
-
-fn ensureCompletionNtfn() void {
-    if (completion_ntfn != sel4.seL4_CapNull) return;
-    const ut = sos.alloc_retype(&completion_ntfn, sel4.seL4_NotificationObject, sel4.seL4_NotificationBits) orelse {
-        @panic("Failed to allocate NFS completion notification");
-    };
-    completion_ut = ut;
-}
 
 pub fn init() void {
     if (pool_initialised) return;
@@ -157,7 +162,6 @@ pub fn init() void {
         _ = c.printf("[nfs_handler] WARNING: NFS not yet mounted\n");
     }
 
-    ensureCompletionNtfn();
     nfs_pool = NfsPool.init();
     pool_initialised = true;
 
@@ -295,14 +299,25 @@ pub export fn nfsGenericCallbackZig(
                     slot.status = -@as(i32, @intCast(sos.EIO));
                 }
             },
+            .Unlink => {
+                slot.status = 0;
+            },
+            .Lseek => {
+                if (data) |seek_ptr| {
+                    const value_ptr: *const u64 = @ptrCast(@alignCast(seek_ptr));
+                    slot.seek_value = value_ptr.*;
+                    slot.status = 0;
+                } else {
+                    _ = c.printf("[nfs_callback] Lseek succeeded but data is null\n");
+                    slot.status = -@as(i32, @intCast(sos.EIO));
+                }
+            },
         }
     }
 
-    // Signal completion to worker thread
+    // Signal completion to worker thread via atomic flag
+    // The wait loop actively polls this flag instead of blocking on a notification
     @atomicStore(bool, &slot.async_finish, true, .release);
-    if (completion_ntfn != sel4.seL4_CapNull) {
-        sel4.seL4_Signal(completion_ntfn);
-    }
 }
 
 extern fn nfs_callback_c_bridge(err: c_int, nfs_ctx: ?*anyopaque, data: ?*anyopaque, private_data: ?*anyopaque) void;
@@ -431,6 +446,38 @@ pub fn writeSync(fh: *anyopaque, buf: [*]const u8, count: usize) !usize {
     return @intCast(status);
 }
 
+pub fn lseekSync(fh: *anyopaque, offset: i64, whence: c_int) !u64 {
+    const nfs_ctx = get_nfs_context() orelse return error.NoNFSContext;
+    const slot = nfs_pool.acquire() orelse return error.PoolExhausted;
+    defer nfs_pool.release(slot);
+
+    slot.operation = .Lseek;
+    slot.read_buf = null;
+    slot.stat_out = null;
+    slot.seek_value = 0;
+
+    const fh_typed: *nfsfh = @ptrCast(@alignCast(fh));
+    const rc = nfs_lseek_async(
+        nfs_ctx,
+        fh_typed,
+        offset,
+        whence,
+        nfs_callback_c_bridge,
+        @as(?*anyopaque, @ptrCast(slot)),
+    );
+    if (rc < 0) {
+        _ = c.printf("[nfs] nfs_lseek_async failed: %d\n", rc);
+        return error.NFSOperationFailed;
+    }
+
+    const status = NfsPool.wait(slot);
+    if (status < 0) {
+        return errnoToError(-status);
+    }
+
+    return slot.seek_value;
+}
+
 /// Close file synchronously
 pub fn closeSync(fh: *anyopaque) !void {
     const nfs_ctx = get_nfs_context() orelse return error.NoNFSContext;
@@ -456,6 +503,32 @@ pub fn closeSync(fh: *anyopaque) !void {
     const status = NfsPool.wait(slot);
     if (status < 0) {
         return error.OperationFailed;
+    }
+}
+
+pub fn unlinkSync(path: [*:0]const u8) !void {
+    const nfs_ctx = get_nfs_context() orelse return error.NoNFSContext;
+    const slot = nfs_pool.acquire() orelse return error.PoolExhausted;
+    defer nfs_pool.release(slot);
+
+    slot.operation = .Unlink;
+    slot.read_buf = null;
+    slot.stat_out = null;
+
+    const rc = nfs_unlink_async(
+        nfs_ctx,
+        path,
+        nfs_callback_c_bridge,
+        @as(?*anyopaque, @ptrCast(slot)),
+    );
+    if (rc < 0) {
+        _ = c.printf("[nfs] nfs_unlink_async failed: %d\n", rc);
+        return error.NFSOperationFailed;
+    }
+
+    const status = NfsPool.wait(slot);
+    if (status < 0) {
+        return errnoToError(-status);
     }
 }
 
@@ -558,11 +631,13 @@ extern fn nfs_read_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, count: u64, cb: nf
 extern fn nfs_pread_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, offset: u64, count: u64, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_write_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, count: u64, buf: [*]const u8, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_close_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, cb: nfs_cb, private_data: ?*anyopaque) c_int;
+extern fn nfs_lseek_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, offset: i64, whence: c_int, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_stat64_async(nfs_ctx: ?*nfs_context, path: [*:0]const u8, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_opendir_async(nfs_ctx: ?*nfs_context, path: [*:0]const u8, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_readdir(nfs_ctx: ?*nfs_context, dir: ?*nfsdir) ?*nfsdirent;
 extern fn nfs_closedir(nfs_ctx: ?*nfs_context, dir: ?*nfsdir) void;
 extern fn nfs_service(nfs_ctx: ?*nfs_context, revents: c_int) c_int;
+extern fn nfs_unlink_async(nfs_ctx: ?*nfs_context, path: [*:0]const u8, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_get_error(nfs_ctx: ?*nfs_context) [*:0]const u8;
 
 const nfs_stat_64 = extern struct {

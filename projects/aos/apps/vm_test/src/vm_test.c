@@ -7,8 +7,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <sys/mman.h>
 #include <utils/page.h>
+#include <sos.h>
 
 #define NBLOCKS 9
 #define NPAGES_PER_BLOCK 28
@@ -89,11 +91,16 @@ static void log_errno(const char *label, const char *path) {
 }
 
 static int write_page_byte(int fd, uint8_t value) {
-  for (size_t offset = 0; offset < PAGE_SIZE_4K; offset++) {
-    ssize_t written = write(fd, &value, sizeof(value));
-    if (written != sizeof(value)) {
+  uint8_t buf[PAGE_SIZE_4K];
+  memset(buf, value, sizeof(buf));
+
+  size_t written_total = 0;
+  while (written_total < sizeof(buf)) {
+    ssize_t rc = write(fd, buf + written_total, sizeof(buf) - written_total);
+    if (rc <= 0) {
       return -1;
     }
+    written_total += (size_t)rc;
   }
   return 0;
 }
@@ -180,6 +187,21 @@ int main(void) {
     printf("[vm_test] file_mmap_test failed\n");
     return 1;
   }
+
+  printf("[vm_test] calling sos_pager_stats to capture metrics\n");
+  sos_pager_stats_t stats;
+  int pager_result = sos_pager_stats(&stats);
+  if (pager_result == 0) {
+    printf("[vm_test] PAGER STATS:\n");
+    printf("  deferred_faults:   %" PRIu64 "\n", stats.deferred_faults);
+    printf("  dedup_hits:        %" PRIu64 "\n", stats.dedup_hits);
+    printf("  job_submissions:   %" PRIu64 "\n", stats.job_submissions);
+    printf("  job_completions:   %" PRIu64 "\n", stats.job_completions);
+    printf("  job_failures:      %" PRIu64 "\n", stats.job_failures);
+  } else {
+    printf("[vm_test] sos_pager_stats failed with errno=%d\n", sos_errno);
+  }
+
   printf("[vm_test] main complete, exiting successfully\n");
   return 0;
 }
