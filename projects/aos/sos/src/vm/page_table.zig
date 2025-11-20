@@ -73,9 +73,9 @@ fn ptObjectTypeAndBits(level: Level) struct { typ: sel4.seL4_Word, bits: sel4.se
         // What do we call the page table bits?
         const bits =
             if (@hasDecl(sel4, "seL4_ARM_PageTableBits"))
-                sel4.seL4_ARM_PageTableBits
-            else
-                sel4.seL4_PageTableBits;
+            sel4.seL4_ARM_PageTableBits
+        else
+            sel4.seL4_PageTableBits;
         return .{
             .typ = sel4.seL4_ARM_PageTableObject,
             .bits = bits,

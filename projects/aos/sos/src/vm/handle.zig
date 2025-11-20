@@ -320,14 +320,13 @@ pub const VmHandle = struct {
 
         const backing_info: region.Backing = if (want_anonymous)
             .Anonymous
-        else
-            .{ .File = .{
-                .fd = fd,
-                .offset = offset,
-                .length = aligned,
-                .handle_ref = retained_handle,
-                .handle_owner = if (retained_handle != null) client_ctx.ioState() else null,
-            } };
+        else .{ .File = .{
+            .fd = fd,
+            .offset = offset,
+            .length = aligned,
+            .handle_ref = retained_handle,
+            .handle_owner = if (retained_handle != null) client_ctx.ioState() else null,
+        } };
 
         const tracker = state.leaseMmapRegion(base, prot, backing_info) catch |err| {
             return err;
