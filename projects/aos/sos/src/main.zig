@@ -1547,6 +1547,7 @@ comptime {
     _ = nfs_handler;
     _ = continuation;
     _ = vm_fault;
+    _ = pagefile;
     _ = &continuation.continuation_bootstrap;
 }
 
@@ -1567,3 +1568,4 @@ const setupConsoleFd = console.setupConsoleFd;
 const console_object_ptr = console.console_object_ptr;
 
 pub const continuation = @import("continuation.zig");
+const pagefile = @import("pagefile.zig");

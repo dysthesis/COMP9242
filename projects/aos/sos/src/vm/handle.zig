@@ -376,7 +376,7 @@ pub const VmHandle = struct {
 
         // Check if page record exists and is actually mapped in hardware
         if (state.findPage(base)) |page_entry| {
-            if (page_entry.resident) {
+            if (page_entry.state == .RESIDENT) {
                 // Page is already mapped, fault should not have occurred.
                 // This can happen if TLB is stale, so we just return success.
                 return;

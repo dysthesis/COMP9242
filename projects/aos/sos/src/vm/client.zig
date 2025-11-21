@@ -52,7 +52,11 @@ pub const Client = struct {
             }
             entry.owns_frame = entry.owns_frame or owns_frame;
             entry.owns_cap = entry.owns_cap or owns_cap;
-            entry.resident = frame_ref != 0;
+            if (frame_ref != 0) {
+                entry.transitionState(.RESIDENT);
+            } else if (entry.state != .FREE) {
+                entry.transitionState(.FREE);
+            }
             entry.dirty = false;
             entry.referenced = false;
             entry.pagefile_slot = -1;
@@ -67,7 +71,7 @@ pub const Client = struct {
             .cap_owner = cap_owner,
             .owns_frame = owns_frame,
             .owns_cap = owns_cap,
-            .resident = frame_ref != 0,
+            .state = if (frame_ref != 0) .RESIDENT else .FREE,
             .dirty = false,
             .referenced = false,
             .pagefile_slot = -1,
@@ -94,7 +98,7 @@ pub const Client = struct {
             return err;
         };
         inserted.region = tracker;
-        inserted.resident = false;
+        // State is already FREE from insertPage with frame_ref=0
         inserted.dirty = false;
         inserted.referenced = false;
         inserted.pagefile_slot = -1;
@@ -139,7 +143,7 @@ pub const Client = struct {
 
         // Check if page exists and is actually mapped in hardware
         if (self.findPage(vaddr)) |page_entry| {
-            if (page_entry.resident) {
+            if (page_entry.state == .RESIDENT) {
                 _ = c.printf("[vm_map] already mapped vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
                 return;
             }
@@ -212,7 +216,7 @@ pub const Client = struct {
             return err;
         };
         inserted.region = tracker;
-        inserted.resident = true;
+        // State is already RESIDENT from insertPage with frame_ref != 0
         inserted.dirty = false;
         inserted.referenced = false;
         inserted.pagefile_slot = -1;
@@ -275,7 +279,7 @@ pub const Client = struct {
             return err;
         };
         inserted.region = null;
-        inserted.resident = frame_ref != 0;
+        // State is already set correctly from insertPage
         inserted.dirty = false;
         inserted.referenced = false;
         inserted.pagefile_slot = -1;

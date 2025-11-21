@@ -704,3 +704,24 @@ fn errnoToError(errno: i32) anyerror {
         else => error.OperationFailed,
     };
 }
+
+// C-callable wrappers for pagefile subsystem
+
+/// Open file synchronously (C-callable wrapper)
+/// Returns file handle on success, null on failure
+pub export fn nfs_open_sync_c(path: [*:0]const u8, flags: c_int) callconv(.c) ?*anyopaque {
+    return openSync(path, flags) catch |err| {
+        _ = c.printf("[nfs] nfs_open_sync_c failed: %d\n", @intFromError(err));
+        return null;
+    };
+}
+
+/// Close file synchronously (C-callable wrapper)
+/// Returns 0 on success, -1 on failure
+pub export fn nfs_close_sync_c(fh: ?*anyopaque) callconv(.c) c_int {
+    if (fh == null) return -1;
+    closeSync(fh.?) catch {
+        return -1;
+    };
+    return 0;
+}

@@ -97,6 +97,15 @@ pub const WaitQueue = struct {
     }
 };
 
+/// Page state machine for tracking lifecycle of mapped pages.
+pub const PageState = enum(u8) {
+    FREE = 0, // No frame allocated, no data
+    RESIDENT = 1, // Frame allocated, mapped in hardware
+    PAGEOUT_PENDING = 2, // Async write to pagefile in progress
+    SWAPPED = 3, // Frame deallocated, data in pagefile
+    PAGEIN_PENDING = 4, // Async read from pagefile in progress
+};
+
 /// Bookkeeping for a page mapped into a client address space.
 pub const MappedPage = struct {
     frame_ref: usize,
@@ -105,10 +114,20 @@ pub const MappedPage = struct {
     owns_frame: bool,
     owns_cap: bool,
     region: ?*region.Region = null,
-    resident: bool = false,
+
+    /// State machine
+    state: PageState = .FREE,
+
+    /// Dirty tracking
     dirty: bool = false,
+
+    /// Reference tracking
     referenced: bool = false,
+
+    // Pagefile
     pagefile_slot: i32 = -1,
+
+    // Synchronisation
     waiters: WaitQueue = .{},
 
     pub const Self = @This();
@@ -133,11 +152,38 @@ pub const MappedPage = struct {
             sos.free_frame(self.frame_ref);
         }
         self.region = null;
-        self.resident = false;
+        self.state = .FREE;
         self.dirty = false;
         self.referenced = false;
         self.pagefile_slot = -1;
         self.waiters.reset();
+    }
+
+    /// Transition page state with validation.
+    pub fn transitionState(self: *Self, new_state: PageState) void {
+        if (comptime std.debug.runtime_safety) {
+            if (!isValidTransition(self.state, new_state)) {
+                _ = c.printf(
+                    "[page_state] PANIC: Invalid state transition: %u -> %u (frame=%zu)\n",
+                    @intFromEnum(self.state),
+                    @intFromEnum(new_state),
+                    self.frame_ref,
+                );
+                @panic("Invalid page state transition");
+            }
+        }
+        self.state = new_state;
+    }
+
+    /// Validate state transition
+    fn isValidTransition(old: PageState, new: PageState) bool {
+        return switch (old) {
+            .FREE => new == .RESIDENT,
+            .RESIDENT => new == .PAGEOUT_PENDING or new == .FREE,
+            .PAGEOUT_PENDING => new == .SWAPPED or new == .RESIDENT or new == .FREE,
+            .SWAPPED => new == .PAGEIN_PENDING or new == .FREE,
+            .PAGEIN_PENDING => new == .RESIDENT or new == .FREE,
+        };
     }
 };
 

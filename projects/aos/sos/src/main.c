@@ -43,6 +43,7 @@
 #include "irq.h"
 #include "mapping.h"
 #include "network.h"
+#include "pagefile.h"
 #include "sel4/bootinfo_types.h"
 #include "sel4/simple_types.h"
 #include "syscalls.h"
@@ -955,9 +956,26 @@ NORETURN void *main_continued(UNUSED void *arg) {
   char secret_string[15] = "Welcome to AOS!";
 #endif /* CONFIG_SOS_GDB_ENABLED */
 
-  /* Initialises the timer */
+  /* Initialises the timer (must be started before pagefile init) */
   printf("Timer init\n");
   start_timer(timer_vaddr);
+
+  /* Wait for NFS mount to complete before initializing pagefile */
+  printf("Waiting for NFS mount...\n");
+  while (!nfs_is_mounted()) {
+    seL4_Word badge = 0;
+    seL4_Wait(ntfn, &badge);
+    bool have_reply = false;
+    sos_handle_irq_notification(&badge, &have_reply);
+  }
+  printf("NFS mounted\n");
+
+  /* Initialise pagefile subsystem now that NFS is available and timer is running */
+  printf("Pagefile init\n");
+  int pagefile_ret = pagefile_init();
+  if (pagefile_ret < 0) {
+    printf("Pagefile initialisation failed; eviction disabled\n");
+  }
 
   /* run sos initialisation tests */
   run_tests(&cspace);
