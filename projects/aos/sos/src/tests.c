@@ -175,7 +175,7 @@ static void test_pagefile(void) {
   ZF_LOGI("Initial pagefile stats: total=%zu, used=%zu, peak=%zu",
           stats.slots_total, stats.slots_used, stats.slots_peak);
 
-  /* Check if pagefile initialized successfully */
+  /* Check if pagefile initialised successfully */
   if (stats.slots_total == 0) {
     ZF_LOGW("Pagefile not initialised; skipping test");
     ZF_LOGW("Pagefile initialisation failed; eviction disabled");

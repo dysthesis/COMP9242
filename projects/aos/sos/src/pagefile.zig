@@ -44,7 +44,7 @@ const FrameRef = struct {
     }
 };
 
-/// Slot metadata: algebraic data type encoding slot lifecycle.
+/// Slot metadata encoding slot lifecycle.
 const SlotState = union(enum) {
     free: void,
     allocated: AllocatedSlot,
@@ -283,6 +283,7 @@ var init_pending: bool = false;
 var init_failed: bool = false;
 
 /// Get mutable reference to initialised state.
+///
 /// Returns null if pagefile not initialised.
 fn getState() ?*PagefileState {
     if (global_state) |*state| {
@@ -354,9 +355,35 @@ const sos_allocator = std.mem.Allocator{
 
 /// Initialise pagefile subsystem asynchronously.
 ///
-/// Queues an async NFS operation to create or open the /pagefile file, then
-/// returns immediately without blocking. The completion callback will allocate
-/// slot structures and set global_state when the NFS operation completes.
+/// This callback is invoked when the async NFS open operation completes.
+/// It allocates slot structures and sets global_state on success,
+/// or marks init_failed on failure.
+fn pagefileInitCallback(status: c_int, fh: ?*anyopaque, userdata: ?*anyopaque) callconv(.c) void {
+    _ = userdata;
+
+    init_pending = false;
+
+    if (status < 0 or fh == null) {
+        _ = c.printf("[pagefile] WARNING: Pagefile creation failed (status=%d); eviction disabled\n", @as(c_int, status));
+        init_failed = true;
+        return;
+    }
+
+    _ = c.printf("[pagefile] Pagefile /swap opened successfully (async)\n");
+
+    // Allocate pagefile state using SOS allocator
+    global_state = PagefileState.init(sos_allocator, fh.?, INITIAL_SLOT_COUNT) catch {
+        _ = c.printf("[pagefile] ERROR: Failed to allocate pagefile structures\n");
+        _ = nfs_close_sync_c(fh);
+        init_failed = true;
+        return;
+    };
+
+    const state = getStateConst().?;
+    _ = c.printf("[pagefile] Pagefile initialised: %u slots, %zu bytes bitmap\n", @as(c_uint, state.numSlots()), @as(c_ulong, state.bitmap.words.len * @sizeOf(u64)));
+}
+
+/// Initialise pagefile subsystem asynchronously.
 ///
 /// This function must be called during SOS bootstrap, after NFS initialisation
 /// but before the syscall loop begins.
@@ -476,4 +503,28 @@ pub export fn pagefile_get_stats(out: *Stats) callconv(.c) void {
         .total_allocs = state.total_allocs,
         .total_frees = state.total_frees,
     };
+}
+
+/// Check if pagefile initialisation is complete and ready for use.
+///
+/// Returns: true if pagefile is fully initialised and operational, false otherwise
+///
+/// This function allows callers to distinguish between:
+/// - Not yet initialised (global_state == null && !init_pending)
+/// - Initialisation in progress (init_pending == true)
+/// - Initialisation complete and ready (global_state != null && !init_pending)
+/// - Initialisation failed (init_failed == true)
+pub export fn pagefile_is_ready() callconv(.c) bool {
+    return global_state != null and !init_pending;
+}
+
+/// Check if pagefile initialisation failed.
+///
+/// Returns: true if initialisation was attempted but failed, false otherwise
+///
+/// NOTE: This should be checked after pagefile_is_ready() returns true to
+/// determine if the pagefile is actually available or if initialisation
+/// completed with failure.
+pub export fn pagefile_init_failed() callconv(.c) bool {
+    return init_failed;
 }

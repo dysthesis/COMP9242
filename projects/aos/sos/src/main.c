@@ -44,6 +44,7 @@
 #include "mapping.h"
 #include "network.h"
 #include "pagefile.h"
+#include "sos_time.h"
 #include "sel4/bootinfo_types.h"
 #include "sel4/simple_types.h"
 #include "syscalls.h"
@@ -960,19 +961,41 @@ NORETURN void *main_continued(UNUSED void *arg) {
   printf("Timer init\n");
   start_timer(timer_vaddr);
 
-  /* Wait for NFS mount to complete before initializing pagefile */
-  printf("Waiting for NFS mount...\n");
-  while (!nfs_is_mounted()) {
-    seL4_Word badge = 0;
-    seL4_Wait(ntfn, &badge);
-    bool have_reply = false;
-    sos_handle_irq_notification(&badge, &have_reply);
-  }
-  printf("NFS mounted\n");
+  /* NFS mount is now guaranteed to be complete when network_init() returns.
+   * The active polling within network_init() ensures mount completion before
+   * control returns to this point. Verify this invariant. */
+  ZF_LOGF_IF(!nfs_is_mounted(), "NFS should be mounted after network_init()");
 
   /* Initialise pagefile subsystem now that NFS is available and timer is running */
   printf("Pagefile init\n");
   pagefile_init();  // Async initialization; completion handled via callback
+
+  /* Wait for pagefile initialization to complete (30 second timeout) */
+  printf("Waiting for pagefile initialization...\n");
+  seL4_Word start_time = ts_get_timestamp();
+  const seL4_Word timeout_ms = 30000;  // 30 seconds
+
+  while (!pagefile_is_ready()) {
+    seL4_Word badge = 0;
+    seL4_Wait(ntfn, &badge);
+    bool have_reply = false;
+    sos_handle_irq_notification(&badge, &have_reply);
+
+    // Check for timeout
+    seL4_Word elapsed = ts_get_timestamp() - start_time;
+    if (elapsed > timeout_ms) {
+      printf("WARNING: Pagefile initialization timeout after %lu ms\n", (unsigned long)elapsed);
+      break;
+    }
+  }
+
+  if (pagefile_init_failed()) {
+    printf("WARNING: Pagefile initialization failed; eviction disabled\n");
+  } else if (pagefile_is_ready()) {
+    printf("Pagefile initialized successfully\n");
+  } else {
+    printf("WARNING: Pagefile initialization incomplete; eviction disabled\n");
+  }
 
   /* run sos initialisation tests */
   run_tests(&cspace);

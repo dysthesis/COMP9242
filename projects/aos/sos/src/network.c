@@ -287,6 +287,17 @@ void network_init(cspace_t *cspace, void *timer_vaddr, seL4_CPtr irq_ntfn) {
   int ret =
       nfs_mount_async(nfs, CONFIG_SOS_GATEWAY, nfs_dir_buf, nfs_mount_cb, NULL);
   ZF_LOGF_IF(ret != 0, "NFS Mount failed: %s", nfs_get_error(nfs));
+
+  /* Synchronously wait for mount completion by actively polling network stack.
+   * This mirrors the DHCP negotiation pattern above and ensures NFS is fully
+   * operational before network_init() returns. Active polling is essential to
+   * guarantee that mount responses are processed immediately upon arrival,
+   * without relying on IRQ timing. */
+  printf("Waiting for NFS mount completion...\n");
+  while (!nfs_mount_complete) {
+    network_tick_internal();  /* Actively service network and NFS events */
+  }
+  printf("NFS mount complete\n");
 }
 
 void nfs_mount_cb(int status, UNUSED struct nfs_context *nfs, void *data,
