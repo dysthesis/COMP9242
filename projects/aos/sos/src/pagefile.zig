@@ -23,6 +23,10 @@ const O_CREAT: c_int = 0x0100;
 extern fn nfs_open_sync_c(path: [*:0]const u8, flags: c_int) ?*anyopaque;
 extern fn nfs_close_sync_c(fh: ?*anyopaque) c_int;
 
+// Async NFS open callback type and function
+const PagefileAsyncCallback = *const fn (status: c_int, fh: ?*anyopaque, userdata: ?*anyopaque) callconv(.c) void;
+extern fn nfs_open_async_c(path: [*:0]const u8, flags: c_int, callback: PagefileAsyncCallback, userdata: ?*anyopaque) c_int;
+
 /// Frame reference to proof that a frame index is valid (non-zero).
 const FrameRef = struct {
     value: usize,
@@ -40,7 +44,7 @@ const FrameRef = struct {
     }
 };
 
-/// Slot metadata to encode slot lifecycle.
+/// Slot metadata: algebraic data type encoding slot lifecycle.
 const SlotState = union(enum) {
     free: void,
     allocated: AllocatedSlot,
@@ -275,6 +279,8 @@ const PagefileState = struct {
 };
 
 var global_state: ?PagefileState = null;
+var init_pending: bool = false;
+var init_failed: bool = false;
 
 /// Get mutable reference to initialised state.
 /// Returns null if pagefile not initialised.
@@ -346,40 +352,37 @@ const sos_allocator = std.mem.Allocator{
     },
 };
 
-/// Initialize pagefile subsystem.
+/// Initialise pagefile subsystem asynchronously.
 ///
-/// Creates /pagefile file via NFS, allocates initial capacity (256 slots = 1 MiB).
-/// Must be called after NFS initialisation but before user processes start.
+/// Queues an async NFS operation to create or open the /pagefile file, then
+/// returns immediately without blocking. The completion callback will allocate
+/// slot structures and set global_state when the NFS operation completes.
 ///
-/// Returns: 0 on success, -1 on failure (system continues without eviction)
-pub export fn pagefile_init() callconv(.c) c_int {
-    if (global_state != null) {
-        _ = c.printf("[pagefile] WARNING: Pagefile already initialised\n");
-        return 0;
+/// This function must be called during SOS bootstrap, after NFS initialisation
+/// but before the syscall loop begins.
+///
+/// WARN: This function MUST NOT use synchronous NFS operations, as they
+/// will deadlock when called before the syscall loop begins processing IRQs.
+pub export fn pagefile_init() callconv(.c) void {
+    if (global_state != null or init_pending) {
+        _ = c.printf("[pagefile] WARNING: Pagefile already initialised or initialisation in progress\n");
+        return;
     }
 
-    _ = c.printf("[pagefile] Initializing pagefile subsystem (capacity: %u slots = %zu KiB)\n", @as(c_uint, INITIAL_SLOT_COUNT), @as(c_ulong, (INITIAL_SLOT_COUNT * PAGE_SIZE) / 1024));
+    _ = c.printf("[pagefile] Initialising pagefile subsystem (async, capacity: %u slots = %zu KiB)\n", @as(c_uint, INITIAL_SLOT_COUNT), @as(c_ulong, (INITIAL_SLOT_COUNT * PAGE_SIZE) / 1024));
 
-    // Open or create swapfile via NFS
-    const nfs_handle = nfs_open_sync_c("/pagefile", O_RDWR | O_CREAT) orelse {
-        _ = c.printf("[pagefile] WARNING: Failed to create pagefile /pagefile via NFS\n");
-        _ = c.printf("[pagefile] WARNING: Eviction disabled: system will operate without demand paging\n");
-        return -1;
-    };
+    init_pending = true;
 
-    _ = c.printf("[pagefile] Pagefile /pagefile opened successfully\n");
+    // Queue async NFS open operation (non-blocking)
+    const rc = nfs_open_async_c("swap", O_RDWR | O_CREAT, pagefileInitCallback, null);
+    if (rc < 0) {
+        _ = c.printf("[pagefile] ERROR: Failed to queue async pagefile open\n");
+        init_pending = false;
+        init_failed = true;
+        return;
+    }
 
-    // Allocate pagefile state using SOS allocator
-    global_state = PagefileState.init(sos_allocator, nfs_handle, INITIAL_SLOT_COUNT) catch {
-        _ = c.printf("[pagefile] ERROR: Failed to allocate pagefile structures\n");
-        _ = nfs_close_sync_c(nfs_handle);
-        return -1;
-    };
-
-    const state = getStateConst().?;
-    _ = c.printf("[pagefile] Pagefile initialised: %u slots, %zu bytes bitmap\n", @as(c_uint, state.numSlots()), @as(c_ulong, state.bitmap.words.len * @sizeOf(u64)));
-
-    return 0;
+    _ = c.printf("[pagefile] Pagefile async open queued; waiting for completion callback\n");
 }
 
 /// Shutdown pagefile subsystem.

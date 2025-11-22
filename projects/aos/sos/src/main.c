@@ -972,10 +972,7 @@ NORETURN void *main_continued(UNUSED void *arg) {
 
   /* Initialise pagefile subsystem now that NFS is available and timer is running */
   printf("Pagefile init\n");
-  int pagefile_ret = pagefile_init();
-  if (pagefile_ret < 0) {
-    printf("Pagefile initialisation failed; eviction disabled\n");
-  }
+  pagefile_init();  // Async initialization; completion handled via callback
 
   /* run sos initialisation tests */
   run_tests(&cspace);

@@ -725,3 +725,74 @@ pub export fn nfs_close_sync_c(fh: ?*anyopaque) callconv(.c) c_int {
     };
     return 0;
 }
+
+/// Callback type for async pagefile operations
+pub const PagefileAsyncCallback = *const fn (status: c_int, fh: ?*anyopaque, userdata: ?*anyopaque) callconv(.c) void;
+
+/// Queue async NFS open for pagefile
+///
+/// This function queues an async NFS open operation and returns immediately
+/// without blocking. The callback will be invoked when the operation completes.
+///
+/// WARN: This function must be used instead of nfs_open_sync_c for pagefile
+/// initialisation to avoid deadlock when called before the syscall loop begins.
+pub export fn nfs_open_async_c(
+    path: [*:0]const u8,
+    flags: c_int,
+    callback: PagefileAsyncCallback,
+    userdata: ?*anyopaque,
+) callconv(.c) c_int {
+    const nfs_ctx = get_nfs_context() orelse {
+        _ = c.printf("[nfs] nfs_open_async_c: no NFS context\n");
+        return -1;
+    };
+
+    const mode: c_int = if ((flags & O_CREAT) != 0)
+        DEFAULT_CREATE_MODE
+    else
+        0;
+
+    // Static storage for callback data (only used for pagefile init, one-time use)
+    const CallbackData = struct {
+        callback: PagefileAsyncCallback,
+        userdata: ?*anyopaque,
+    };
+
+    const Static = struct {
+        var cb_data: CallbackData = undefined;
+        var initialised: bool = false;
+    };
+
+    if (Static.initialised) {
+        _ = c.printf("[nfs] nfs_open_async_c: only one async open supported at a time\n");
+        return -1;
+    }
+
+    Static.cb_data = .{
+        .callback = callback,
+        .userdata = userdata,
+    };
+    Static.initialised = true;
+
+    // Create wrapper callback that adapts libnfs callback to our C callback
+    const CallbackWrapper = struct {
+        fn wrapper(status: c_int, _: ?*anyopaque, data: ?*anyopaque, _private: ?*anyopaque) callconv(.c) void {
+            _ = _private;
+
+            // Invoke the user's callback with adapted parameters
+            Static.cb_data.callback(status, data, Static.cb_data.userdata);
+
+            // Mark as available for reuse
+            Static.initialised = false;
+        }
+    };
+
+    const rc = nfs_open2_async(nfs_ctx, path, flags, mode, CallbackWrapper.wrapper, null);
+    if (rc < 0) {
+        _ = c.printf("[nfs] nfs_open2_async failed: %d\n", rc);
+        Static.initialised = false;
+        return -1;
+    }
+
+    return 0;
+}
