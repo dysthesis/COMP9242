@@ -44,9 +44,9 @@
 #include "mapping.h"
 #include "network.h"
 #include "pagefile.h"
-#include "sos_time.h"
 #include "sel4/bootinfo_types.h"
 #include "sel4/simple_types.h"
+#include "sos_time.h"
 #include "syscalls.h"
 #include "tests.h"
 #include "threads.h"
@@ -947,13 +947,13 @@ NORETURN void *main_continued(UNUSED void *arg) {
       alloc_retype(&work_ntfn, seL4_NotificationObject, seL4_NotificationBits);
   ZF_LOGF_IF(work_ntfn_ut == NULL, "Failed to alloc work notification");
 
-  /* Initialize worker subsystem */
+  /* Initialise worker subsystem */
   worker_init(delegate_ep_badged, work_ntfn);
 
 #ifdef CONFIG_SOS_GDB_ENABLED
-  /* Initialize the debugger */
+  /* Initialise the debugger */
   seL4_Error err = debugger_init(&cspace, seL4_CapIRQControl, gdb_recv_ep);
-  ZF_LOGF_IF(err, "Failed to initialize debugger %d", err);
+  ZF_LOGF_IF(err, "Failed to initialise debugger %d", err);
   char secret_string[15] = "Welcome to AOS!";
 #endif /* CONFIG_SOS_GDB_ENABLED */
 
@@ -966,35 +966,38 @@ NORETURN void *main_continued(UNUSED void *arg) {
    * control returns to this point. Verify this invariant. */
   ZF_LOGF_IF(!nfs_is_mounted(), "NFS should be mounted after network_init()");
 
-  /* Initialise pagefile subsystem now that NFS is available and timer is running */
+  /* Initialise pagefile subsystem now that NFS is available and timer is
+   * running */
   printf("Pagefile init\n");
-  pagefile_init();  // Async initialization; completion handled via callback
+  pagefile_init();
 
   /* Wait for pagefile initialization to complete (30 second timeout) */
   printf("Waiting for pagefile initialization...\n");
-  seL4_Word start_time = ts_get_timestamp();
-  const seL4_Word timeout_ms = 30000;  // 30 seconds
 
-  while (!pagefile_is_ready()) {
+  uint64_t pagefile_start_time = get_time();
+  const uint64_t PAGEFILE_TIMEOUT_MS = 30000; // 30 seconds
+
+  while (!pagefile_is_ready() && !pagefile_init_failed()) {
     seL4_Word badge = 0;
     seL4_Wait(ntfn, &badge);
     bool have_reply = false;
     sos_handle_irq_notification(&badge, &have_reply);
 
-    // Check for timeout
-    seL4_Word elapsed = ts_get_timestamp() - start_time;
-    if (elapsed > timeout_ms) {
-      printf("WARNING: Pagefile initialization timeout after %lu ms\n", (unsigned long)elapsed);
+    // Check timeout
+    uint64_t elapsed = get_time() - pagefile_start_time;
+    if (elapsed > PAGEFILE_TIMEOUT_MS) {
+      printf("WARNING: Pagefile initialization timed out after %llu ms\n",
+             (unsigned long long)elapsed);
       break;
     }
   }
 
   if (pagefile_init_failed()) {
-    printf("WARNING: Pagefile initialization failed; eviction disabled\n");
+    printf("WARNING: Pagefile initialisation failed; eviction disabled\n");
   } else if (pagefile_is_ready()) {
-    printf("Pagefile initialized successfully\n");
+    printf("Pagefile initialised successfully\n");
   } else {
-    printf("WARNING: Pagefile initialization incomplete; eviction disabled\n");
+    printf("WARNING: Pagefile initialisation incomplete; eviction disabled\n");
   }
 
   /* run sos initialisation tests */

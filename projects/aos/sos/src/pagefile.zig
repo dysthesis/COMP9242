@@ -2,6 +2,9 @@ const std = @import("std");
 const c = @import("cimports").c;
 const sos = @import("cimports").sos;
 
+const file = @import("file.zig");
+const KernelFileHandle = file.KernelFileHandle;
+
 // Sentinel value for invalid/unallocated slots
 pub const INVALID_SLOT: u32 = 0;
 
@@ -14,18 +17,20 @@ const INITIAL_SLOT_COUNT: u32 = 256;
 // Maximum capacity, 8192 slots (32 MiB)
 const MAX_SLOT_COUNT: u32 = 8192;
 
-// NFS file mode flags
-const O_RDWR: c_int = 0x0002;
-const O_CREAT: c_int = 0x0100;
+// File mode for pagefile creation
+const DEFAULT_CREATE_MODE: c_int = 0o600; // rw-------
 
-// Import NFS operations from nfs_handler.zig.
-// NOTE: For some reason, @import does not work for this.
-extern fn nfs_open_sync_c(path: [*:0]const u8, flags: c_int) ?*anyopaque;
-extern fn nfs_close_sync_c(fh: ?*anyopaque) c_int;
-
-// Async NFS open callback type and function
-const PagefileAsyncCallback = *const fn (status: c_int, fh: ?*anyopaque, userdata: ?*anyopaque) callconv(.c) void;
-extern fn nfs_open_async_c(path: [*:0]const u8, flags: c_int, callback: PagefileAsyncCallback, userdata: ?*anyopaque) c_int;
+// Import NFS async operations
+extern fn get_nfs_context() ?*anyopaque;
+extern fn nfs_open2_async(
+    nfs_ctx: ?*anyopaque,
+    path: [*:0]const u8,
+    flags: c_int,
+    mode: c_int,
+    cb: *const fn (c_int, ?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) void,
+    private_data: ?*anyopaque,
+) c_int;
+extern fn nfs_get_error(nfs_ctx: ?*anyopaque) [*:0]const u8;
 
 /// Frame reference to proof that a frame index is valid (non-zero).
 const FrameRef = struct {
@@ -113,7 +118,7 @@ const Bitmap = struct {
 
 /// Global pagefile state
 const PagefileState = struct {
-    nfs_handle: *anyopaque,
+    file_handle: KernelFileHandle,
     slot_table: []SlotState,
     bitmap: Bitmap,
     next_search_hint: u32,
@@ -137,7 +142,7 @@ const PagefileState = struct {
         }
 
         return .{
-            .nfs_handle = nfs_handle,
+            .file_handle = file_handle,
             .slot_table = slot_table,
             .bitmap = bitmap,
             .next_search_hint = 1, // Skip slot 0
@@ -355,26 +360,62 @@ const sos_allocator = std.mem.Allocator{
 
 /// Initialise pagefile subsystem asynchronously.
 ///
-/// This callback is invoked when the async NFS open operation completes.
-/// It allocates slot structures and sets global_state on success,
+/// This callback is invoked by the NFS event loop when the async open operation
+/// completes. It allocates slot structures and sets global_state on success,
 /// or marks init_failed on failure.
-fn pagefileInitCallback(status: c_int, fh: ?*anyopaque, userdata: ?*anyopaque) callconv(.c) void {
-    _ = userdata;
+///
+/// This callback executes in the context of the IRQ handler (via nfsServicePoll
+/// called from network_irq), so it must not block or perform long operations.
+fn pagefileOpenCallback(
+    err: c_int,
+    nfs_ctx: ?*anyopaque,
+    data: ?*anyopaque,
+    private_data: ?*anyopaque,
+) callconv(.c) void {
+    _ = nfs_ctx;
+    _ = private_data;
 
+    _ = c.printf("[pagefile] Async open callback invoked: err=%d\n", err);
+
+    // Mark init as no longer pending
     init_pending = false;
 
-    if (status < 0 or fh == null) {
-        _ = c.printf("[pagefile] WARNING: Pagefile creation failed (status=%d); eviction disabled\n", @as(c_int, status));
+    if (err < 0) {
+        // Get detailed error message from NFS library
+        const nfs_ctx_local = get_nfs_context();
+        if (nfs_ctx_local) |ctx| {
+            const error_str = nfs_get_error(ctx);
+            _ = c.printf("[pagefile] NFS error: %s (errno=%d)\n", error_str, err);
+        }
+
+        // Provide helpful message for common error (file doesn't exist)
+        if (err == -2) { // ENOENT
+            _ = c.printf("[pagefile] HINT: File 'pagefile' must be pre-created on NFS server\n");
+            _ = c.printf("[pagefile] HINT: Run on server: touch /export/odroid-84-root/.pagefile\n");
+        }
+
+        _ = c.printf("[pagefile] WARNING: Pagefile open failed (err=%d); eviction disabled\n", err);
         init_failed = true;
         return;
     }
 
-    _ = c.printf("[pagefile] Pagefile /swap opened successfully (async)\n");
+    if (data == null) {
+        _ = c.printf("[pagefile] ERROR: Open succeeded but file handle is null\n");
+        init_failed = true;
+        return;
+    }
+
+    const nfs_fh = data.?;
+    _ = c.printf("[pagefile] Pagefile opened successfully (fh=%p)\n", nfs_fh);
+
+    // Wrap NFS handle in KernelFileHandle
+    const fh = KernelFileHandle{ .nfs_fh = nfs_fh };
 
     // Allocate pagefile state using SOS allocator
-    global_state = PagefileState.init(sos_allocator, fh.?, INITIAL_SLOT_COUNT) catch {
+    global_state = PagefileState.init(sos_allocator, fh, INITIAL_SLOT_COUNT) catch {
         _ = c.printf("[pagefile] ERROR: Failed to allocate pagefile structures\n");
-        _ = nfs_close_sync_c(fh);
+        // Close the file handle since we can't use it
+        fh.close();
         init_failed = true;
         return;
     };
@@ -398,18 +439,35 @@ pub export fn pagefile_init() callconv(.c) void {
 
     _ = c.printf("[pagefile] Initialising pagefile subsystem (async, capacity: %u slots = %zu KiB)\n", @as(c_uint, INITIAL_SLOT_COUNT), @as(c_ulong, (INITIAL_SLOT_COUNT * PAGE_SIZE) / 1024));
 
+    // Get NFS context
+    const nfs_ctx = get_nfs_context();
+    if (nfs_ctx == null) {
+        _ = c.printf("[pagefile] ERROR: NFS context not available\n");
+        init_failed = true;
+        return;
+    }
+
+    // Mark initialisation as pending (async operation in progress)
     init_pending = true;
 
-    // Queue async NFS open operation (non-blocking)
-    const rc = nfs_open_async_c("swap", O_RDWR | O_CREAT, pagefileInitCallback, null);
+    // Queue async NFS open operation
+    const path: [*:0]const u8 = "pagefile";
+    const flags: c_int = c.O_CREAT | c.O_RDWR;
+    const mode: c_int = DEFAULT_CREATE_MODE;
+
+    _ = c.printf("[pagefile] Attempting to open NFS file: path='%s' flags=0x%x mode=0%o\n", path, @as(c_uint, @bitCast(flags)), @as(c_uint, @bitCast(mode)));
+
+    const rc = nfs_open2_async(nfs_ctx, path, flags, mode, pagefileOpenCallback, null);
     if (rc < 0) {
-        _ = c.printf("[pagefile] ERROR: Failed to queue async pagefile open\n");
+        // Get detailed error if queuing failed
+        const error_str = nfs_get_error(nfs_ctx);
+        _ = c.printf("[pagefile] ERROR: Failed to queue async pagefile open (rc=%d): %s\n", rc, error_str);
         init_pending = false;
         init_failed = true;
         return;
     }
 
-    _ = c.printf("[pagefile] Pagefile async open queued; waiting for completion callback\n");
+    _ = c.printf("[pagefile] Async open queued; awaiting callback via IRQ processing\n");
 }
 
 /// Shutdown pagefile subsystem.
@@ -419,8 +477,8 @@ pub export fn pagefile_shutdown() callconv(.c) void {
 
     _ = c.printf("[pagefile] Shutting down pagefile subsystem\n");
 
-    // Close NFS handle
-    _ = nfs_close_sync_c(state.nfs_handle);
+    // Close kernel file handle
+    state.file_handle.close();
 
     // Free resources
     state.deinit();

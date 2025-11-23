@@ -121,38 +121,38 @@ static void test_dma(void) {
 static void test_frame_table(void) {
   /* Test allocation and writing */
   frame_ref_t frames[TEST_FRAMES] = {};
-  for (int f = 0; f < TEST_FRAMES; f++) {
+  for (int frame = 0; frame < TEST_FRAMES; frame++) {
     /* Allocate a frame */
-    frames[f] = alloc_frame(FRAME_OWNER_KERNEL, FRAME_FLAG_PINNED);
-    assert(frames[f] != NULL_FRAME);
+    frames[frame] = alloc_frame(FRAME_OWNER_KERNEL, FRAME_FLAG_PINNED);
+    assert(frames[frame] != NULL_FRAME);
 
     /* Write to the first and last byte of the frame */
-    unsigned char *vaddr = frame_data(frames[f]);
-    vaddr[0] = f;
-    vaddr[BIT(seL4_PageBits) - 1] = f;
+    unsigned char *vaddr = frame_data(frames[frame]);
+    vaddr[0] = frame;
+    vaddr[BIT(seL4_PageBits) - 1] = frame;
   }
 
   /* Check the writes happened */
-  for (int f = 0; f < TEST_FRAMES; f++) {
-    unsigned char *vaddr = frame_data(frames[f]);
-    assert(vaddr[0] == f);
-    assert(vaddr[BIT(seL4_PageBits) - 1] == f);
+  for (int frame = 0; frame < TEST_FRAMES; frame++) {
+    unsigned char *vaddr = frame_data(frames[frame]);
+    assert(vaddr[0] == frame);
+    assert(vaddr[BIT(seL4_PageBits) - 1] == frame);
   }
 
   /* Free all the frames */
-  for (int f = 0; f < TEST_FRAMES; f++) {
-    free_frame(frames[f]);
+  for (int frame = 0; frame < TEST_FRAMES; frame++) {
+    free_frame(frames[frame]);
   }
 
   /* Ensure that we get the same frames when we try to realloc */
   frame_ref_t new_frames[TEST_FRAMES] = {};
-  for (int f = 0; f < TEST_FRAMES; f++) {
-    new_frames[f] = alloc_frame(FRAME_OWNER_KERNEL, FRAME_FLAG_PINNED);
-    assert(new_frames[f] != NULL_FRAME);
+  for (int frame = 0; frame < TEST_FRAMES; frame++) {
+    new_frames[frame] = alloc_frame(FRAME_OWNER_KERNEL, FRAME_FLAG_PINNED);
+    assert(new_frames[frame] != NULL_FRAME);
 
     int o = 0;
     while (o < TEST_FRAMES) {
-      if (new_frames[f] == frames[o]) {
+      if (new_frames[frame] == frames[o]) {
         frames[o] = NULL_FRAME;
         break;
       }
@@ -161,8 +161,8 @@ static void test_frame_table(void) {
     /* Check that we found one of our previous frames */
     assert(o != TEST_FRAMES);
   }
-  for (int f = 0; f < TEST_FRAMES; f++) {
-    free_frame(new_frames[f]);
+  for (int frame = 0; frame < TEST_FRAMES; frame++) {
+    free_frame(new_frames[frame]);
   }
 }
 
@@ -181,6 +181,8 @@ static void test_pagefile(void) {
     ZF_LOGW("Pagefile initialisation failed; eviction disabled");
     return;
   }
+
+  assert(stats.slots_total >= 0);
 
   /* Allocate 10 slots */
   uint32_t slots[10];

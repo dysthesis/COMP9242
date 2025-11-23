@@ -1,7 +1,6 @@
 const NFS_POOL_SIZE = 4;
 const NFS_TIMEOUT_MS = 10000; // 10 seconds
 
-const O_CREAT: c_int = 0o100;
 const DEFAULT_CREATE_MODE: c_int = 0o600; // rw-------
 const READ_MODE_MASK: u64 = 0o400 | 0o040 | 0o004;
 const WRITE_MODE_MASK: u64 = 0o200 | 0o020 | 0o002;
@@ -333,7 +332,7 @@ pub fn openSync(path: [*:0]const u8, flags: c_int) !*anyopaque {
     slot.stat_out = null;
 
     const private_data: ?*anyopaque = @as(?*anyopaque, @ptrCast(slot));
-    const mode: c_int = if ((flags & O_CREAT) != 0)
+    const mode: c_int = if ((flags & c.O_CREAT) != 0)
         DEFAULT_CREATE_MODE
     else
         0;
@@ -747,7 +746,7 @@ pub export fn nfs_open_async_c(
         return -1;
     };
 
-    const mode: c_int = if ((flags & O_CREAT) != 0)
+    const mode: c_int = if ((flags & c.O_CREAT) != 0)
         DEFAULT_CREATE_MODE
     else
         0;
