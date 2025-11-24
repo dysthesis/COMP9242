@@ -110,9 +110,10 @@ static void clock_advance_hand(frame_ref_t next);
 
 /* Page-out worker bridge (implemented in Zig). */
 extern int pageout_submit(uint32_t slot, size_t frame_ref);
-extern int pageout_poll_complete(void);
+extern int pageout_poll_complete(size_t *frame_ref_out, uint32_t *slot_out);
 extern int vm_pageout_finalise(size_t frame_ref, uint32_t slot);
 
+#define SOS_EAGAIN 11
 /*
  * Allocate a frame at a particular address in SOS.
  *
@@ -146,14 +147,19 @@ int pageout_frame(frame_ref_t victim) {
     return rc;
   }
 
+  size_t completed_frame = 0;
+  uint32_t completed_slot = 0;
   do {
-    rc = pageout_poll_complete();
-  } while (rc == -11 /* EAGAIN */);
+    rc = pageout_poll_complete(&completed_frame, &completed_slot);
+  } while (rc == -SOS_EAGAIN);
 
   if (rc != 0) {
     pagefile_free_slot(slot);
     return rc;
   }
+
+  assert(completed_frame == victim);
+  assert(completed_slot == slot);
 
   rc = vm_pageout_finalise(victim, slot);
   if (rc != 0) {

@@ -816,6 +816,8 @@ const PAGEOUT_JOB_CAP: usize = 8;
 var pageout_job_states: [PAGEOUT_JOB_CAP]FileOpState = undefined;
 var pageout_job_used: [PAGEOUT_JOB_CAP]bool = [_]bool{false} ** PAGEOUT_JOB_CAP;
 var pageout_job_done: [PAGEOUT_JOB_CAP]bool = [_]bool{false} ** PAGEOUT_JOB_CAP;
+const PageOutMeta = struct { slot: u32, frame_ref: usize };
+var pageout_job_meta: [PAGEOUT_JOB_CAP]PageOutMeta = [_]PageOutMeta{.{ .slot = 0, .frame_ref = 0 }} ** PAGEOUT_JOB_CAP;
 
 /// Thread spawner defined in threads.c
 extern fn spawn_worker_thread(
@@ -895,6 +897,8 @@ pub export fn workerEnqueue(file_op: *FileOpState) callconv(.c) c_int {
 const PageOutJobSlot = struct {
     index: usize,
     state: *FileOpState,
+    slot: u32,
+    frame_ref: usize,
 };
 
 fn acquirePageOutJobSlot() ?PageOutJobSlot {
@@ -903,7 +907,7 @@ fn acquirePageOutJobSlot() ?PageOutJobSlot {
             used.* = true;
             pageout_job_states[idx].reset();
             pageout_job_done[idx] = false;
-            return PageOutJobSlot{ .index = idx, .state = &pageout_job_states[idx] };
+            return PageOutJobSlot{ .index = idx, .state = &pageout_job_states[idx], .slot = 0, .frame_ref = 0 };
         }
     }
     return null;
@@ -913,6 +917,7 @@ fn releasePageOutJobSlot(idx: usize) void {
     if (idx >= pageout_job_used.len) return;
     pageout_job_used[idx] = false;
     pageout_job_done[idx] = false;
+    pageout_job_meta[idx] = .{ .slot = 0, .frame_ref = 0 };
 }
 
 /// Enqueue page-out job and busy-wait for completion.
@@ -926,6 +931,7 @@ pub export fn pageout_submit(slot: u32, frame_ref: usize) callconv(.c) c_int {
     job.params = .{ .PageOut = .{ .slot = slot, .frame_ref = frame_ref } };
     job.vm_handle = null;
     job.payload_len = 0;
+    pageout_job_meta[idx] = .{ .slot = slot, .frame_ref = frame_ref };
 
     const rc = workerEnqueue(job);
     if (rc < 0) {
@@ -939,11 +945,16 @@ pub export fn pageout_submit(slot: u32, frame_ref: usize) callconv(.c) c_int {
 
 /// Poll for completed page-out jobs and return first finished result.
 /// Returns 0 on success, -errno on failure, and -EAGAIN if none complete.
-pub export fn pageout_poll_complete() callconv(.c) c_int {
+/// On success/failure fills out_frame/out_slot with the completed job context.
+pub export fn pageout_poll_complete(out_frame: *usize, out_slot: *u32) callconv(.c) c_int {
     for (&pageout_job_used, 0..) |used, idx| {
         if (!used) continue;
         const job = &pageout_job_states[idx];
         if (!job.isCompleted()) continue;
+
+        const meta = pageout_job_meta[idx];
+        out_frame.* = meta.frame_ref;
+        out_slot.* = meta.slot;
 
         var errno_val: c_int = sos.EIO;
         switch (job.result) {
