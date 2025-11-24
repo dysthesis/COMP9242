@@ -129,7 +129,7 @@ const PagefileState = struct {
     allocator: std.mem.Allocator,
 
     /// Initialise pagefile with given capacity
-    fn init(allocator: std.mem.Allocator, nfs_handle: *anyopaque, num_slots: u32) !PagefileState {
+    fn init(allocator: std.mem.Allocator, file_handle: KernelFileHandle, num_slots: u32) !PagefileState {
         const slot_table = try allocator.alloc(SlotState, num_slots);
         errdefer allocator.free(slot_table);
 

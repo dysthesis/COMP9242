@@ -971,25 +971,14 @@ NORETURN void *main_continued(UNUSED void *arg) {
   printf("Pagefile init\n");
   pagefile_init();
 
-  /* Wait for pagefile initialization to complete (30 second timeout) */
-  printf("Waiting for pagefile initialization...\n");
-
-  uint64_t pagefile_start_time = get_time();
-  const uint64_t PAGEFILE_TIMEOUT_MS = 30000; // 30 seconds
+  /* Wait for pagefile initialisation to complete  */
+  printf("Waiting for pagefile initialisation...\n");
 
   while (!pagefile_is_ready() && !pagefile_init_failed()) {
     seL4_Word badge = 0;
     seL4_Wait(ntfn, &badge);
     bool have_reply = false;
     sos_handle_irq_notification(&badge, &have_reply);
-
-    // Check timeout
-    uint64_t elapsed = get_time() - pagefile_start_time;
-    if (elapsed > PAGEFILE_TIMEOUT_MS) {
-      printf("WARNING: Pagefile initialization timed out after %llu ms\n",
-             (unsigned long long)elapsed);
-      break;
-    }
   }
 
   if (pagefile_init_failed()) {
