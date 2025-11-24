@@ -154,7 +154,9 @@ pub export fn vm_pageout_finalise(frame_ref: usize, slot: u32) callconv(.c) c_in
             const vaddr = entry.key_ptr.*;
             var page_entry = entry.value_ptr;
 
-            if (page_entry.frame_ref != frame_ref or page_entry.state != page.PageState.RESIDENT) {
+            if (page_entry.frame_ref != frame_ref or
+                (page_entry.state != page.PageState.RESIDENT and page_entry.state != page.PageState.PAGEOUT_PENDING))
+            {
                 continue;
             }
 
@@ -199,6 +201,65 @@ pub export fn vm_pageout_finalise(frame_ref: usize, slot: u32) callconv(.c) c_in
     }
 
     sos.free_frame(frame_ref);
+
+    return 0;
+}
+
+/// Prepare a page for page-out by unmapping all client mappings and
+/// transitioning metadata to PAGEOUT_PENDING with the chosen pagefile slot.
+/// This must run before copying frame contents to the pagefile to avoid
+/// post-copy modifications.
+pub export fn vm_pageout_prepare(frame_ref: usize, slot: u32) callconv(.c) c_int {
+    bootstrapVmStates();
+
+    var unmapped: bool = false;
+
+    for (&vm_states) |*state| {
+        if (!state.initialised) continue;
+
+        var it = state.addr_space.iterator();
+        while (it.next()) |entry| {
+            const vaddr = entry.key_ptr.*;
+            var page_entry = entry.value_ptr;
+
+            if (page_entry.frame_ref != frame_ref or page_entry.state != page.PageState.RESIDENT) {
+                continue;
+            }
+
+            page_entry.transitionState(.PAGEOUT_PENDING);
+
+            if (page_entry.cap_slot != sel4.seL4_CapNull) {
+                const unmap_err = sel4.seL4_ARM_Page_Unmap(page_entry.cap_slot);
+                if (unmap_err != sel4.seL4_NoError) {
+                    return -sos.EIO;
+                }
+            }
+
+            if (page_entry.owns_cap and page_entry.cap_owner != null) {
+                const owner = page_entry.cap_owner.?;
+                const del_err = sos.cspace_delete(owner, page_entry.cap_slot);
+                if (del_err != sel4.seL4_NoError) {
+                    return -sos.EIO;
+                }
+                _ = sos.cspace_free_slot(owner, page_entry.cap_slot);
+            }
+
+            state.addr_space.recordLeafUnmap(vaddr);
+
+            page_entry.cap_slot = sel4.seL4_CapNull;
+            page_entry.cap_owner = null;
+            page_entry.owns_cap = false;
+            page_entry.pagefile_slot = @intCast(slot);
+            page_entry.dirty = false;
+            page_entry.referenced = false;
+
+            unmapped = true;
+        }
+    }
+
+    if (!unmapped) {
+        return -sos.ENOENT;
+    }
 
     return 0;
 }

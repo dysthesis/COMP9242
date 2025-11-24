@@ -116,6 +116,7 @@ static int pageout_wait_blocking(void);
 extern int pageout_submit(uint32_t slot, size_t frame_ref);
 extern int pageout_poll_complete(size_t *frame_ref_out, uint32_t *slot_out);
 extern int vm_pageout_finalise(size_t frame_ref, uint32_t slot);
+extern int vm_pageout_prepare(size_t frame_ref, uint32_t slot);
 
 #define SOS_EAGAIN 11
 /*
@@ -148,6 +149,14 @@ int pageout_frame(frame_ref_t victim) {
     ZF_LOGE("pageout_frame: failed to alloc slot for victim=%zu", victim);
     clock_reconsider(frame);
     return -1;
+  }
+
+  /* Unmap and transition metadata to PAGEOUT_PENDING before copying to avoid dirty-after-copy races. */
+  int prep_rc = vm_pageout_prepare(victim, slot);
+  if (prep_rc != 0) {
+    pagefile_free_slot(slot);
+    clock_reconsider(frame);
+    return prep_rc;
   }
 
   /* Submit with bounded retries to handle transient EAGAIN (no worker slots). */
