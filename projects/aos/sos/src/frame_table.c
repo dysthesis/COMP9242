@@ -197,6 +197,13 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
     frame = alloc_fresh_frame();
   }
 
+  if (frame == NULL && pagefile_is_ready()) {
+    /* Attempt synchronous eviction to free a frame */
+    if (evict_one_frame() == 0) {
+      frame = pop_front(&frame_table.free);
+    }
+  }
+
   if (frame != NULL) {
     frame->owner = owner;
     frame->flags = flags;
