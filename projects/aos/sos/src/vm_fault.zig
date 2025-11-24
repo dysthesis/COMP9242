@@ -413,7 +413,9 @@ fn installPagerResult(meta: PagerJobMeta, job_state: *worker.FileOpState) c_int 
 
     if (meta.page.pagefile_slot >= 0) {
         pagefile_free_slot(@intCast(meta.page.pagefile_slot));
-        sos.frame_unbind_slot(installed.frame_ref);
+        if (state.findPage(page_base)) |installed| {
+            sos.frame_unbind_slot(installed.frame_ref);
+        }
         meta.page.pagefile_slot = -1;
     }
     meta.page.dirty = false;

@@ -27,7 +27,7 @@
 #include "debugger.h"
 #endif /* CONFIG_SOS_GDB_ENABLED */
 
-#define SOS_THREAD_PRIORITY (100)
+#define SOS_THREAD_PRIORITY (seL4_MaxPrio)
 
 __thread sos_thread_t *current_thread = NULL;
 

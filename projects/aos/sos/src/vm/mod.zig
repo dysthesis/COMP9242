@@ -208,6 +208,11 @@ pub export fn vm_pageout_finalise(frame_ref: usize, slot: u32) callconv(.c) c_in
     sos.free_frame(frame_ref);
     sos.frame_unbind_slot(frame_ref);
 
+    if (pageout_finalise_log_count < 32) {
+        _ = c.printf("[vm_pageout_finalise] ok frame=%lu slot=%u\n", @as(c_ulong, @intCast(frame_ref)), @as(c_uint, slot));
+        pageout_finalise_log_count += 1;
+    }
+
     return 0;
 }
 
@@ -337,6 +342,7 @@ const cimports = @import("cimports");
 const c = cimports.c;
 const sel4 = cimports.sel4;
 const sos = cimports.sos;
+var pageout_finalise_log_count: usize = 0;
 
 pub const logging = @import("logging.zig");
 pub const addr_space = @import("addr_space.zig");

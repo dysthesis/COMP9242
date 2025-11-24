@@ -937,6 +937,8 @@ fn fileOpResume(
     result.* = .{ .Error = .{ .errno = sos.ENOSYS } };
 }
 
+var drain_log_counter: usize = 0;
+
 pub export fn checkCompletedFileOps() callconv(.c) void {
     while (continuation.FileOpQueue.pollCompleted()) |cont| {
         if (!cont.processFileOpCompletion()) {
@@ -949,6 +951,10 @@ pub export fn checkCompletedFileOps() callconv(.c) void {
 }
 
 fn drainPageOutCompletions() void {
+    if (drain_log_counter < 64) {
+        _ = c.printf("[pageout] drain tick %lu\n", @as(c_ulong, @intCast(drain_log_counter)));
+        drain_log_counter += 1;
+    }
     var loops: usize = 0;
     while (loops < 8) : (loops += 1) {
         var frame_ref: usize = 0;
@@ -967,6 +973,8 @@ fn drainPageOutCompletions() void {
         if (rc2 != 0) {
             _ = c.printf("[pageout] finalise error rc=%d frame=%lu slot=%u\n", rc2, @as(c_ulong, @intCast(frame_ref)), @as(c_uint, slot));
             pagefile.pagefile_free_slot(slot);
+        } else {
+            _ = c.printf("[pageout] finalise ok frame=%lu slot=%u\n", @as(c_ulong, @intCast(frame_ref)), @as(c_uint, slot));
         }
     }
 }

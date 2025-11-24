@@ -131,6 +131,10 @@ void free_frame(frame_ref_t frame_ref);
 bool frame_bind_slot(frame_ref_t frame_ref, uint32_t slot);
 void frame_unbind_slot(frame_ref_t frame_ref);
 
+/* Expose clock eligibility reconsideration so VM mappings can admit frames
+ * only after they are fully recorded as resident. */
+void frame_clock_consider(frame_ref_t frame_ref);
+
 /*
  * Get the contents of a frame as mapped into SOS.
  *

@@ -212,6 +212,9 @@ pub const Client = struct {
         // leave waiters as-is (pager may be waiting)
         self.mapped_count = self.addr_space.num_mapped();
 
+        // Admit to eviction clock only after the VM metadata reflects a resident page.
+        sos.frame_clock_consider(frame_ref);
+
         tracker.updateAccess(readable, writable, executable);
         tracker.recordMapping(vaddr, super.PAGE_SIZE_4K);
 
@@ -272,6 +275,9 @@ pub const Client = struct {
         inserted.waiters.reset();
 
         self.mapped_count = self.addr_space.num_mapped();
+
+        // Now that the mapping is recorded as resident, allow eviction clock membership.
+        sos.frame_clock_consider(frame_ref);
     }
 
     pub fn metadataAllocator(self: *Client) std.mem.Allocator {

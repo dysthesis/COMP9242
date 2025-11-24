@@ -189,6 +189,7 @@ int evict_one_frame(void) {
   }
   ZF_LOGE("evict_one_frame: victim=%zu (clock_len=%lu free_len=%lu)", victim,
           frame_table.clock.length, frame_table.free.length);
+  ZF_LOGE("evict_one_frame: submitting victim=%zu", victim);
   return pageout_frame(victim);
 }
 
@@ -206,6 +207,14 @@ void frame_mark_referenced(frame_ref_t frame_ref) {
   }
   frame_t *frame = frame_from_ref(frame_ref);
   frame->flags |= FRAME_FLAG_REFERENCED;
+}
+
+void frame_clock_consider(frame_ref_t frame_ref) {
+  if (frame_ref == NULL_FRAME) {
+    return;
+  }
+  frame_t *frame = frame_from_ref(frame_ref);
+  clock_reconsider(frame);
 }
 
 /* Allocate a new frame. */
@@ -302,7 +311,6 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
     /* Ensure stale clock links are cleared before reconsidering eligibility. */
     frame->clock_prev = NULL_FRAME;
     frame->clock_next = NULL_FRAME;
-    clock_reconsider(frame);
     push_back(&frame_table.allocated, frame);
   } else {
     return NULL_FRAME;
@@ -565,12 +573,25 @@ static int pageout_wait_for_completion(size_t max_iters) {
 
 /* Block until at least one page-out completion is processed or an error occurs. */
 static int pageout_wait_blocking(void) {
+  static size_t pwb_log_count = 0;
+  if (pwb_log_count < 32) {
+    ZF_LOGE("pageout_wait_blocking: enter");
+    pwb_log_count++;
+  }
   while (true) {
     int rc = pageout_process_one_completion();
     if (rc == 0) {
+      if (pwb_log_count < 64) {
+        ZF_LOGE("pageout_wait_blocking: completion rc=0");
+        pwb_log_count++;
+      }
       return 0;
     }
     if (rc != -SOS_EAGAIN) {
+      if (pwb_log_count < 64) {
+        ZF_LOGE("pageout_wait_blocking: error rc=%d", rc);
+        pwb_log_count++;
+      }
       return rc;
     }
     seL4_Yield();

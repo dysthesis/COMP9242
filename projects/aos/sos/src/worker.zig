@@ -797,7 +797,10 @@ pub const Worker = struct {
         }
 
         const params = file_op.params.PageOut;
-        _ = c.printf("[worker] workerPageOut: slot=%u frame_ref=%lu\n", @as(c_uint, params.slot), @as(c_ulong, @intCast(params.frame_ref)));
+        if (pageout_worker_counter < 32) {
+            _ = c.printf("[worker] workerPageOut: start slot=%u frame_ref=%lu\n", @as(c_uint, params.slot), @as(c_ulong, @intCast(params.frame_ref)));
+            pageout_worker_counter += 1;
+        }
 
         var bounce: [vm.PAGE_SIZE_4K]u8 = undefined;
         const frame_ptr: [*]const u8 = @ptrCast(sos.frame_data(params.frame_ref));
@@ -828,6 +831,8 @@ var pageout_job_used: [PAGEOUT_JOB_CAP]bool = [_]bool{false} ** PAGEOUT_JOB_CAP;
 var pageout_job_done: [PAGEOUT_JOB_CAP]bool = [_]bool{false} ** PAGEOUT_JOB_CAP;
 const PageOutMeta = struct { slot: u32, frame_ref: usize };
 var pageout_job_meta: [PAGEOUT_JOB_CAP]PageOutMeta = [_]PageOutMeta{.{ .slot = 0, .frame_ref = 0 }} ** PAGEOUT_JOB_CAP;
+var pageout_debug_counter: usize = 0;
+var pageout_worker_counter: usize = 0;
 const MAX_SLOTS: usize = 8192;
 const SLOT_BUSY_WORDS: usize = (MAX_SLOTS + 63) / 64;
 var pageout_slot_busy: [SLOT_BUSY_WORDS]u64 = [_]u64{0} ** SLOT_BUSY_WORDS;
@@ -877,6 +882,10 @@ pub export fn worker_init(delegate_ep_arg: sel4.seL4_CPtr, work_ntfn: sel4.seL4_
         return;
     }
 
+    // Mark initialisation before spawning to avoid races where worker_main_c
+    // observes worker_initialized == false and exits.
+    worker_initialized = true;
+
     var idx: usize = 0;
     while (idx < WORKER_COUNT) : (idx += 1) {
         var ntfn = work_ntfn;
@@ -893,9 +902,11 @@ pub export fn worker_init(delegate_ep_arg: sel4.seL4_CPtr, work_ntfn: sel4.seL4_
 
         workers[idx] = Worker.init(delegate_ep_arg, ntfn);
         worker_notifications[idx] = ntfn;
-        spawn_worker_thread(worker_main_c, idx);
         _ = c.printf("[worker] Worker thread %u spawned (delegate_ep=%lu, ntfn=%lu)\n", @as(c_uint, @intCast(idx)), delegate_ep_arg, ntfn);
         active_worker_count += 1;
+        // Increment count before spawn so early-starting threads see a valid
+        // active_worker_count in worker_main_c.
+        spawn_worker_thread(worker_main_c, idx);
     }
 
     if (active_worker_count == 0) {
@@ -905,15 +916,16 @@ pub export fn worker_init(delegate_ep_arg: sel4.seL4_CPtr, work_ntfn: sel4.seL4_
         spawn_worker_thread(worker_main_c, 0);
         active_worker_count = 1;
     }
-
-    worker_initialized = true;
 }
 
 /// C wrapper for worker main loop
 pub export fn worker_main_c(arg: usize) callconv(.c) void {
     const idx = arg;
-    if (!worker_initialized or idx >= active_worker_count) {
-        _ = c.printf("[worker] Worker main invoked with invalid index %zu\n", idx);
+    // Relaxed guard: worker_initialized is set before spawn; idx bounds check
+    // remains to catch bogus invocations without killing valid threads on
+    // startup races.
+    if (idx >= active_worker_count) {
+        _ = c.printf("[worker] Worker main invoked with invalid index %zu (active=%zu)\n", idx, active_worker_count);
         return;
     }
     workers[idx].run();
@@ -997,6 +1009,8 @@ pub export fn pageout_submit(slot: u32, frame_ref: usize) callconv(.c) c_int {
 /// Returns 0 on success, -errno on failure, and -EAGAIN if none complete.
 /// On success/failure fills out_frame/out_slot with the completed job context.
 pub export fn pageout_poll_complete(out_frame: *usize, out_slot: *u32) callconv(.c) c_int {
+    const log_limit: usize = 32;
+    var rc: c_int = -@as(c_int, @intCast(sos.EAGAIN));
     for (&pageout_job_used, 0..) |used, idx| {
         if (!used) continue;
         const job = &pageout_job_states[idx];
@@ -1016,7 +1030,17 @@ pub export fn pageout_poll_complete(out_frame: *usize, out_slot: *u32) callconv(
         job.reset();
         releasePageOutJobSlot(idx);
         releaseSlot(meta.slot);
-        return errno_val;
+        rc = errno_val;
+        if (pageout_debug_counter < log_limit) {
+            _ = c.printf("[pageout-poll] rc=%d frame=%lu slot=%u\n", rc, @as(c_ulong, @intCast(out_frame.*)), @as(c_uint, meta.slot));
+            pageout_debug_counter += 1;
+        }
+        return rc;
     }
-    return -@as(c_int, @intCast(sos.EAGAIN));
+    rc = -@as(c_int, @intCast(sos.EAGAIN));
+    if (pageout_debug_counter < log_limit) {
+        _ = c.printf("[pageout-poll] rc=%d frame=%lu slot=%u\n", rc, @as(c_ulong, @intCast(out_frame.*)), @as(c_uint, out_slot.*));
+        pageout_debug_counter += 1;
+    }
+    return rc;
 }
