@@ -72,6 +72,7 @@ pub const WorkItem = struct {
             .GetDirent => worker.workerGetDirent(self.file_op),
             .PageFill => {
                 _ = c.printf("[worker] WorkItem.process: dispatching to workerPageFill\n");
+                // Enforce per-slot single inflight: PageFill will EAGAIN if slot busy.
                 worker.workerPageFill(self.file_op);
             },
             .PageOut => {

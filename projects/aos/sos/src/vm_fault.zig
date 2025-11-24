@@ -395,6 +395,15 @@ fn installPagerResult(meta: PagerJobMeta, job_state: *worker.FileOpState) c_int 
         return vm.vmErrorToErrno(err);
     };
 
+    // Enforce slot/frame invariant on install: if the page carries a slot, the frame must agree.
+    if (meta.page.pagefile_slot >= 0) {
+        const installed = state.findPage(page_base) orelse return sos.EINVAL;
+        if (installed.frame_ref == 0) return sos.EINVAL;
+        if (!sos.frame_bind_slot(installed.frame_ref, @intCast(meta.page.pagefile_slot))) {
+            return sos.EBUSY;
+        }
+    }
+
     const payload = job_state.payloadSlice();
     if (payload.len > 0) {
         vm_handle.copyToClient(payload, page_base) catch |err| {
@@ -404,6 +413,7 @@ fn installPagerResult(meta: PagerJobMeta, job_state: *worker.FileOpState) c_int 
 
     if (meta.page.pagefile_slot >= 0) {
         pagefile_free_slot(@intCast(meta.page.pagefile_slot));
+        sos.frame_unbind_slot(installed.frame_ref);
         meta.page.pagefile_slot = -1;
     }
     meta.page.dirty = false;
