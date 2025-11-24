@@ -146,6 +146,7 @@ int pageout_frame(frame_ref_t victim) {
   uint32_t slot = pagefile_alloc_slot(victim, 0, 0);
   if (slot == PAGEFILE_INVALID_SLOT) {
     ZF_LOGE("pageout_frame: failed to alloc slot for victim=%zu", victim);
+    clock_reconsider(frame);
     return -1;
   }
 
@@ -161,10 +162,12 @@ int pageout_frame(frame_ref_t victim) {
       continue;
     }
     pagefile_free_slot(slot);
+    clock_reconsider(frame);
     return rc;
   }
 
   pagefile_free_slot(slot);
+  clock_reconsider(frame);
   return -SOS_EAGAIN;
 
 }
@@ -212,8 +215,18 @@ void frame_table_init(cspace_t *cspace, seL4_CPtr vspace) {
   frame_table.clock.length = 0;
 
   /* Pre-seed a modest number of frames to avoid early starvation, but do not
-   * exhaust the untyped pool or overflow the frame_data region. */
-    const size_t seed_limit = 4096;
+   * exhaust the untyped pool or overflow the frame_data region. Under tight
+   * SosFrameLimit configs, reserve half the quota for runtime allocations. */
+    size_t seed_limit = 4096;
+#ifdef CONFIG_SOS_FRAME_LIMIT
+  if (CONFIG_SOS_FRAME_LIMIT != 0ul) {
+    size_t half = CONFIG_SOS_FRAME_LIMIT / 2;
+    if (half == 0) {
+      half = 1;
+    }
+    seed_limit = MIN(seed_limit, half);
+  }
+#endif
   size_t seeded = 0;
   while (seeded < seed_limit) {
     frame_t *f = alloc_fresh_frame();

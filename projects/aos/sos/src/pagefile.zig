@@ -286,6 +286,20 @@ const PagefileState = struct {
 var global_state: ?PagefileState = null;
 var init_pending: bool = false;
 var init_failed: bool = false;
+/// Serialises pagefile read/write sequences to avoid seek races across workers.
+const IOLock = struct {
+    state: u8 = 0,
+
+    fn lock(self: *IOLock) void {
+        while (@cmpxchgStrong(u8, &self.state, 0, 1, .acq_rel, .acquire) != null) {}
+    }
+
+    fn unlock(self: *IOLock) void {
+        @atomicStore(u8, &self.state, 0, .release);
+    }
+};
+
+var io_lock: IOLock = .{};
 
 /// Get mutable reference to initialised state.
 ///
@@ -602,7 +616,10 @@ pub export fn pagefile_write_slot(slot: u32, buf: [*]const u8, len: usize) callc
 
     const offset: usize = @as(usize, slot) * PAGE_SIZE;
 
-    // Position the file descriptor and write page contents.
+    io_lock.lock();
+    defer io_lock.unlock();
+
+    // Position the file descriptor and write page contents atomically w.r.t. other workers.
     _ = state.file_handle.lseek(@intCast(offset), c.SEEK_SET) catch {
         return -sos.EIO;
     };
@@ -632,6 +649,9 @@ pub export fn pagefile_read_slot(slot: u32, buf: [*]u8, len: usize) callconv(.c)
     }
 
     const offset: usize = @as(usize, slot) * PAGE_SIZE;
+
+    io_lock.lock();
+    defer io_lock.unlock();
 
     _ = state.file_handle.lseek(@intCast(offset), c.SEEK_SET) catch {
         return -sos.EIO;
