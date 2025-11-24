@@ -110,6 +110,7 @@ static void clock_validate(void);
 static void clock_advance_hand(frame_ref_t next);
 static int pageout_process_one_completion(void);
 static int pageout_wait_for_completion(size_t max_iters);
+static int pageout_wait_blocking(void);
 
 /* Page-out worker bridge (implemented in Zig). */
 extern int pageout_submit(uint32_t slot, size_t frame_ref);
@@ -225,8 +226,8 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
   if (frame == NULL && pagefile_is_ready()) {
     /* Attempt synchronous eviction to free a frame */
     if (evict_one_frame() == 0) {
-      /* Wait briefly for a page-out completion to make a frame available. */
-      (void)pageout_wait_for_completion(32);
+      /* Block until at least one page-out completes to free a frame. */
+      (void)pageout_wait_blocking();
       frame = pop_front(&frame_table.free);
     } else {
       ZF_LOGE("alloc_frame: eviction attempt failed (clock_len=%lu)", frame_table.clock.length);
@@ -478,6 +479,20 @@ static int pageout_wait_for_completion(size_t max_iters) {
     seL4_Yield();
   }
   return -SOS_EAGAIN;
+}
+
+/* Block until at least one page-out completion is processed or an error occurs. */
+static int pageout_wait_blocking(void) {
+  while (true) {
+    int rc = pageout_process_one_completion();
+    if (rc == 0) {
+      return 0;
+    }
+    if (rc != -SOS_EAGAIN) {
+      return rc;
+    }
+    seL4_Yield();
+  }
 }
 
 static void clock_add(frame_t *frame) {
