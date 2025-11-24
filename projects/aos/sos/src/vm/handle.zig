@@ -204,8 +204,10 @@ pub const VmHandle = struct {
         const base = Address.init(vaddr).pageBase(PAGE_SIZE_4K).raw();
         if (state.findPage(base)) |page_entry| {
             page_entry.referenced = true;
+            sos.frame_mark_referenced(page_entry.frame_ref);
             if (write) {
                 page_entry.dirty = true;
+                sos.frame_mark_dirty(page_entry.frame_ref);
             }
         }
     }

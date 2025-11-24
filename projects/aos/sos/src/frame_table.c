@@ -108,6 +108,8 @@ static void clock_remove(frame_t *frame);
 static void clock_reconsider(frame_t *frame);
 static void clock_validate(void);
 static void clock_advance_hand(frame_ref_t next);
+static int pageout_process_one_completion(void);
+static int pageout_wait_for_completion(size_t max_iters);
 
 /* Page-out worker bridge (implemented in Zig). */
 extern int pageout_submit(uint32_t slot, size_t frame_ref);
@@ -135,6 +137,9 @@ int pageout_frame(frame_ref_t victim) {
   }
 
   frame_t *frame = frame_from_ref(victim);
+
+  /* Remove from clock list immediately to prevent duplicate eviction. */
+  clock_remove(frame);
 
   /* Allocate pagefile slot */
   uint32_t slot = pagefile_alloc_slot(victim, 0, 0);
@@ -168,6 +173,14 @@ void frame_mark_dirty(frame_ref_t frame_ref) {
   frame->flags |= FRAME_FLAG_DIRTY;
 }
 
+void frame_mark_referenced(frame_ref_t frame_ref) {
+  if (frame_ref == NULL_FRAME) {
+    return;
+  }
+  frame_t *frame = frame_from_ref(frame_ref);
+  frame->flags |= FRAME_FLAG_REFERENCED;
+}
+
 /* Allocate a new frame. */
 static frame_t *alloc_fresh_frame(void);
 
@@ -195,6 +208,8 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
   if (frame == NULL && pagefile_is_ready()) {
     /* Attempt synchronous eviction to free a frame */
     if (evict_one_frame() == 0) {
+      /* Wait briefly for a page-out completion to make a frame available. */
+      (void)pageout_wait_for_completion(32);
       frame = pop_front(&frame_table.free);
     }
   }
@@ -399,6 +414,45 @@ static void clock_validate(void) {
 
 static void clock_advance_hand(frame_ref_t next) {
   frame_table.clock.hand = next;
+}
+
+/* Process a single page-out completion if available. Returns 0 on success,
+ * -SOS_EAGAIN if none available, or -errno on failure. */
+static int pageout_process_one_completion(void) {
+  size_t frame_ref = 0;
+  uint32_t slot = 0;
+  int rc = pageout_poll_complete(&frame_ref, &slot);
+  if (rc == -SOS_EAGAIN) {
+    return rc;
+  }
+  if (rc != 0) {
+    /* Even on failure, release the slot to avoid leaks. */
+    pagefile_free_slot(slot);
+    return rc;
+  }
+
+  rc = vm_pageout_finalise(frame_ref, slot);
+  if (rc != 0) {
+    pagefile_free_slot(slot);
+    return rc;
+  }
+
+  return 0;
+}
+
+/* Poll for page-out completion up to max_iters times. */
+static int pageout_wait_for_completion(size_t max_iters) {
+  for (size_t i = 0; i < max_iters; i++) {
+    int rc = pageout_process_one_completion();
+    if (rc == 0) {
+      return 0;
+    }
+    if (rc != -SOS_EAGAIN) {
+      return rc;
+    }
+    seL4_Yield();
+  }
+  return -SOS_EAGAIN;
 }
 
 static void clock_add(frame_t *frame) {

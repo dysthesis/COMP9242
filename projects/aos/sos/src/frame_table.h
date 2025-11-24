@@ -138,6 +138,11 @@ void free_frame(frame_ref_t frame_ref);
 unsigned char *frame_data(frame_ref_t frame_ref);
 
 /*
+ * Mark a frame as referenced.
+ */
+void frame_mark_referenced(frame_ref_t frame_ref);
+
+/*
  * Get the capability to the page used to map the frame into SOS.
  *
  * This can be copied to create mappings into additional virtual address

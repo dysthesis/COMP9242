@@ -180,12 +180,12 @@ pub export fn vm_pageout_finalise(frame_ref: usize, slot: u32) callconv(.c) c_in
             page_entry.cap_slot = sel4.seL4_CapNull;
             page_entry.cap_owner = null;
             page_entry.owns_cap = false;
-            page_entry.frame_ref = 0;
-            page_entry.owns_frame = false;
             page_entry.pagefile_slot = @intCast(slot);
             page_entry.dirty = false;
             page_entry.referenced = false;
             page_entry.transitionState(.SWAPPED);
+            page_entry.frame_ref = 0;
+            page_entry.owns_frame = false;
 
             unmapped = true;
         }
@@ -194,6 +194,8 @@ pub export fn vm_pageout_finalise(frame_ref: usize, slot: u32) callconv(.c) c_in
     if (!unmapped) {
         return -sos.ENOENT;
     }
+
+    sos.free_frame(frame_ref);
 
     return 0;
 }
