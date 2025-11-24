@@ -362,6 +362,13 @@ fn processPagerJob(idx: usize, job_state: *worker.FileOpState) void {
         _ = c.printf("[pager] processPagerJob: install returned errno=%d\n", resume_errno);
     } else {
         _ = c.printf("[pager] processPagerJob: skipping install due to errno=%d\n", resume_errno);
+        // On failure, reset page state so the next fault can retry cleanly.
+        if (meta.page.state == page.PageState.PAGEIN_PENDING) {
+            meta.page.transitionState(page.PageState.SWAPPED);
+            meta.page.pagefile_slot = -1;
+            meta.page.referenced = false;
+            meta.page.dirty = false;
+        }
     }
 
     finalisePagerJob(idx, meta, resume_errno);

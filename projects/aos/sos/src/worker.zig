@@ -752,7 +752,8 @@ pub const Worker = struct {
                     backing.file_offset,
                     page_len,
                 ) catch |err| {
-                    _ = c.printf("[worker] workerPageFill: preadSync failed with error\n");
+                    const errno_val = mapNfsError(err);
+                    _ = c.printf("[worker] workerPageFill: preadSync failed with error errno=%d\n", errno_val);
                     file_op.completeErrno(mapNfsError(err));
                     return;
                 };

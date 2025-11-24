@@ -87,7 +87,7 @@ extern void checkCompletedFileOps(void);
 #define IRQ_IDENT_BADGE_BITS MASK(seL4_BadgeBits - 1ul)
 #define DELEGATE_EP_BADGE (1UL << 30)
 
-#define APP_NAME "vm_test"
+#define APP_NAME "sosh"
 #define APP_PRIORITY (0)
 #define APP_EP_BADGE (101)
 
