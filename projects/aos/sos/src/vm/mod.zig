@@ -206,6 +206,7 @@ pub export fn vm_pageout_finalise(frame_ref: usize, slot: u32) callconv(.c) c_in
     }
 
     sos.free_frame(frame_ref);
+    sos.frame_unbind_slot(frame_ref);
 
     return 0;
 }
@@ -216,6 +217,11 @@ pub export fn vm_pageout_finalise(frame_ref: usize, slot: u32) callconv(.c) c_in
 /// post-copy modifications.
 pub export fn vm_pageout_prepare(frame_ref: usize, slot: u32) callconv(.c) c_int {
     bootstrapVmStates();
+
+    // Enforce unique slot binding across all pages sharing this frame.
+    if (!sos.frame_bind_slot(frame_ref, slot)) {
+        return -sos.EBUSY;
+    }
 
     var unmapped: bool = false;
 
@@ -263,6 +269,7 @@ pub export fn vm_pageout_prepare(frame_ref: usize, slot: u32) callconv(.c) c_int
     }
 
     if (!unmapped) {
+        sos.frame_unbind_slot(frame_ref);
         return -sos.ENOENT;
     }
 

@@ -350,6 +350,26 @@ frame_t *frame_from_ref(frame_ref_t frame_ref) {
   return &frame_table.frames[frame_ref];
 }
 
+bool frame_bind_slot(frame_ref_t frame_ref, uint32_t slot) {
+  if (frame_ref == NULL_FRAME || slot == PAGEFILE_INVALID_SLOT) {
+    return false;
+  }
+  frame_t *frame = frame_from_ref(frame_ref);
+  if (frame->swap_slot != 0 && frame->swap_slot != slot) {
+    return false;
+  }
+  frame->swap_slot = slot;
+  return true;
+}
+
+void frame_unbind_slot(frame_ref_t frame_ref) {
+  if (frame_ref == NULL_FRAME) {
+    return;
+  }
+  frame_t *frame = frame_from_ref(frame_ref);
+  frame->swap_slot = 0;
+}
+
 static frame_ref_t ref_from_frame(frame_t *frame) {
   assert(frame >= frame_table.frames);
   assert(frame < frame_table.frames + frame_table.used);

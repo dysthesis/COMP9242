@@ -795,7 +795,7 @@ pub const Worker = struct {
 
         var bounce: [vm.PAGE_SIZE_4K]u8 = undefined;
         const frame_ptr: [*]const u8 = @ptrCast(sos.frame_data(params.frame_ref));
-        std.mem.copy(u8, bounce[0..], frame_ptr[0..vm.PAGE_SIZE_4K]);
+        std.mem.copyForwards(u8, bounce[0..], frame_ptr[0..vm.PAGE_SIZE_4K]);
 
         const rc = pagefile.pagefile_write_slot(params.slot, &bounce, vm.PAGE_SIZE_4K);
         if (rc != 0) {

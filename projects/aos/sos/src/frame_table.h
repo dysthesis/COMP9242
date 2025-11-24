@@ -76,7 +76,7 @@ struct frame {
   frame_flags_t flags;
   uint16_t pin_count;
   uint16_t reserved16;
-  uint32_t swap_slot;
+  uint32_t swap_slot; /* bound pagefile slot when swapped or pending */
   /* Clock list linkage, NULL_FRAME when not enqueued. */
   frame_ref_t clock_prev;
   frame_ref_t clock_next;
@@ -128,6 +128,8 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags);
  * returning it to the untyped allocator.
  */
 void free_frame(frame_ref_t frame_ref);
+bool frame_bind_slot(frame_ref_t frame_ref, uint32_t slot);
+void frame_unbind_slot(frame_ref_t frame_ref);
 
 /*
  * Get the contents of a frame as mapped into SOS.

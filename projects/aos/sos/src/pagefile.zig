@@ -178,7 +178,7 @@ const PagefileState = struct {
         const new_slot_table = try self.allocator.alloc(SlotState, target);
         errdefer self.allocator.free(new_slot_table);
         // Copy existing slot metadata, initialise rest to free
-        std.mem.copy(SlotState, new_slot_table[0..current], self.slot_table[0..current]);
+        std.mem.copyForwards(SlotState, new_slot_table[0..current], self.slot_table[0..current]);
         for (new_slot_table[current..]) |*slot| {
             slot.* = .free;
         }
@@ -186,7 +186,7 @@ const PagefileState = struct {
         const new_bitmap = try Bitmap.init(self.allocator, target);
         errdefer new_bitmap.deinit(self.allocator);
         const copy_words = @min(self.bitmap.words.len, new_bitmap.words.len);
-        std.mem.copy(u64, new_bitmap.words[0..copy_words], self.bitmap.words[0..copy_words]);
+        std.mem.copyForwards(u64, new_bitmap.words[0..copy_words], self.bitmap.words[0..copy_words]);
 
         // Swap in new structures
         self.allocator.free(self.slot_table);
@@ -217,15 +217,15 @@ const PagefileState = struct {
 
         // Linear search from hint with wraparound
         const tryFind = struct {
-            fn find(self: *PagefileState) ?u32 {
-                const n: u32 = self.numSlots();
-                var slot = self.next_search_hint;
+            fn find(pf: *PagefileState) ?u32 {
+                const n: u32 = pf.numSlots();
+                var slot = pf.next_search_hint;
                 var visited: u32 = 0;
                 while (visited < n) : (visited += 1) {
                     if (slot == 0) {
                         slot = 1;
                     }
-                    if (!self.bitmap.isSet(slot)) {
+                    if (!pf.bitmap.isSet(slot)) {
                         return slot;
                     }
                     slot = (slot + 1) % n;
@@ -240,15 +240,14 @@ const PagefileState = struct {
         }
 
         // Attempt to grow and retry once.
-        if (self.grow() catch {
+        const grew = self.grow() catch {
             _ = c.printf("[pagefile] ERROR: grow OOM at %u slots\n", @as(c_uint, self.numSlots()));
             return null;
-        }) |grew| {
-            if (grew) {
-                if (tryFind(self)) |slot2| {
-                    self.transitionToAllocated(slot2, frame, pid, vaddr);
-                    return slot2;
-                }
+        };
+        if (grew) {
+            if (tryFind(self)) |slot2| {
+                self.transitionToAllocated(slot2, frame, pid, vaddr);
+                return slot2;
             }
         }
 
