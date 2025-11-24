@@ -88,14 +88,14 @@ static int load_segment_into_vspace(cspace_t *cspace, seL4_CPtr loadee, const ch
         /* create slot for the frame to load the data into */
         seL4_CPtr loadee_frame = cspace_alloc_slot(cspace);
         if (loadee_frame == seL4_CapNull) {
-            ZF_LOGD("Failed to alloc slot");
+            ZF_LOGE("elf load: Failed to alloc slot at vaddr=%p", (void *)loadee_vaddr);
             return -1;
         }
 
         /* allocate the untyped for the loadees address space */
         frame_ref_t frame = alloc_frame(FRAME_OWNER_USER, FRAME_FLAG_EVICTABLE);
         if (frame == NULL_FRAME) {
-            ZF_LOGD("Failed to alloc frame");
+            ZF_LOGE("elf load: Failed to alloc frame at vaddr=%p", (void *)loadee_vaddr);
             return -1;
         }
 

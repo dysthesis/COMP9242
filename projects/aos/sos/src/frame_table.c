@@ -247,12 +247,13 @@ void free_frame(frame_ref_t frame_ref) {
     frame_t *frame = frame_from_ref(frame_ref);
 
     clock_remove(frame);
-    if (frame->list_id != ALLOCATED_LIST) {
-      ZF_LOGE("free_frame: frame %zu not on allocated list (list_id=%d)", frame_ref,
-              frame->list_id);
-      assert(frame->list_id == ALLOCATED_LIST);
+    if (frame->list_id == ALLOCATED_LIST) {
+      remove_frame(&frame_table.allocated, frame);
+    } else {
+      ZF_LOGE("free_frame: frame %zu not on allocated list (list_id=%d), skipping double-free",
+              frame_ref, frame->list_id);
+      return;
     }
-    remove_frame(&frame_table.allocated, frame);
     frame->owner = FRAME_OWNER_KERNEL;
     frame->flags = 0;
     frame->pin_count = 0;
