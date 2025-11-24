@@ -15,8 +15,8 @@
 #include "vmem_layout.h"
 
 #include <assert.h>
-#include <sos/gen_config.h>
 #include <sel4/sel4.h>
+#include <sos/gen_config.h>
 #include <stdbool.h>
 #include <string.h>
 #include <utils/util.h>
@@ -148,38 +148,6 @@ int pageout_frame(frame_ref_t victim) {
     return rc;
   }
 
-  size_t completed_frame = 0;
-  uint32_t completed_slot = 0;
-  int polls = 0;
-  while (true) {
-    rc = pageout_poll_complete(&completed_frame, &completed_slot);
-    if (rc != -SOS_EAGAIN) {
-      break;
-    }
-    if (polls++ > 1000) {
-      /* Give caller a chance to progress other work. */
-      rc = -SOS_EAGAIN;
-      break;
-    }
-    seL4_Yield();
-  }
-
-  if (rc != 0) {
-    pagefile_free_slot(slot);
-    return rc;
-  }
-
-  assert(completed_frame == victim);
-  assert(completed_slot == slot);
-
-  rc = vm_pageout_finalise(victim, slot);
-  if (rc != 0) {
-    pagefile_free_slot(slot);
-    return rc;
-  }
-
-  frame->swap_slot = slot;
-  free_frame(victim);
   return 0;
 }
 

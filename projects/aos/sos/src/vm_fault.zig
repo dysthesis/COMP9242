@@ -375,6 +375,8 @@ fn installPagerResult(meta: PagerJobMeta, job_state: *worker.FileOpState) c_int 
 
     if (meta.page.state == page.PageState.SWAPPED) {
         meta.page.transitionState(page.PageState.PAGEIN_PENDING);
+    } else if (meta.page.state != page.PageState.PAGEIN_PENDING) {
+        return sos.EINVAL;
     }
 
     state.mapAnonymousPage(vm_handle, page_base, tracker) catch |err| {
@@ -394,6 +396,7 @@ fn installPagerResult(meta: PagerJobMeta, job_state: *worker.FileOpState) c_int 
     }
     meta.page.dirty = false;
     meta.page.referenced = false;
+    meta.page.transitionState(page.PageState.RESIDENT);
 
     return 0;
 }
