@@ -144,6 +144,7 @@ int pageout_frame(frame_ref_t victim) {
   /* Allocate pagefile slot */
   uint32_t slot = pagefile_alloc_slot(victim, 0, 0);
   if (slot == PAGEFILE_INVALID_SLOT) {
+    ZF_LOGE("pageout_frame: failed to alloc slot for victim=%zu", victim);
     return -1;
   }
 
@@ -214,6 +215,11 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
 
   if (frame == NULL) {
     frame = alloc_fresh_frame();
+    if (frame == NULL) {
+      ZF_LOGE("alloc_frame: alloc_fresh_frame failed (used=%lu cap=%lu free_len=%lu clock=%lu)",
+              frame_table.used, frame_table.capacity, frame_table.free.length,
+              frame_table.clock.length);
+    }
   }
 
   if (frame == NULL && pagefile_is_ready()) {
@@ -222,6 +228,8 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
       /* Wait briefly for a page-out completion to make a frame available. */
       (void)pageout_wait_for_completion(32);
       frame = pop_front(&frame_table.free);
+    } else {
+      ZF_LOGE("alloc_frame: eviction attempt failed (clock_len=%lu)", frame_table.clock.length);
     }
   }
 
@@ -604,6 +612,8 @@ static frame_t *alloc_fresh_frame(void) {
 
   if (frame_table.used == frame_table.capacity) {
     if (bump_capacity() != 0) {
+      ZF_LOGE("alloc_fresh_frame: bump_capacity failed (used=%lu cap=%lu)",
+              frame_table.used, frame_table.capacity);
       /* Could not increase capacity. */
       return NULL;
     }
@@ -622,6 +632,7 @@ static frame_t *alloc_fresh_frame(void) {
   uintptr_t vaddr = (uintptr_t)frame_data(ref_from_frame(frame));
   seL4_ARM_Page sos_page = alloc_frame_at(vaddr);
   if (sos_page == seL4_CapNull) {
+    ZF_LOGE("alloc_fresh_frame: alloc_frame_at failed vaddr=0x%lx", (unsigned long)vaddr);
     frame_table.used -= 1;
     return NULL;
   }
