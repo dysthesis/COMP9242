@@ -110,6 +110,7 @@ static void clock_advance_hand(frame_ref_t next);
 
 /* Page-out worker bridge (implemented in Zig). */
 extern int pageout_submit(uint32_t slot, size_t frame_ref);
+extern int pageout_poll_complete(void);
 extern int vm_pageout_finalise(size_t frame_ref, uint32_t slot);
 
 /*
@@ -140,6 +141,15 @@ int pageout_frame(frame_ref_t victim) {
   }
 
   int rc = pageout_submit(slot, victim);
+  if (rc != 0) {
+    pagefile_free_slot(slot);
+    return rc;
+  }
+
+  do {
+    rc = pageout_poll_complete();
+  } while (rc == -11 /* EAGAIN */);
+
   if (rc != 0) {
     pagefile_free_slot(slot);
     return rc;

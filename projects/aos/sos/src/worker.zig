@@ -815,6 +815,7 @@ var enqueue_rr = std.atomic.Value(usize).init(0);
 const PAGEOUT_JOB_CAP: usize = 8;
 var pageout_job_states: [PAGEOUT_JOB_CAP]FileOpState = undefined;
 var pageout_job_used: [PAGEOUT_JOB_CAP]bool = [_]bool{false} ** PAGEOUT_JOB_CAP;
+var pageout_job_done: [PAGEOUT_JOB_CAP]bool = [_]bool{false} ** PAGEOUT_JOB_CAP;
 
 /// Thread spawner defined in threads.c
 extern fn spawn_worker_thread(
@@ -901,6 +902,7 @@ fn acquirePageOutJobSlot() ?PageOutJobSlot {
         if (!used.*) {
             used.* = true;
             pageout_job_states[idx].reset();
+            pageout_job_done[idx] = false;
             return PageOutJobSlot{ .index = idx, .state = &pageout_job_states[idx] };
         }
     }
@@ -910,6 +912,7 @@ fn acquirePageOutJobSlot() ?PageOutJobSlot {
 fn releasePageOutJobSlot(idx: usize) void {
     if (idx >= pageout_job_used.len) return;
     pageout_job_used[idx] = false;
+    pageout_job_done[idx] = false;
 }
 
 /// Enqueue page-out job and busy-wait for completion.
@@ -930,17 +933,28 @@ pub export fn pageout_submit(slot: u32, frame_ref: usize) callconv(.c) c_int {
         return rc;
     }
 
-    while (!job.isCompleted()) {}
+    // mark pending; completion will be polled by pageout_poll_complete
+    return 0;
+}
 
-    var errno_val: c_int = sos.EIO;
-    switch (job.result) {
-        .Status => |value| errno_val = value,
-        .Errno => |e| errno_val = e,
-        else => errno_val = sos.EIO,
+/// Poll for completed page-out jobs and return first finished result.
+/// Returns 0 on success, -errno on failure, and -EAGAIN if none complete.
+pub export fn pageout_poll_complete() callconv(.c) c_int {
+    for (&pageout_job_used, 0..) |used, idx| {
+        if (!used) continue;
+        const job = &pageout_job_states[idx];
+        if (!job.isCompleted()) continue;
+
+        var errno_val: c_int = sos.EIO;
+        switch (job.result) {
+            .Status => |value| errno_val = value,
+            .Errno => |e| errno_val = e,
+            else => errno_val = sos.EIO,
+        }
+
+        job.reset();
+        releasePageOutJobSlot(idx);
+        return errno_val;
     }
-
-    job.reset();
-    releasePageOutJobSlot(idx);
-
-    return errno_val;
+    return -@as(c_int, @intCast(sos.EAGAIN));
 }
