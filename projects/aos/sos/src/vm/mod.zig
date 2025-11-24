@@ -160,6 +160,11 @@ pub export fn vm_pageout_finalise(frame_ref: usize, slot: u32) callconv(.c) c_in
                 continue;
             }
 
+            if (page_entry.pagefile_slot >= 0) {
+                // Already has a backing slot; do not allow double assignment.
+                return -sos.EBUSY;
+            }
+
             page_entry.transitionState(.PAGEOUT_PENDING);
 
             if (page_entry.cap_slot != sel4.seL4_CapNull) {

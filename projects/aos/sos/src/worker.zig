@@ -793,8 +793,11 @@ pub const Worker = struct {
         const params = file_op.params.PageOut;
         _ = c.printf("[worker] workerPageOut: slot=%u frame_ref=%lu\n", @as(c_uint, params.slot), @as(c_ulong, @intCast(params.frame_ref)));
 
+        var bounce: [vm.PAGE_SIZE_4K]u8 = undefined;
         const frame_ptr: [*]const u8 = @ptrCast(sos.frame_data(params.frame_ref));
-        const rc = pagefile.pagefile_write_slot(params.slot, frame_ptr, vm.PAGE_SIZE_4K);
+        std.mem.copy(u8, bounce[0..], frame_ptr[0..vm.PAGE_SIZE_4K]);
+
+        const rc = pagefile.pagefile_write_slot(params.slot, &bounce, vm.PAGE_SIZE_4K);
         if (rc != 0) {
             _ = c.printf("[worker] workerPageOut: pagefile_write_slot failed rc=%d\n", rc);
             file_op.completeErrno(-rc);
@@ -819,6 +822,42 @@ var pageout_job_used: [PAGEOUT_JOB_CAP]bool = [_]bool{false} ** PAGEOUT_JOB_CAP;
 var pageout_job_done: [PAGEOUT_JOB_CAP]bool = [_]bool{false} ** PAGEOUT_JOB_CAP;
 const PageOutMeta = struct { slot: u32, frame_ref: usize };
 var pageout_job_meta: [PAGEOUT_JOB_CAP]PageOutMeta = [_]PageOutMeta{.{ .slot = 0, .frame_ref = 0 }} ** PAGEOUT_JOB_CAP;
+const MAX_SLOTS: usize = 8192;
+const SLOT_BUSY_WORDS: usize = (MAX_SLOTS + 63) / 64;
+var pageout_slot_busy: [SLOT_BUSY_WORDS]u64 = [_]u64{0} ** SLOT_BUSY_WORDS;
+const SlotLock = struct {
+    state: u8 = 0,
+    fn lock(self: *SlotLock) void {
+        while (@cmpxchgStrong(u8, &self.state, 0, 1, .acq_rel, .acquire) != null) {}
+    }
+    fn unlock(self: *SlotLock) void {
+        @atomicStore(u8, &self.state, 0, .release);
+    }
+};
+var pageout_slot_lock: SlotLock = .{};
+
+fn tryReserveSlot(slot: u32) bool {
+    if (slot == 0 or slot >= MAX_SLOTS) return false;
+    const word: usize = slot / 64;
+    const bit: u6 = @intCast(slot % 64);
+    pageout_slot_lock.lock();
+    defer pageout_slot_lock.unlock();
+    const mask: u64 = (@as(u64, 1) << bit);
+    if ((pageout_slot_busy[word] & mask) != 0) {
+        return false;
+    }
+    pageout_slot_busy[word] |= mask;
+    return true;
+}
+
+fn releaseSlot(slot: u32) void {
+    if (slot == 0 or slot >= MAX_SLOTS) return;
+    const word: usize = slot / 64;
+    const bit: u6 = @intCast(slot % 64);
+    pageout_slot_lock.lock();
+    defer pageout_slot_lock.unlock();
+    pageout_slot_busy[word] &= ~(@as(u64, 1) << bit);
+}
 
 /// Thread spawner defined in threads.c
 extern fn spawn_worker_thread(
@@ -924,6 +963,9 @@ fn releasePageOutJobSlot(idx: usize) void {
 /// Enqueue page-out job and busy-wait for completion.
 /// Returns 0 on success, -errno on failure.
 pub export fn pageout_submit(slot: u32, frame_ref: usize) callconv(.c) c_int {
+    if (!tryReserveSlot(slot)) {
+        return -@as(c_int, @intCast(sos.EAGAIN));
+    }
     const job_slot = acquirePageOutJobSlot() orelse return -@as(c_int, @intCast(sos.EAGAIN));
     const idx = job_slot.index;
     var job = job_slot.state;
@@ -937,6 +979,7 @@ pub export fn pageout_submit(slot: u32, frame_ref: usize) callconv(.c) c_int {
     const rc = workerEnqueue(job);
     if (rc < 0) {
         releasePageOutJobSlot(idx);
+        releaseSlot(slot);
         return rc;
     }
 
@@ -966,6 +1009,7 @@ pub export fn pageout_poll_complete(out_frame: *usize, out_slot: *u32) callconv(
 
         job.reset();
         releasePageOutJobSlot(idx);
+        releaseSlot(meta.slot);
         return errno_val;
     }
     return -@as(c_int, @intCast(sos.EAGAIN));
