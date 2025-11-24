@@ -152,6 +152,9 @@ seL4_ARM_Page frame_page(frame_ref_t frame_ref);
  */
 frame_t *frame_from_ref(frame_ref_t frame_ref);
 
+/* Mark a frame dirty. */
+void frame_mark_dirty(frame_ref_t frame_ref);
+
 /*
  * Select an evictable victim frame using the clock algorithm.
  *
@@ -167,3 +170,6 @@ int pageout_frame(frame_ref_t victim);
 
 /* Convenience helper: select a victim via clock list and page it out. */
 int evict_one_frame(void);
+
+/* Mark a frame as DIRTY. */
+void frame_mark_dirty(frame_ref_t frame_ref);

@@ -368,7 +368,6 @@ pub const VmHandle = struct {
         _ = c.printf(
             "[vm_fault] entered handleFault...\n",
         );
-        _ = want_write;
         _ = is_fetch;
         const state = self.ensureVmState();
         const base_addr = Address.init(fault_addr).pageBase(PAGE_SIZE_4K);
@@ -377,6 +376,32 @@ pub const VmHandle = struct {
         // Check if page record exists and is actually mapped in hardware
         if (state.findPage(base)) |page_entry| {
             if (page_entry.state == .RESIDENT) {
+                // Write fault upgrade path for dirty tracking
+                if (want_write and page_entry.temp_ro and page_entry.cap_slot != sel4.seL4_CapNull) {
+                    const rights = region.rightsFromBooleans(true, true);
+                    var attrs = sel4.seL4_ARM_Default_VMAttributes;
+                    if (page_entry.region) |reg| {
+                        if ((reg.prot() & sos.PROT_EXEC) == 0) {
+                            attrs |= sel4.seL4_ARM_ExecuteNever;
+                        }
+                    } else {
+                        attrs |= sel4.seL4_ARM_ExecuteNever;
+                    }
+
+                    const unmap_err = sel4.seL4_ARM_Page_Unmap(page_entry.cap_slot);
+                    if (unmap_err != sel4.seL4_NoError) {
+                        return VmError.MapFailed;
+                    }
+
+                    try mapping.map_owned_frame(&state.addr_space, page_entry.cap_slot, base, rights, attrs);
+
+                    page_entry.temp_ro = false;
+                    page_entry.dirty = true;
+                    page_entry.referenced = true;
+                    sos.frame_mark_dirty(page_entry.frame_ref);
+                    return;
+                }
+
                 // Page is already mapped, fault should not have occurred.
                 // This can happen if TLB is stale, so we just return success.
                 return;
@@ -521,6 +546,7 @@ const sel4 = cimports.sel4;
 pub const client = @import("client.zig");
 const clients = @import("../client.zig");
 const region = @import("region.zig");
+const mapping = @import("mapping.zig");
 const super = @import("mod.zig");
 const Address = super.Address;
 const vm_get_user_page_data = super.vm_get_user_page_data;

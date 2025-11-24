@@ -60,6 +60,7 @@ pub const Client = struct {
             entry.dirty = false;
             entry.referenced = false;
             entry.pagefile_slot = -1;
+            entry.temp_ro = false;
             // Do not reset waiters, as threads may be waiting for this page
             // entry.waiters.reset();
             return entry;
@@ -75,6 +76,7 @@ pub const Client = struct {
             .dirty = false,
             .referenced = false,
             .pagefile_slot = -1,
+            .temp_ro = false,
         }) catch {
             return super.VmError.Capacity;
         };
@@ -190,7 +192,8 @@ pub const Client = struct {
         }
         _ = c.printf("[vm_map] copied frame cap slot=%lu frame_ref=%lu\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
 
-        const rights = region.rightsFromBooleans(readable, writable);
+        const temp_ro = writable;
+        const rights = region.rightsFromBooleans(readable, !temp_ro);
         var attrs = sel4.seL4_ARM_Default_VMAttributes;
         if (!executable) {
             attrs = attrs | sel4.seL4_ARM_ExecuteNever;
@@ -220,6 +223,7 @@ pub const Client = struct {
         inserted.dirty = false;
         inserted.referenced = false;
         inserted.pagefile_slot = -1;
+        inserted.temp_ro = temp_ro;
         inserted.waiters.reset();
         self.mapped_count = self.addr_space.num_mapped();
         // self.addr_space.recordLeafMap(vaddr);

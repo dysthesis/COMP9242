@@ -124,6 +124,9 @@ pub const MappedPage = struct {
     /// Reference tracking
     referenced: bool = false,
 
+    /// True if initially mapped read-only for dirty-tracking upgrade.
+    temp_ro: bool = false,
+
     // Pagefile
     pagefile_slot: i32 = -1,
 

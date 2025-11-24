@@ -165,6 +165,14 @@ int evict_one_frame(void) {
   return pageout_frame(victim);
 }
 
+void frame_mark_dirty(frame_ref_t frame_ref) {
+  if (frame_ref == NULL_FRAME) {
+    return;
+  }
+  frame_t *frame = frame_from_ref(frame_ref);
+  frame->flags |= FRAME_FLAG_DIRTY;
+}
+
 /* Allocate a new frame. */
 static frame_t *alloc_fresh_frame(void);
 
