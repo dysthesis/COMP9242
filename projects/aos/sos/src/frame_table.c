@@ -147,13 +147,24 @@ int pageout_frame(frame_ref_t victim) {
     return -1;
   }
 
-  int rc = pageout_submit(slot, victim);
-  if (rc != 0) {
+  /* Submit with bounded retries to handle transient EAGAIN (no worker slots). */
+  for (int attempt = 0; attempt < 4; attempt++) {
+    int rc = pageout_submit(slot, victim);
+    if (rc == 0) {
+      return 0;
+    }
+    if (rc == -SOS_EAGAIN) {
+      /* Wait for some completions to free up worker capacity. */
+      (void)pageout_wait_for_completion(16);
+      continue;
+    }
     pagefile_free_slot(slot);
     return rc;
   }
 
-  return 0;
+  pagefile_free_slot(slot);
+  return -SOS_EAGAIN;
+
 }
 
 int evict_one_frame(void) {
