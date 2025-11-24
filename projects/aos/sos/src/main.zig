@@ -944,6 +944,31 @@ pub export fn checkCompletedFileOps() callconv(.c) void {
         }
     }
     vm_fault.pagerPollCompletions();
+    // Drain page-out completions to avoid synchronous waits
+    drainPageOutCompletions();
+}
+
+fn drainPageOutCompletions() void {
+    var loops: usize = 0;
+    while (loops < 8) : (loops += 1) {
+        var frame_ref: usize = 0;
+        var slot: u32 = 0;
+        const rc = worker.pageout_poll_complete(&frame_ref, &slot);
+        if (rc == -sos.EAGAIN) break;
+
+        if (rc != 0) {
+            _ = c.printf("[pageout] completion error rc=%d frame=%lu slot=%u\n", rc, @as(c_ulong, @intCast(frame_ref)), @as(c_uint, slot));
+            // On failure we still free the slot to avoid leaks
+            pagefile.pagefile_free_slot(slot);
+            continue;
+        }
+
+        const rc2 = vm.vm_pageout_finalise(frame_ref, slot);
+        if (rc2 != 0) {
+            _ = c.printf("[pageout] finalise error rc=%d frame=%lu slot=%u\n", rc2, @as(c_ulong, @intCast(frame_ref)), @as(c_uint, slot));
+            pagefile.pagefile_free_slot(slot);
+        }
+    }
 }
 
 fn handleGetDirent(ctx: *ServerContext, args: anytype) ?SyscallResponse {
