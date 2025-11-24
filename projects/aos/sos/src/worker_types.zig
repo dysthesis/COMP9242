@@ -95,6 +95,11 @@ pub const PageFillSource = union(enum) {
         length: usize = vm.PAGE_SIZE_4K,
         handle_ref: ?*anyopaque = null,
     },
+
+    /// Pagefile-backed swap slot requiring read from pagefile
+    Pagefile: struct {
+        slot: u32,
+    },
 };
 
 pub const PageFillParams = struct {

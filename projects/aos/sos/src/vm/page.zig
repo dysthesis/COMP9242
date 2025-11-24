@@ -159,6 +159,7 @@ pub const MappedPage = struct {
         self.dirty = false;
         self.referenced = false;
         self.pagefile_slot = -1;
+        self.temp_ro = false;
         self.waiters.reset();
     }
 

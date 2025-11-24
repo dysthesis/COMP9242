@@ -376,6 +376,13 @@ pub const VmHandle = struct {
         // Check if page record exists and is actually mapped in hardware
         if (state.findPage(base)) |page_entry| {
             if (page_entry.state == .RESIDENT) {
+                // Update reference/dirty tracking on any resident access
+                page_entry.referenced = true;
+                if (want_write) {
+                    page_entry.dirty = true;
+                    sos.frame_mark_dirty(page_entry.frame_ref);
+                }
+
                 // Write fault upgrade path for dirty tracking
                 if (want_write and page_entry.temp_ro and page_entry.cap_slot != sel4.seL4_CapNull) {
                     const rights = region.rightsFromBooleans(true, true);
@@ -443,6 +450,7 @@ pub const VmHandle = struct {
             }
         }
 
+        // Swapped page? handled via pager dedup path below
         return VmError.Unsupported;
     }
 

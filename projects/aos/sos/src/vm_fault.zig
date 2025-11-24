@@ -10,6 +10,8 @@ const region = @import("vm/region.zig");
 const page = @import("vm/page.zig");
 const worker = @import("worker.zig");
 
+extern fn pagefile_free_slot(slot: u32) void;
+
 const VmFaultResult = vm.VmFaultResult;
 
 const PagerInstrumentation = struct {
@@ -204,7 +206,11 @@ fn submitPageFillJob(
     var job = slot.state;
     job.reset();
     var source: worker.PageFillSource = .Anonymous;
-    switch (tracker.backing) {
+    if (mapped_page.state == page.PageState.SWAPPED and mapped_page.pagefile_slot >= 0) {
+        _ = c.printf("[pager] submitPageFillJob: swap-in slot=%d\n", mapped_page.pagefile_slot);
+        mapped_page.transitionState(.PAGEIN_PENDING);
+        source = .{ .Pagefile = .{ .slot = @intCast(mapped_page.pagefile_slot) } };
+    } else switch (tracker.backing) {
         .Anonymous => {},
         .File => |info| {
             if (info.handle_ref) |handle_ptr| {
@@ -367,6 +373,10 @@ fn installPagerResult(meta: PagerJobMeta, job_state: *worker.FileOpState) c_int 
     const tracker = meta.tracker;
     const state = vm_handle.ensureVmState();
 
+    if (meta.page.state == page.PageState.SWAPPED) {
+        meta.page.transitionState(page.PageState.PAGEIN_PENDING);
+    }
+
     state.mapAnonymousPage(vm_handle, page_base, tracker) catch |err| {
         return vm.vmErrorToErrno(err);
     };
@@ -377,6 +387,13 @@ fn installPagerResult(meta: PagerJobMeta, job_state: *worker.FileOpState) c_int 
             return vm.vmErrorToErrno(err);
         };
     }
+
+    if (meta.page.pagefile_slot >= 0) {
+        pagefile_free_slot(@intCast(meta.page.pagefile_slot));
+        meta.page.pagefile_slot = -1;
+    }
+    meta.page.dirty = false;
+    meta.page.referenced = false;
 
     return 0;
 }

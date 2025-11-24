@@ -764,6 +764,16 @@ pub const Worker = struct {
                 }
                 file_op.payload_len = page_len;
             },
+            .Pagefile => |pf| {
+                const buf_ptr: [*]u8 = @as([*]u8, @ptrCast(&file_op.payload[0]));
+                const rc = pagefile.pagefile_read_slot(pf.slot, buf_ptr, page_len);
+                if (rc != 0) {
+                    _ = c.printf("[worker] workerPageFill: pagefile_read_slot failed rc=%d\n", rc);
+                    file_op.completeErrno(-rc);
+                    return;
+                }
+                file_op.payload_len = page_len;
+            },
         }
 
         _ = c.printf("[worker] workerPageFill: completing successfully payload_len=%zu\n", file_op.payload_len);
