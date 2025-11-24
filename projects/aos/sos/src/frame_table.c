@@ -11,6 +11,7 @@
  */
 #include "frame_table.h"
 #include "mapping.h"
+#include "pagefile.h"
 #include "vmem_layout.h"
 
 #include <assert.h>
@@ -107,6 +108,10 @@ static void clock_reconsider(frame_t *frame);
 static void clock_validate(void);
 static void clock_advance_hand(frame_ref_t next);
 
+/* Page-out worker bridge (implemented in Zig). */
+extern int pageout_submit(uint32_t slot, size_t frame_ref);
+extern int vm_pageout_finalise(size_t frame_ref, uint32_t slot);
+
 /*
  * Allocate a frame at a particular address in SOS.
  *
@@ -114,6 +119,51 @@ static void clock_advance_hand(frame_ref_t next);
  * @return            Page used to map frame into SOS.
  */
 static seL4_ARM_Page alloc_frame_at(uintptr_t vaddr);
+
+/*
+ * Initiate page-out of a victim frame.
+ * NOTE: This implementation does not yet unmap the frame or update VM metadata;
+ * it only writes the current contents to the pagefile and records the slot.
+ * The caller must ensure state transitions and unmapping are handled elsewhere.
+ */
+int pageout_frame(frame_ref_t victim) {
+  if (victim == NULL_FRAME) {
+    return -1;
+  }
+
+  frame_t *frame = frame_from_ref(victim);
+
+  /* Allocate pagefile slot */
+  uint32_t slot = pagefile_alloc_slot(victim, 0, 0);
+  if (slot == PAGEFILE_INVALID_SLOT) {
+    return -1;
+  }
+
+  int rc = pageout_submit(slot, victim);
+  if (rc != 0) {
+    pagefile_free_slot(slot);
+    return rc;
+  }
+
+  rc = vm_pageout_finalise(victim, slot);
+  if (rc != 0) {
+    pagefile_free_slot(slot);
+    return rc;
+  }
+
+  frame->swap_slot = slot;
+  free_frame(victim);
+  return 0;
+}
+
+int evict_one_frame(void) {
+  frame_ref_t victim = clock_select_victim();
+  if (victim == NULL_FRAME) {
+    return -1;
+  }
+
+  return pageout_frame(victim);
+}
 
 /* Allocate a new frame. */
 static frame_t *alloc_fresh_frame(void);

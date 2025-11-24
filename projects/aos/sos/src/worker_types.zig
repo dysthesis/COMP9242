@@ -14,6 +14,7 @@ pub const WorkType = enum(u8) {
     ReadDir,
     GetDirent,
     PageFill,
+    PageOut,
     Lseek,
     Unlink,
 };
@@ -106,6 +107,11 @@ pub const PageFillParams = struct {
     source: PageFillSource,
 };
 
+pub const PageOutParams = struct {
+    slot: u32,
+    frame_ref: usize,
+};
+
 pub const WorkParams = union(WorkType) {
     Open: OpenParams,
     Close: CloseParams,
@@ -116,6 +122,7 @@ pub const WorkParams = union(WorkType) {
     ReadDir: ReadDirParams,
     GetDirent: GetDirentParams,
     PageFill: PageFillParams,
+    PageOut: PageOutParams,
     Lseek: LseekParams,
     Unlink: UnlinkParams,
 };

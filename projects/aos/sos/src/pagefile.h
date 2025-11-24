@@ -22,3 +22,7 @@ bool pagefile_is_valid_slot(uint32_t slot);
 void pagefile_get_stats(pagefile_stats_t *out);
 bool pagefile_is_ready(void);
 bool pagefile_init_failed(void);
+
+/* Synchronous pagefile I/O helpers */
+int pagefile_write_slot(uint32_t slot, const void *buf, size_t len);
+int pagefile_read_slot(uint32_t slot, void *buf, size_t len);

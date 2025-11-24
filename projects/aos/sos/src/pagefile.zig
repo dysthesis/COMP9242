@@ -586,3 +586,65 @@ pub export fn pagefile_is_ready() callconv(.c) bool {
 pub export fn pagefile_init_failed() callconv(.c) bool {
     return init_failed;
 }
+
+/// Write one page to a pagefile slot asynchronously.
+/// Returns 0 on success, -errno on failure.
+pub export fn pagefile_write_slot(slot: u32, buf: [*]const u8, len: usize) callconv(.c) c_int {
+    const state = getStateConst() orelse return -sos.ENODEV;
+
+    if (len != PAGE_SIZE) {
+        return -sos.EINVAL;
+    }
+
+    if (!state.isValidSlot(slot)) {
+        return -sos.EINVAL;
+    }
+
+    const offset: usize = @as(usize, slot) * PAGE_SIZE;
+
+    // Position the file descriptor and write page contents.
+    _ = state.file_handle.lseek(@intCast(offset), c.SEEK_SET) catch {
+        return -sos.EIO;
+    };
+
+    const bytes_written = state.file_handle.write(buf[0..PAGE_SIZE]) catch {
+        return -sos.EIO;
+    };
+
+    if (bytes_written != PAGE_SIZE) {
+        return -sos.EIO;
+    }
+
+    return 0;
+}
+
+/// Read one page from a pagefile slot asynchronously.
+/// Returns 0 on success, -errno on failure.
+pub export fn pagefile_read_slot(slot: u32, buf: [*]u8, len: usize) callconv(.c) c_int {
+    const state = getStateConst() orelse return -sos.ENODEV;
+
+    if (len != PAGE_SIZE) {
+        return -sos.EINVAL;
+    }
+
+    if (!state.isValidSlot(slot)) {
+        return -sos.EINVAL;
+    }
+
+    const offset: usize = @as(usize, slot) * PAGE_SIZE;
+
+    _ = state.file_handle.lseek(@intCast(offset), c.SEEK_SET) catch {
+        return -sos.EIO;
+    };
+
+    const bytes_read = state.file_handle.read(buf[0..PAGE_SIZE]) catch {
+        return -sos.EIO;
+    };
+
+    if (bytes_read != PAGE_SIZE) {
+        // Short read should still be considered fatal for swap contents.
+        return -sos.EIO;
+    }
+
+    return 0;
+}

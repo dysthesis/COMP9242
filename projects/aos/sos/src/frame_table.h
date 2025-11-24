@@ -158,3 +158,12 @@ frame_t *frame_from_ref(frame_ref_t frame_ref);
  * Returns NULL_FRAME if no eligible frame exists.
  */
 frame_ref_t clock_select_victim(void);
+
+/*
+ * Page-out a victim frame to the pagefile synchronously.
+ * Caller is responsible for unmapping and VM state updates.
+ */
+int pageout_frame(frame_ref_t victim);
+
+/* Convenience helper: select a victim via clock list and page it out. */
+int evict_one_frame(void);

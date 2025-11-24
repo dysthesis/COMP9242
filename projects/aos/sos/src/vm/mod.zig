@@ -135,6 +135,69 @@ pub export fn vm_state_release(cl: *sos.client_t) callconv(.c) void {
     vm_states[idx].teardown();
 }
 
+/// Finalise page-out for a given frame by unmapping it from any client address
+/// space and transitioning the page record to SWAPPED with the supplied
+/// pagefile slot. Returns 0 on success, -errno on failure.
+pub export fn vm_pageout_finalise(frame_ref: usize, slot: u32) callconv(.c) c_int {
+    bootstrapVmStates();
+
+    var unmapped: bool = false;
+
+    for (&vm_states) |*state| {
+        if (!state.initialised) continue;
+
+        var it = state.addr_space.iterator();
+        while (it.next()) |entry| {
+            const vaddr = entry.key_ptr.*;
+            var page_entry = entry.value_ptr;
+
+            if (page_entry.frame_ref != frame_ref or page_entry.state != page.PageState.RESIDENT) {
+                continue;
+            }
+
+            page_entry.transitionState(.PAGEOUT_PENDING);
+
+            if (page_entry.cap_slot != sel4.seL4_CapNull) {
+                const unmap_err = sel4.seL4_ARM_Page_Unmap(page_entry.cap_slot);
+                if (unmap_err != sel4.seL4_NoError) {
+                    _ = c.printf("[vm_pageout_finalise] Page_Unmap err=%d vaddr=0x%lx\n", @as(c_int, @intCast(unmap_err)), @as(c_ulong, @intCast(vaddr)));
+                    return -sos.EIO;
+                }
+            }
+
+            if (page_entry.owns_cap and page_entry.cap_owner != null) {
+                const owner = page_entry.cap_owner.?;
+                const del_err = sos.cspace_delete(owner, page_entry.cap_slot);
+                if (del_err != sel4.seL4_NoError) {
+                    _ = c.printf("[vm_pageout_finalise] cspace_delete err=%d vaddr=0x%lx\n", @as(c_int, @intCast(del_err)), @as(c_ulong, @intCast(vaddr)));
+                    return -sos.EIO;
+                }
+                _ = sos.cspace_free_slot(owner, page_entry.cap_slot);
+            }
+
+            state.addr_space.recordLeafUnmap(vaddr);
+
+            page_entry.cap_slot = sel4.seL4_CapNull;
+            page_entry.cap_owner = null;
+            page_entry.owns_cap = false;
+            page_entry.frame_ref = 0;
+            page_entry.owns_frame = false;
+            page_entry.pagefile_slot = @intCast(slot);
+            page_entry.dirty = false;
+            page_entry.referenced = false;
+            page_entry.transitionState(.SWAPPED);
+
+            unmapped = true;
+        }
+    }
+
+    if (!unmapped) {
+        return -sos.ENOENT;
+    }
+
+    return 0;
+}
+
 pub export fn vm_register_stack_mapping(vm_handle: *VmHandle, vaddr: usize, frame_ref: usize, cap_slot: sel4.seL4_CPtr) callconv(.c) void {
     vm_handle.registerStackMapping(vaddr, frame_ref, cap_slot) catch |err| {
         const errno = vmErrorToErrno(err);

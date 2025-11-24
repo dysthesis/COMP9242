@@ -8,6 +8,7 @@ const clients = @import("client.zig");
 const file = @import("file.zig");
 const nfs_handler = @import("nfs_handler.zig");
 const vm = @import("vm/mod.zig");
+const pagefile = @import("pagefile.zig");
 const ROOT_DIR: [:0]const u8 = "/";
 
 const MAX_WORK_QUEUE = 16;
@@ -72,6 +73,10 @@ pub const WorkItem = struct {
             .PageFill => {
                 _ = c.printf("[worker] WorkItem.process: dispatching to workerPageFill\n");
                 worker.workerPageFill(self.file_op);
+            },
+            .PageOut => {
+                _ = c.printf("[worker] WorkItem.process: dispatching to workerPageOut\n");
+                worker.workerPageOut(self.file_op);
             },
             .Lseek => worker.workerLseek(self.file_op),
             .Unlink => worker.workerUnlink(self.file_op),
@@ -764,6 +769,30 @@ pub const Worker = struct {
         _ = c.printf("[worker] workerPageFill: completing successfully payload_len=%zu\n", file_op.payload_len);
         file_op.completeStatus(0);
     }
+
+    fn workerPageOut(self: *Self, file_op: *FileOpState) void {
+        _ = self;
+        const tag = std.meta.activeTag(file_op.params);
+        if (tag != .PageOut) {
+            _ = c.printf("[worker] workerPageOut received mismatched params tag=%u\n", @as(c_uint, @intFromEnum(tag)));
+            file_op.completeErrno(sos.EINVAL);
+            return;
+        }
+
+        const params = file_op.params.PageOut;
+        _ = c.printf("[worker] workerPageOut: slot=%u frame_ref=%lu\n", @as(c_uint, params.slot), @as(c_ulong, @intCast(params.frame_ref)));
+
+        const frame_ptr: [*]const u8 = @ptrCast(sos.frame_data(params.frame_ref));
+        const rc = pagefile.pagefile_write_slot(params.slot, frame_ptr, vm.PAGE_SIZE_4K);
+        if (rc != 0) {
+            _ = c.printf("[worker] workerPageOut: pagefile_write_slot failed rc=%d\n", rc);
+            file_op.completeErrno(-rc);
+            return;
+        }
+
+        _ = c.printf("[worker] workerPageOut: completed successfully\n");
+        file_op.completeStatus(0);
+    }
 };
 
 var workers: [WORKER_COUNT]Worker = undefined;
@@ -772,6 +801,10 @@ var worker_notification_ut: [WORKER_COUNT]?*sos.ut_t = [_]?*sos.ut_t{null} ** WO
 var worker_initialized = false;
 var active_worker_count: usize = 0;
 var enqueue_rr = std.atomic.Value(usize).init(0);
+
+const PAGEOUT_JOB_CAP: usize = 8;
+var pageout_job_states: [PAGEOUT_JOB_CAP]FileOpState = undefined;
+var pageout_job_used: [PAGEOUT_JOB_CAP]bool = [_]bool{false} ** PAGEOUT_JOB_CAP;
 
 /// Thread spawner defined in threads.c
 extern fn spawn_worker_thread(
@@ -846,4 +879,58 @@ pub export fn workerEnqueue(file_op: *FileOpState) callconv(.c) c_int {
     }
 
     return -@as(c_int, @intCast(sos.EAGAIN));
+}
+
+const PageOutJobSlot = struct {
+    index: usize,
+    state: *FileOpState,
+};
+
+fn acquirePageOutJobSlot() ?PageOutJobSlot {
+    for (&pageout_job_used, 0..) |*used, idx| {
+        if (!used.*) {
+            used.* = true;
+            pageout_job_states[idx].reset();
+            return PageOutJobSlot{ .index = idx, .state = &pageout_job_states[idx] };
+        }
+    }
+    return null;
+}
+
+fn releasePageOutJobSlot(idx: usize) void {
+    if (idx >= pageout_job_used.len) return;
+    pageout_job_used[idx] = false;
+}
+
+/// Enqueue page-out job and busy-wait for completion.
+/// Returns 0 on success, -errno on failure.
+pub export fn pageout_submit(slot: u32, frame_ref: usize) callconv(.c) c_int {
+    const job_slot = acquirePageOutJobSlot() orelse return -@as(c_int, @intCast(sos.EAGAIN));
+    const idx = job_slot.index;
+    var job = job_slot.state;
+    job.reset();
+
+    job.params = .{ .PageOut = .{ .slot = slot, .frame_ref = frame_ref } };
+    job.vm_handle = null;
+    job.payload_len = 0;
+
+    const rc = workerEnqueue(job);
+    if (rc < 0) {
+        releasePageOutJobSlot(idx);
+        return rc;
+    }
+
+    while (!job.isCompleted()) {}
+
+    var errno_val: c_int = sos.EIO;
+    switch (job.result) {
+        .Status => |value| errno_val = value,
+        .Errno => |e| errno_val = e,
+        else => errno_val = sos.EIO,
+    }
+
+    job.reset();
+    releasePageOutJobSlot(idx);
+
+    return errno_val;
 }
