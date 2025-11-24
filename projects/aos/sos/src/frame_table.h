@@ -151,3 +151,10 @@ seL4_ARM_Page frame_page(frame_ref_t frame_ref);
  * This should only be used for debugging.
  */
 frame_t *frame_from_ref(frame_ref_t frame_ref);
+
+/*
+ * Select an evictable victim frame using the clock algorithm.
+ *
+ * Returns NULL_FRAME if no eligible frame exists.
+ */
+frame_ref_t clock_select_victim(void);

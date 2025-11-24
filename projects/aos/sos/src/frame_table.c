@@ -105,6 +105,7 @@ static void clock_add(frame_t *frame);
 static void clock_remove(frame_t *frame);
 static void clock_reconsider(frame_t *frame);
 static void clock_validate(void);
+static void clock_advance_hand(frame_ref_t next);
 
 /*
  * Allocate a frame at a particular address in SOS.
@@ -336,6 +337,10 @@ static void clock_validate(void) {
 #endif
 }
 
+static void clock_advance_hand(frame_ref_t next) {
+  frame_table.clock.hand = next;
+}
+
 static void clock_add(frame_t *frame) {
   assert(frame != NULL);
   assert(!clock_is_member(frame));
@@ -381,7 +386,7 @@ static void clock_remove(frame_t *frame) {
     next->clock_prev = frame->clock_prev;
 
     if (frame_table.clock.hand == ref) {
-      frame_table.clock.hand = ref_from_frame(next);
+      clock_advance_hand(ref_from_frame(next));
     }
   }
 
@@ -402,6 +407,60 @@ static void clock_reconsider(frame_t *frame) {
   if (clock_is_eligible(frame)) {
     clock_add(frame);
   }
+}
+
+frame_ref_t clock_select_victim(void) {
+  if (frame_table.clock.length == 0) {
+    return NULL_FRAME;
+  }
+
+  assert(frame_table.clock.hand != NULL_FRAME);
+
+  /* Two full rotations budget to find an unreferenced clean frame. */
+  size_t budget = frame_table.clock.length * 2;
+  frame_ref_t dirty_candidate = NULL_FRAME;
+
+  while (frame_table.clock.length > 0 && budget-- > 0) {
+    frame_t *cur = frame_from_ref(frame_table.clock.hand);
+
+    if (!clock_is_eligible(cur)) {
+      /* Defensive cleanup if eligibility changed without notification. */
+      clock_remove(cur);
+      if (frame_table.clock.length == 0) {
+        return NULL_FRAME;
+      }
+      continue;
+    }
+
+    bool referenced = (cur->flags & FRAME_FLAG_REFERENCED) != 0;
+    bool dirty = (cur->flags & FRAME_FLAG_DIRTY) != 0;
+
+    if (referenced) {
+      cur->flags &= ~FRAME_FLAG_REFERENCED;
+      clock_advance_hand(cur->clock_next);
+      continue;
+    }
+
+    if (!dirty) {
+      frame_ref_t victim = ref_from_frame(cur);
+      clock_advance_hand(cur->clock_next);
+      return victim;
+    }
+
+    if (dirty_candidate == NULL_FRAME) {
+      dirty_candidate = ref_from_frame(cur);
+    }
+
+    clock_advance_hand(cur->clock_next);
+  }
+
+  if (dirty_candidate != NULL_FRAME) {
+    frame_t *chosen = frame_from_ref(dirty_candidate);
+    clock_advance_hand(chosen->clock_next);
+    return dirty_candidate;
+  }
+
+  return NULL_FRAME;
 }
 
 static frame_t *alloc_fresh_frame(void) {
