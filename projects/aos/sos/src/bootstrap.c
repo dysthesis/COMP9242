@@ -186,23 +186,10 @@ void sos_bootstrap(cspace_t *cspace, const seL4_BootInfo *bi)
     size_t n_slots = bi->empty.start - 1;
 
     /* we need enough memory to create and map the ut table - first all the frames.
-     * Compute based only on usable non-device untypeds, and track their physical span
-     * for correct indexing. */
-    size_t total_ram_bytes = 0;
-    seL4_Word min_paddr = PHYSICAL_ADDRESS_LIMIT;
-    seL4_Word max_paddr = 0;
-    for (size_t i = 0; i < bi->untyped.end - bi->untyped.start; i++) {
-        if (!untyped_in_range(bi->untypedList[i]) || bi->untypedList[i].isDevice) {
-            continue;
-        }
-        total_ram_bytes += BIT(bi->untypedList[i].sizeBits);
-        min_paddr = MIN(min_paddr, bi->untypedList[i].paddr);
-        max_paddr = MAX(max_paddr, bi->untypedList[i].paddr + BIT(bi->untypedList[i].sizeBits));
-    }
-    size_t ut_entries = total_ram_bytes / PAGE_SIZE_4K;
-    size_t ut_pages = ROUND_UP(ut_entries * sizeof(ut_t), PAGE_SIZE_4K) / PAGE_SIZE_4K;
-    ZF_LOGD("UT metadata: ram_bytes=%zu entries=%zu ut_pages=%zu span=%p..%p",
-            total_ram_bytes, ut_entries, ut_pages, (void *)min_paddr, (void *)max_paddr);
+     * Use the full in-range physical span (including device) to keep indices valid. */
+    ut_region_t memory = find_memory_bounds(bi);
+    size_t ut_pages = ut_pages_for_region(memory);
+    ZF_LOGD("UT metadata: span=%p..%p ut_pages=%zu", (void *)memory.start, (void *)memory.end, ut_pages);
     n_slots += ut_pages;
     /* track how much memory we need here */
     size_t size = (ut_pages) * PAGE_SIZE_4K;
@@ -379,11 +366,8 @@ void sos_bootstrap(cspace_t *cspace, const seL4_BootInfo *bi)
     seL4_CPtr dma_cptr = first_free_slot;
     first_free_slot++;
 
-    /* initialise the ut table with the actual RAM span for correct indexing */
-    ut_init((void *) SOS_UT_TABLE, (ut_region_t){
-        .start = min_paddr,
-        .end = max_paddr,
-    });
+    /* initialise the ut table covering the full span */
+    ut_init((void *) SOS_UT_TABLE, memory);
 
     /* create all the 4K untypeds and build the ut table, from the first available empty slot */
     for (size_t i = 0; i < bi->untyped.end - bi->untyped.start; i++) {

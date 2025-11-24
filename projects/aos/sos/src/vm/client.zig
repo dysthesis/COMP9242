@@ -141,94 +141,76 @@ pub const Client = struct {
         const writable = (prot_flags & sos.PROT_WRITE) != 0;
         const executable = (prot_flags & sos.PROT_EXEC) != 0;
 
-        _ = c.printf("[vm_map] enter caller=0x%lx vaddr=0x%lx read=%d write=%d exec=%d mapped_count=%lu\n", @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(vaddr)), @as(c_int, if (readable) 1 else 0), @as(c_int, if (writable) 1 else 0), @as(c_int, if (executable) 1 else 0), @as(c_ulong, @intCast(self.mapped_count)));
+        if (super.DebugVmLogs) {
+            _ = c.printf("[vm_map] enter caller=0x%lx vaddr=0x%lx read=%d write=%d exec=%d mapped_count=%lu\n", @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(vaddr)), @as(c_int, if (readable) 1 else 0), @as(c_int, if (writable) 1 else 0), @as(c_int, if (executable) 1 else 0), @as(c_ulong, @intCast(self.mapped_count)));
+        }
 
-        // Check if page exists and is actually mapped in hardware
+        // If a record already exists and is resident, nothing to do.
         if (self.findPage(vaddr)) |page_entry| {
             if (page_entry.state == .RESIDENT) {
-                _ = c.printf("[vm_map] already mapped vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
+                if (super.DebugVmLogs) {
+                    _ = c.printf("[vm_map] already mapped vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
+                }
                 return;
             }
-            // Page record exists but not resident, so we continue to perform
-            // the actual hardware mapping below
-            _ = c.printf("[vm_map] mapping non-resident page vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
         }
 
-        const proc_vspace = sos.client_get_vspace(caller);
-        if (proc_vspace == 0) {
-            return super.VmError.ClientContext;
-        }
-
-        const frame_ref = sos.alloc_frame(sos.FRAME_OWNER_USER, sos.FRAME_FLAG_EVICTABLE);
-        if (frame_ref == 0) {
-            _ = c.printf("[vm_map] alloc_frame failed caller=0x%lx\n", @as(c_ulong, @intCast(@intFromPtr(caller))));
-            return super.VmError.OutOfFrames;
-        }
-        _ = c.printf("[vm_map] alloc_frame ok frame_ref=%lu\n", @as(c_ulong, @intCast(frame_ref)));
-
-        const frame_raw = sos.frame_data(frame_ref);
-        const frame_bytes = @as([*]u8, @ptrCast(frame_raw));
-        @memset(frame_bytes[0..super.PAGE_SIZE_4K], 0);
-        _ = c.printf("[vm_map] cleared frame_data addr=0x%lx size=%lu\n", @as(c_ulong, @intCast(@intFromPtr(frame_raw))), @as(c_ulong, @intCast(super.PAGE_SIZE_4K)));
-
-        const slot = sos.cspace_alloc_slot(&cspace);
-        if (slot == sel4.seL4_CapNull) {
-            sos.free_frame(frame_ref);
-            _ = c.printf("[vm_map] cspace_alloc_slot failed frame_ref=%lu\n", @as(c_ulong, @intCast(frame_ref)));
-            return super.VmError.OutOfSlots;
-        }
-        _ = c.printf("[vm_map] allocated slot=%lu owner_cspace=0x%lx\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(@intFromPtr(&cspace))));
-        _ = c.printf("[vm_map] allocated slot=%lu for frame_ref=%lu\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
-
-        const src_cspace = sos.frame_table_cspace();
-        const frame_cap = sos.frame_page(frame_ref);
-        const copy_err = sos.cspace_copy(&cspace, slot, src_cspace, frame_cap, sos.seL4_AllRights);
-        if (copy_err != sel4.seL4_NoError) {
-            _ = sos.cspace_free_slot(&cspace, slot);
-            sos.free_frame(frame_ref);
-            const copy_err_i32: c_int = @intCast(copy_err);
-            _ = c.printf("[vm_map] cspace_copy failed err=%d slot=%lu frame_ref=%lu\n", copy_err_i32, @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
-            return super.VmError.MapFailed;
-        }
-        _ = c.printf("[vm_map] copied frame cap slot=%lu frame_ref=%lu\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
-
-        const temp_ro = writable;
-        const rights = region.rightsFromBooleans(readable, !temp_ro);
-        var attrs = sel4.seL4_ARM_Default_VMAttributes;
-        if (!executable) {
-            attrs = attrs | sel4.seL4_ARM_ExecuteNever;
-        }
-
-        mapping.map_owned_frame(&self.addr_space, slot, vaddr, rights, attrs) catch |err| {
-            _ = sos.cspace_delete(&cspace, slot);
-            _ = sos.cspace_free_slot(&cspace, slot);
-            sos.free_frame(frame_ref);
-            _ = c.printf("[vm_map] map_frame failed err=%d slot=%lu frame_ref=%lu vaddr=0x%lx\n", super.vmErrorToErrno(err), @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
-            return err;
-        };
-        _ = c.printf("[vm_map] map_frame success slot=%lu frame_ref=%lu vaddr=0x%lx\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
-
-        const inserted = self.insertPage(vaddr, frame_ref, slot, &cspace, true, true) catch |err| {
+        const inserted = self.ensurePageRecord(vaddr, tracker) catch |err| {
             if (err == super.VmError.Capacity) {
                 const meta_used = self.metadata_cursor - self.metadata_base;
                 _ = c.printf("[vm_meta] capacity hit vaddr=0x%lx mapped_count=%lu used_bytes=%lu limit_bytes=%lu pages=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(self.mapped_count)), @as(c_ulong, @intCast(meta_used)), @as(c_ulong, @intCast(allocator.METADATA_REGION_BYTES)), @as(c_ulong, @intCast(self.metadata_page_count)));
             }
-            _ = sos.cspace_delete(&cspace, slot);
-            _ = sos.cspace_free_slot(&cspace, slot);
-            sos.free_frame(frame_ref);
             return err;
         };
         inserted.region = tracker;
-        // State is already RESIDENT from insertPage with frame_ref != 0
+
+        // If a frame is already resident the earlier check returned; otherwise
+        // allocate and map a fresh frame for this anonymous page.
+        const frame_ref = sos.alloc_frame(sos.FRAME_OWNER_USER, 0);
+        if (frame_ref == 0) {
+            return super.VmError.OutOfFrames;
+        }
+
+        const slot = sos.cspace_alloc_slot(&super.cspace);
+        if (slot == sel4.seL4_CapNull) {
+            sos.free_frame(frame_ref);
+            return super.VmError.OutOfSlots;
+        }
+
+        const src_cspace = sos.frame_table_cspace();
+        const frame_cap = sos.frame_page(frame_ref);
+        if (sos.cspace_copy(&super.cspace, slot, src_cspace, frame_cap, sos.seL4_AllRights) != sel4.seL4_NoError) {
+            sos.cspace_free_slot(&super.cspace, slot);
+            sos.free_frame(frame_ref);
+            return super.VmError.MapFailed;
+        }
+
+        const rights = region.rightsFromBooleans(readable, writable);
+        var attrs = sel4.seL4_ARM_Default_VMAttributes;
+        if (!executable) {
+            attrs |= sel4.seL4_ARM_ExecuteNever;
+        }
+
+        mapping.map_owned_frame(&self.addr_space, slot, vaddr, rights, attrs) catch |err| {
+            _ = sos.cspace_delete(&super.cspace, slot);
+            sos.cspace_free_slot(&super.cspace, slot);
+            sos.free_frame(frame_ref);
+            return err;
+        };
+
+        // Update the page record to reflect the resident mapping.
+        inserted.frame_ref = frame_ref;
+        inserted.cap_slot = slot;
+        inserted.cap_owner = &super.cspace;
+        inserted.owns_frame = true;
+        inserted.owns_cap = true;
+        inserted.transitionState(page.PageState.RESIDENT);
         inserted.dirty = false;
         inserted.referenced = false;
         inserted.pagefile_slot = -1;
-        inserted.temp_ro = temp_ro;
-        inserted.waiters.reset();
+        inserted.temp_ro = false;
+        // leave waiters as-is (pager may be waiting)
         self.mapped_count = self.addr_space.num_mapped();
-        // self.addr_space.recordLeafMap(vaddr);
-
-        _ = c.printf("[vm_map] recorded mapping vaddr=0x%lx frame_ref=%lu slot=%lu new_mapped_count=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(self.mapped_count)));
 
         tracker.updateAccess(readable, writable, executable);
         tracker.recordMapping(vaddr, super.PAGE_SIZE_4K);

@@ -27,7 +27,10 @@
 #define SOS_FRAME_TABLE (0x8100000000)
 #define SOS_FRAME_DATA (0x8200000000)
 #define SOS_METADATA_BASE (0x8300000000ULL)
-#define SOS_METADATA_REGION_BYTES (1ul << 20)
+/* Reserve more virtual space for VM metadata (page records, regions, etc.).
+ * Increased from 1 MiB to 4 MiB to relieve metadata pressure without
+ * bloating the rootserver image. */
+#define SOS_METADATA_REGION_BYTES (4ul << 20)
 
 /* Constants for how SOS will layout the address space of any processes it loads
  * up */

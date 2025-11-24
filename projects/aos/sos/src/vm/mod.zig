@@ -1,4 +1,5 @@
 //! This module is the entrypoint to the virtual memory management system.
+pub const DebugVmLogs = false;
 
 pub extern var cspace: sos.cspace_t;
 
@@ -71,7 +72,9 @@ pub inline fn vmErrorToErrno(err: anyerror) c_int {
 
 fn vmStateIndex(caller: *sos.client_t) usize {
     const id: usize = @intCast(caller.*.id);
-    _ = c.printf("[vm_state] vmStateIndex caller=0x%lx id=%lu\n", @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(id)));
+    if (DebugVmLogs) {
+        _ = c.printf("[vm_state] vmStateIndex caller=0x%lx id=%lu\n", @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(id)));
+    }
     return id;
 }
 
@@ -88,9 +91,9 @@ pub inline fn pageBase(addr: usize) usize {
 }
 
 pub export fn vm_state_acquire(cl: *sos.client_t) callconv(.c) *VmHandle {
-    _ = c.printf(
-        "[vm_state_acquire] entered vm_state_acquire...\n",
-    );
+    if (DebugVmLogs) {
+        _ = c.printf("[vm_state_acquire] entered vm_state_acquire...\n");
+    }
     bootstrapVmStates();
     const idx = vmStateIndex(cl);
     handle.vm_handles[idx] = VmHandle{

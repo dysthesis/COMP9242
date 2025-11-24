@@ -213,7 +213,7 @@ void frame_table_init(cspace_t *cspace, seL4_CPtr vspace) {
 
   /* Pre-seed a modest number of frames to avoid early starvation, but do not
    * exhaust the untyped pool or overflow the frame_data region. */
-  const size_t seed_limit = 512;
+    const size_t seed_limit = 4096;
   size_t seeded = 0;
   while (seeded < seed_limit) {
     frame_t *f = alloc_fresh_frame();

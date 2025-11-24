@@ -231,6 +231,11 @@ fn submitPageFillJob(
             }
         },
     }
+    // Ensure anonymous pages are marked PAGEIN_PENDING before dispatch so that
+    // installPagerResult observes the expected state.
+    if (mapped_page.state == page.PageState.FREE) {
+        mapped_page.transitionState(.PAGEIN_PENDING);
+    }
     job.params = .{ .PageFill = .{
         .client_id = @intCast(vm_handle.getClient().id),
         .page_base = key.page_base,
@@ -482,6 +487,13 @@ pub fn enqueuePagerWaiter(
     const mapped_page = state.ensurePageRecord(pf_state.page_base, tracker.?) catch {
         return .QueueFailed;
     };
+
+    // Transition anonymous pages into PAGEIN_PENDING so installPagerResult accepts
+    // the completion. Without this, anonymous faults stay in .FREE and install
+    // returns EINVAL, causing infinite resubmission.
+    if (mapped_page.state == page.PageState.FREE) {
+        mapped_page.transitionState(page.PageState.PAGEIN_PENDING);
+    }
 
     // Log before enqueue attempt
     _ = c.printf("[pager] enqueuePagerWaiter: page=0x%lx cont=%p current_waiters=%u\n", @as(c_ulong, @intCast(pf_state.page_base)), cont, @as(c_uint, mapped_page.waiters.count));
