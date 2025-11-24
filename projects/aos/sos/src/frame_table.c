@@ -211,17 +211,20 @@ void frame_table_init(cspace_t *cspace, seL4_CPtr vspace) {
   frame_table.clock.hand = NULL_FRAME;
   frame_table.clock.length = 0;
 
-  /* Pre-seed the free list with as many frames as the untyped pool allows.
-   * This prevents early starvation before eviction can populate the clock. */
-  while (true) {
+  /* Pre-seed a modest number of frames to avoid early starvation, but do not
+   * exhaust the untyped pool or overflow the frame_data region. */
+  const size_t seed_limit = 512;
+  size_t seeded = 0;
+  while (seeded < seed_limit) {
     frame_t *f = alloc_fresh_frame();
     if (f == NULL) {
       break;
     }
     push_front(&frame_table.free, f);
+    seeded++;
   }
-  ZF_LOGE("frame_table_init: seeded %lu frames (capacity=%lu free_len=%lu)",
-          frame_table.used, frame_table.capacity, frame_table.free.length);
+  ZF_LOGE("frame_table_init: seeded %zu frames (capacity=%lu free_len=%lu)",
+          seeded, frame_table.capacity, frame_table.free.length);
 }
 
 cspace_t *frame_table_cspace(void) { return frame_table.cspace; }
