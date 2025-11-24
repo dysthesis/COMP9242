@@ -14,10 +14,10 @@
 #include "bootstrap.h"
 #include "ut.h"
 
-#include <stdlib.h>
+#include <cspace/cspace.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <cspace/cspace.h>
+#include <stdlib.h>
 
 /*
  * Every frame in the frame table is referenced by a compact index into
@@ -40,16 +40,16 @@ typedef size_t frame_ref_t;
  * correct structure.
  */
 typedef enum {
-    NO_LIST = 1,
-    FREE_LIST = 2,
-    ALLOCATED_LIST = 3,
+  NO_LIST = 1,
+  FREE_LIST = 2,
+  ALLOCATED_LIST = 3,
 } list_id_t;
 
 typedef enum {
-    FRAME_OWNER_KERNEL = 0,
-    FRAME_OWNER_USER = 1,
-    FRAME_OWNER_PAGER = 2,
-    FRAME_OWNER_NETWORK = 3,
+  FRAME_OWNER_KERNEL = 0,
+  FRAME_OWNER_USER = 1,
+  FRAME_OWNER_PAGER = 2,
+  FRAME_OWNER_NETWORK = 3,
 } frame_owner_t;
 
 typedef uint32_t frame_flags_t;
@@ -68,15 +68,18 @@ extern char *frame_table_list_names[];
 /* The actual representation of a frame in the frame table. */
 typedef struct frame frame_t;
 struct frame {
-    seL4_ARM_Page sos_page;
-    frame_ref_t prev;
-    frame_ref_t next;
-    list_id_t list_id;
-    frame_owner_t owner;
-    frame_flags_t flags;
-    uint16_t pin_count;
-    uint16_t reserved16;
-    uint32_t swap_slot;
+  seL4_ARM_Page sos_page;
+  frame_ref_t prev;
+  frame_ref_t next;
+  list_id_t list_id;
+  frame_owner_t owner;
+  frame_flags_t flags;
+  uint16_t pin_count;
+  uint16_t reserved16;
+  uint32_t swap_slot;
+  /* Clock list linkage, NULL_FRAME when not enqueued. */
+  frame_ref_t clock_prev;
+  frame_ref_t clock_next;
 };
 compile_time_assert("Small CPtr size", 20 >= INITIAL_TASK_CSPACE_BITS);
 
