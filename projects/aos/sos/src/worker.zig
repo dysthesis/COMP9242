@@ -821,7 +821,7 @@ pub const Worker = struct {
 var workers: [WORKER_COUNT]Worker = undefined;
 var worker_notifications: [WORKER_COUNT]sel4.seL4_CPtr = [_]sel4.seL4_CPtr{sel4.seL4_CapNull} ** WORKER_COUNT;
 var worker_notification_ut: [WORKER_COUNT]?*sos.ut_t = [_]?*sos.ut_t{null} ** WORKER_COUNT;
-var worker_initialized = false;
+var worker_initialised = false;
 var active_worker_count: usize = 0;
 var enqueue_rr = std.atomic.Value(usize).init(0);
 
@@ -878,13 +878,13 @@ extern fn spawn_worker_thread(
 
 /// Initialise worker subsystem (C-callable)
 pub export fn worker_init(delegate_ep_arg: sel4.seL4_CPtr, work_ntfn: sel4.seL4_CPtr) callconv(.c) void {
-    if (worker_initialized) {
+    if (worker_initialised) {
         return;
     }
 
     // Mark initialisation before spawning to avoid races where worker_main_c
-    // observes worker_initialized == false and exits.
-    worker_initialized = true;
+    // observes worker_initialised == false and exits.
+    worker_initialised = true;
 
     var idx: usize = 0;
     while (idx < WORKER_COUNT) : (idx += 1) {
@@ -921,7 +921,7 @@ pub export fn worker_init(delegate_ep_arg: sel4.seL4_CPtr, work_ntfn: sel4.seL4_
 /// C wrapper for worker main loop
 pub export fn worker_main_c(arg: usize) callconv(.c) void {
     const idx = arg;
-    // Relaxed guard: worker_initialized is set before spawn; idx bounds check
+    // Relaxed guard: worker_initialised is set before spawn; idx bounds check
     // remains to catch bogus invocations without killing valid threads on
     // startup races.
     if (idx >= active_worker_count) {
@@ -933,7 +933,7 @@ pub export fn worker_main_c(arg: usize) callconv(.c) void {
 
 /// C-callable enqueue function
 pub export fn workerEnqueue(file_op: *FileOpState) callconv(.c) c_int {
-    if (!worker_initialized or active_worker_count == 0) {
+    if (!worker_initialised or active_worker_count == 0) {
         return -@as(c_int, @intCast(sos.EINVAL));
     }
 

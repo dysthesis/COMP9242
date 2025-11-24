@@ -576,6 +576,7 @@ static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace,
  */
 bool start_first_process(char *app_name, seL4_CPtr ep) {
   bool success = false;
+  bool vm_reset_done = false;
   client_t *client = NULL;
   seL4_Word client_badge = 0;
   user_process.client = NULL;
@@ -792,6 +793,7 @@ out:
   if (!success && client) {
     if (client->vm_state != NULL) {
       vm_reset_state(client->vm_state);
+      vm_reset_done = true;
     }
     client_destroy(client, &cspace);
     user_process.client = NULL;
@@ -803,7 +805,15 @@ out:
     user_process.fault_ep_slot = seL4_CapNull;
   }
   if (!success) {
-    cleanup_stack_frames();
+    if (!vm_reset_done) {
+      cleanup_stack_frames();
+    } else {
+      user_process.stack_frame_count = 0;
+      for (size_t i = 0; i < ARRAY_SIZE(user_process.stack_frames); i++) {
+        user_process.stack_frames[i] = NULL_FRAME;
+        user_process.stack_slots[i] = seL4_CapNull;
+      }
+    }
     if (!user_process.ipc_buffer_vm_owned) {
       release_ipc_buffer_manual();
     }

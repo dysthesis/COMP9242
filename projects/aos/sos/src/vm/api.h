@@ -29,6 +29,8 @@ int vm_map_owned_frame(struct vm_handle *handle, uintptr_t vaddr,
                        bool readable, bool writable, bool executable,
                        bool owns_frame, bool owns_cap);
 
+int vm_pageout_abort(size_t frame_ref, uint32_t slot);
+
 uint8_t *vm_get_user_page_data(struct vm_handle *handle, uintptr_t user_vaddr);
 
 void vm_reset_state(struct vm_handle *handle);

@@ -117,6 +117,7 @@ extern int pageout_submit(uint32_t slot, size_t frame_ref);
 extern int pageout_poll_complete(size_t *frame_ref_out, uint32_t *slot_out);
 extern int vm_pageout_finalise(size_t frame_ref, uint32_t slot);
 extern int vm_pageout_prepare(size_t frame_ref, uint32_t slot);
+extern int vm_pageout_abort(size_t frame_ref, uint32_t slot);
 
 #define SOS_EAGAIN 11
 /*
@@ -262,16 +263,24 @@ cspace_t *frame_table_cspace(void) { return frame_table.cspace; }
 frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
   frame_t *frame = pop_front(&frame_table.free);
 
+  /* Bounded retry budget for eviction-backed allocation in case of transient
+   * pagefile I/O failures. */
+  const int max_evict_retries = 8;
+
   /* Prefer eviction (if available) before minting new frames to avoid ut exhaustion. */
-  if (frame == NULL && pagefile_is_ready()) {
+  int evict_attempts = 0;
+  while (frame == NULL && pagefile_is_ready() && evict_attempts < max_evict_retries) {
     if (evict_one_frame() == 0) {
       int rc = pageout_wait_blocking();
       if (rc != 0) {
         ZF_LOGE("alloc_frame: pageout_wait_blocking rc=%d", rc);
+        evict_attempts++;
+        continue; /* try another victim */
       }
       frame = pop_front(&frame_table.free);
     } else {
       ZF_LOGE("alloc_frame: eviction attempt failed (clock_len=%lu)", frame_table.clock.length);
+      break;
     }
   }
 
@@ -285,16 +294,21 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
   }
 
   if (frame == NULL && pagefile_is_ready()) {
-    /* Attempt synchronous eviction to free a frame */
-    if (evict_one_frame() == 0) {
-      /* Block until at least one page-out completes to free a frame. */
-      int rc = pageout_wait_blocking();
-      if (rc != 0) {
-        ZF_LOGE("alloc_frame: pageout_wait_blocking rc=%d", rc);
+    /* Attempt synchronous eviction to free a frame (bounded retries) */
+    evict_attempts = 0;
+    while (frame == NULL && pagefile_is_ready() && evict_attempts < max_evict_retries) {
+      if (evict_one_frame() == 0) {
+        int rc = pageout_wait_blocking();
+        if (rc != 0) {
+          ZF_LOGE("alloc_frame: pageout_wait_blocking rc=%d", rc);
+          evict_attempts++;
+          continue;
+        }
+        frame = pop_front(&frame_table.free);
+      } else {
+        ZF_LOGE("alloc_frame: eviction attempt failed (clock_len=%lu)", frame_table.clock.length);
+        break;
       }
-      frame = pop_front(&frame_table.free);
-    } else {
-      ZF_LOGE("alloc_frame: eviction attempt failed (clock_len=%lu)", frame_table.clock.length);
     }
   }
 
@@ -540,8 +554,14 @@ static int pageout_process_one_completion(void) {
     return rc;
   }
   if (rc != 0) {
-    /* Even on failure, release the slot to avoid leaks. */
+    /* Even on failure, release the slot to avoid leaks and attempt rollback. */
     pagefile_free_slot(slot);
+    if (rc > 0) {
+      int abort_rc = vm_pageout_abort(frame_ref, slot);
+      if (abort_rc != 0) {
+        ZF_LOGE("pageout completion rollback failed rc=%d frame=%zu slot=%u", abort_rc, frame_ref, slot);
+      }
+    }
     return rc;
   }
 

@@ -216,6 +216,77 @@ pub export fn vm_pageout_finalise(frame_ref: usize, slot: u32) callconv(.c) c_in
     return 0;
 }
 
+/// Abort a page-out after an I/O failure by remapping the resident frame and
+/// restoring metadata to RESIDENT. Returns 0 on success, -errno on failure.
+pub export fn vm_pageout_abort(frame_ref: usize, slot: u32) callconv(.c) c_int {
+    bootstrapVmStates();
+
+    var restored: bool = false;
+
+    for (&vm_states) |*state| {
+        if (!state.initialised) continue;
+
+        var it = state.addr_space.iterator();
+        while (it.next()) |entry| {
+            const vaddr = entry.key_ptr.*;
+            var page_entry = entry.value_ptr;
+
+            if (page_entry.frame_ref != frame_ref or page_entry.state != page.PageState.PAGEOUT_PENDING) {
+                continue;
+            }
+            const slot_i32: i32 = @intCast(slot);
+            if (page_entry.pagefile_slot >= 0 and page_entry.pagefile_slot != slot_i32) {
+                continue;
+            }
+
+            var prot: c_int = sos.PROT_READ | sos.PROT_WRITE;
+            if (page_entry.region) |reg| {
+                prot = reg.prot();
+            }
+            const readable = (prot & sos.PROT_READ) != 0 or (prot & sos.PROT_EXEC) != 0;
+            const writable = (prot & sos.PROT_WRITE) != 0;
+            const executable = (prot & sos.PROT_EXEC) != 0;
+
+            const slot_cap = sos.cspace_alloc_slot(&cspace);
+            if (slot_cap == sel4.seL4_CapNull) {
+                sos.frame_unbind_slot(frame_ref);
+                return -sos.ENOMEM;
+            }
+
+            const src_cspace = sos.frame_table_cspace();
+            const frame_cap = sos.frame_page(frame_ref);
+            if (sos.cspace_copy(&cspace, slot_cap, src_cspace, frame_cap, sos.seL4_AllRights) != sel4.seL4_NoError) {
+                sos.cspace_free_slot(&cspace, slot_cap);
+                sos.frame_unbind_slot(frame_ref);
+                return -sos.EIO;
+            }
+
+            state.mapOwnedFrame(vaddr, frame_ref, slot_cap, readable, writable, executable, true, true) catch |e| {
+                _ = sos.cspace_delete(&cspace, slot_cap);
+                _ = sos.cspace_free_slot(&cspace, slot_cap);
+                sos.frame_unbind_slot(frame_ref);
+                return -vmErrorToErrno(e);
+            };
+
+            page_entry.pagefile_slot = -1;
+            page_entry.dirty = false;
+            page_entry.referenced = false;
+            // mapOwnedFrame already set state to RESIDENT and inserted into clock
+
+            sos.frame_unbind_slot(frame_ref);
+            restored = true;
+            break;
+        }
+    }
+
+    if (!restored) {
+        sos.frame_unbind_slot(frame_ref);
+        return -sos.ENOENT;
+    }
+
+    return 0;
+}
+
 /// Prepare a page for page-out by unmapping all client mappings and
 /// transitioning metadata to PAGEOUT_PENDING with the chosen pagefile slot.
 /// This must run before copying frame contents to the pagefile to avoid
