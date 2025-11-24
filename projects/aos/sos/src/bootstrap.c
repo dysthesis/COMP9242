@@ -185,10 +185,18 @@ void sos_bootstrap(cspace_t *cspace, const seL4_BootInfo *bi)
     /* work out the number of slots used by the cspace we are provided on on init */
     size_t n_slots = bi->empty.start - 1;
 
-    /* we need enough memory to create and map the ut table - first all the frames */
-    ut_region_t memory = find_memory_bounds(bi);
-    size_t ut_pages = ut_pages_for_region(memory);
-    ZF_LOGD("Need %zu pages for ut table", ut_pages);
+    /* we need enough memory to create and map the ut table - first all the frames.
+     * Compute based only on usable non-device untypeds, not the full min..max span. */
+    size_t total_ram_bytes = 0;
+    for (size_t i = 0; i < bi->untyped.end - bi->untyped.start; i++) {
+        if (!untyped_in_range(bi->untypedList[i]) || bi->untypedList[i].isDevice) {
+            continue;
+        }
+        total_ram_bytes += BIT(bi->untypedList[i].sizeBits);
+    }
+    size_t ut_entries = total_ram_bytes / PAGE_SIZE_4K;
+    size_t ut_pages = ROUND_UP(ut_entries * sizeof(ut_t), PAGE_SIZE_4K) / PAGE_SIZE_4K;
+    ZF_LOGD("UT metadata: ram_bytes=%zu entries=%zu ut_pages=%zu", total_ram_bytes, ut_entries, ut_pages);
     n_slots += ut_pages;
     /* track how much memory we need here */
     size_t size = (ut_pages) * PAGE_SIZE_4K;
@@ -366,7 +374,10 @@ void sos_bootstrap(cspace_t *cspace, const seL4_BootInfo *bi)
     first_free_slot++;
 
     /* initialise the ut table */
-    ut_init((void *) SOS_UT_TABLE, memory);
+    ut_init((void *) SOS_UT_TABLE, (ut_region_t){
+        .start = 0,
+        .end = total_ram_bytes,
+    });
 
     /* create all the 4K untypeds and build the ut table, from the first available empty slot */
     for (size_t i = 0; i < bi->untyped.end - bi->untyped.start; i++) {
@@ -475,4 +486,3 @@ void sos_bootstrap(cspace_t *cspace, const seL4_BootInfo *bi)
 
     ZF_LOGD("cspace: root tasks cspace bootstrapped");
 }
-

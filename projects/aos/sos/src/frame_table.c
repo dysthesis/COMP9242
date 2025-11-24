@@ -172,9 +172,12 @@ int pageout_frame(frame_ref_t victim) {
 int evict_one_frame(void) {
   frame_ref_t victim = clock_select_victim();
   if (victim == NULL_FRAME) {
+    ZF_LOGE("evict_one_frame: no victim (clock_len=%lu free_len=%lu)", frame_table.clock.length,
+            frame_table.free.length);
     return -1;
   }
-
+  ZF_LOGE("evict_one_frame: victim=%zu (clock_len=%lu free_len=%lu)", victim,
+          frame_table.clock.length, frame_table.free.length);
   return pageout_frame(victim);
 }
 
@@ -207,12 +210,37 @@ void frame_table_init(cspace_t *cspace, seL4_CPtr vspace) {
   frame_table.vspace = vspace;
   frame_table.clock.hand = NULL_FRAME;
   frame_table.clock.length = 0;
+
+  /* Pre-seed the free list with as many frames as the untyped pool allows.
+   * This prevents early starvation before eviction can populate the clock. */
+  while (true) {
+    frame_t *f = alloc_fresh_frame();
+    if (f == NULL) {
+      break;
+    }
+    push_front(&frame_table.free, f);
+  }
+  ZF_LOGE("frame_table_init: seeded %lu frames (capacity=%lu free_len=%lu)",
+          frame_table.used, frame_table.capacity, frame_table.free.length);
 }
 
 cspace_t *frame_table_cspace(void) { return frame_table.cspace; }
 
 frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
   frame_t *frame = pop_front(&frame_table.free);
+
+  /* Prefer eviction (if available) before minting new frames to avoid ut exhaustion. */
+  if (frame == NULL && pagefile_is_ready()) {
+    if (evict_one_frame() == 0) {
+      int rc = pageout_wait_blocking();
+      if (rc != 0) {
+        ZF_LOGE("alloc_frame: pageout_wait_blocking rc=%d", rc);
+      }
+      frame = pop_front(&frame_table.free);
+    } else {
+      ZF_LOGE("alloc_frame: eviction attempt failed (clock_len=%lu)", frame_table.clock.length);
+    }
+  }
 
   if (frame == NULL) {
     frame = alloc_fresh_frame();
@@ -227,11 +255,19 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
     /* Attempt synchronous eviction to free a frame */
     if (evict_one_frame() == 0) {
       /* Block until at least one page-out completes to free a frame. */
-      (void)pageout_wait_blocking();
+      int rc = pageout_wait_blocking();
+      if (rc != 0) {
+        ZF_LOGE("alloc_frame: pageout_wait_blocking rc=%d", rc);
+      }
       frame = pop_front(&frame_table.free);
     } else {
       ZF_LOGE("alloc_frame: eviction attempt failed (clock_len=%lu)", frame_table.clock.length);
     }
+  }
+
+  if (frame == NULL) {
+    ZF_LOGE("alloc_frame: failed (pagefile_ready=%d free_len=%lu clock_len=%lu)",
+            pagefile_is_ready(), frame_table.free.length, frame_table.clock.length);
   }
 
   if (frame != NULL) {
@@ -459,10 +495,12 @@ static int pageout_process_one_completion(void) {
 
   rc = vm_pageout_finalise(frame_ref, slot);
   if (rc != 0) {
+    ZF_LOGE("pageout completion finalise failed rc=%d frame=%zu slot=%u", rc, frame_ref, slot);
     pagefile_free_slot(slot);
     return rc;
   }
 
+  ZF_LOGE("pageout completion success frame=%zu slot=%u", frame_ref, slot);
   return 0;
 }
 
