@@ -163,6 +163,44 @@ const PagefileState = struct {
         return @intCast(self.slot_table.len);
     }
 
+    /// Attempt to grow slot_table and bitmap up to MAX_SLOT_COUNT.
+    /// Returns true on growth, false if already at cap. Errors on OOM.
+    fn grow(self: *PagefileState) !bool {
+        const current: u32 = self.numSlots();
+        if (current >= MAX_SLOT_COUNT) {
+            return false;
+        }
+        const target: u32 = blk: {
+            const doubled: u32 = current * 2;
+            break :blk if (doubled > MAX_SLOT_COUNT) MAX_SLOT_COUNT else doubled;
+        };
+
+        const new_slot_table = try self.allocator.alloc(SlotState, target);
+        errdefer self.allocator.free(new_slot_table);
+        // Copy existing slot metadata, initialise rest to free
+        std.mem.copy(SlotState, new_slot_table[0..current], self.slot_table[0..current]);
+        for (new_slot_table[current..]) |*slot| {
+            slot.* = .free;
+        }
+
+        const new_bitmap = try Bitmap.init(self.allocator, target);
+        errdefer new_bitmap.deinit(self.allocator);
+        const copy_words = @min(self.bitmap.words.len, new_bitmap.words.len);
+        std.mem.copy(u64, new_bitmap.words[0..copy_words], self.bitmap.words[0..copy_words]);
+
+        // Swap in new structures
+        self.allocator.free(self.slot_table);
+        self.slot_table = new_slot_table;
+        self.bitmap.deinit(self.allocator);
+        self.bitmap = new_bitmap;
+
+        // Reset search hint to first real slot to spread load.
+        self.next_search_hint = 1;
+
+        _ = c.printf("[pagefile] Grew capacity from %u to %u slots\n", @as(c_uint, current), @as(c_uint, target));
+        return true;
+    }
+
     /// Allocate slot using first-fit with wraparound search.
     /// Returns null if pagefile is full.
     fn allocSlot(
@@ -178,38 +216,44 @@ const PagefileState = struct {
         };
 
         // Linear search from hint with wraparound
-        const search_start = self.next_search_hint;
-        var slot = search_start;
-
-        while (true) {
-            // Slot 0 is reserved as invalid marker
-            if (slot == 0) {
-                slot = 1;
-                if (slot >= self.numSlots()) {
-                    slot = 0;
+        const tryFind = struct {
+            fn find(self: *PagefileState) ?u32 {
+                const n: u32 = self.numSlots();
+                var slot = self.next_search_hint;
+                var visited: u32 = 0;
+                while (visited < n) : (visited += 1) {
+                    if (slot == 0) {
+                        slot = 1;
+                    }
+                    if (!self.bitmap.isSet(slot)) {
+                        return slot;
+                    }
+                    slot = (slot + 1) % n;
                 }
-                continue;
-            }
-
-            // Check if slot is free
-            if (!self.bitmap.isSet(slot)) {
-                // Allocate: transition free → allocated
-                self.transitionToAllocated(slot, frame, pid, vaddr);
-                return slot;
-            }
-
-            // Advance to next slot with wraparound
-            slot += 1;
-            if (slot >= self.numSlots()) {
-                slot = 0;
-            }
-
-            // Full traversal without finding free slot
-            if (slot == search_start) {
-                _ = c.printf("[pagefile] WARNING: Pagefile exhausted: %zu/%u slots used\n", @as(c_ulong, self.slots_used), @as(c_uint, self.numSlots()));
                 return null;
             }
+        }.find;
+
+        if (tryFind(self)) |slot| {
+            self.transitionToAllocated(slot, frame, pid, vaddr);
+            return slot;
         }
+
+        // Attempt to grow and retry once.
+        if (self.grow() catch {
+            _ = c.printf("[pagefile] ERROR: grow OOM at %u slots\n", @as(c_uint, self.numSlots()));
+            return null;
+        }) |grew| {
+            if (grew) {
+                if (tryFind(self)) |slot2| {
+                    self.transitionToAllocated(slot2, frame, pid, vaddr);
+                    return slot2;
+                }
+            }
+        }
+
+        _ = c.printf("[pagefile] WARNING: Pagefile exhausted: %zu/%u slots used\n", @as(c_ulong, self.slots_used), @as(c_uint, self.numSlots()));
+        return null;
     }
 
     /// Transition slot from free to allocated state.

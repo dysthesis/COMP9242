@@ -159,25 +159,24 @@ int pageout_frame(frame_ref_t victim) {
     return prep_rc;
   }
 
-  /* Submit with bounded retries to handle transient EAGAIN (no worker slots). */
-  for (int attempt = 0; attempt < 4; attempt++) {
+  frame->swap_slot = slot;
+
+  /* Submit; if workers are saturated, poll completions until a slot opens. */
+  while (true) {
     int rc = pageout_submit(slot, victim);
     if (rc == 0) {
       return 0;
     }
     if (rc == -SOS_EAGAIN) {
-      /* Wait for some completions to free up worker capacity. */
+      /* Wait for completions to free worker capacity. */
       (void)pageout_wait_for_completion(16);
       continue;
     }
+    frame->swap_slot = 0;
     pagefile_free_slot(slot);
     clock_reconsider(frame);
     return rc;
   }
-
-  pagefile_free_slot(slot);
-  clock_reconsider(frame);
-  return -SOS_EAGAIN;
 
 }
 
