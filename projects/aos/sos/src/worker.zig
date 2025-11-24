@@ -767,7 +767,12 @@ pub const Worker = struct {
             },
             .Pagefile => |pf| {
                 const buf_ptr: [*]u8 = @as([*]u8, @ptrCast(&file_op.payload[0]));
+                if (!tryReserveSlot(pf.slot)) {
+                    file_op.completeErrno(sos.EAGAIN);
+                    return;
+                }
                 const rc = pagefile.pagefile_read_slot(pf.slot, buf_ptr, page_len);
+                releaseSlot(pf.slot);
                 if (rc != 0) {
                     _ = c.printf("[worker] workerPageFill: pagefile_read_slot failed rc=%d\n", rc);
                     file_op.completeErrno(-rc);
