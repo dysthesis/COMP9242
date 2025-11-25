@@ -1,5 +1,5 @@
 const NFS_POOL_SIZE = 4;
-const NFS_TIMEOUT_MS = 10000000000000; // 10 seconds
+const NFS_TIMEOUT_MS = 10000; // 10 seconds
 const NFS_HEAP_MIN_RESERVE: usize = 64 * 1024; // keep headroom for libnfs PDUs
 const HEAP_RESERVE_BYTES: usize = 256 * 1024; // emergency cushion for one eviction operation (increased from 128KB)
 
@@ -128,10 +128,10 @@ pub const NfsPool = struct {
         var poll_count: u32 = 0;
         while (!@atomicLoad(bool, &slot.async_finish, .acquire)) {
             const elapsed = getCurrentTimeMs() - slot.start_time;
-            if (elapsed > slot.timeout_ms) {
-                _ = c.printf("[nfs_pool] TIMEOUT after %lums\n", elapsed);
-                return -@as(i32, @intCast(sos.EIO));
-            }
+            // if (elapsed > slot.timeout_ms) {
+            //     _ = c.printf("[nfs_pool] TIMEOUT after %lums\n", elapsed);
+            //     return -@as(i32, @intCast(sos.EIO));
+            // }
 
             // Actively service the network stack to process NFS responses
             // without blocking the syscall loop
