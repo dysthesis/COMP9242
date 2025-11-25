@@ -14,6 +14,8 @@ const ROOT_DIR: [:0]const u8 = "/";
 const MAX_WORK_QUEUE = 16;
 pub const WORKER_COUNT: usize = 4;
 
+extern fn morecore_free_bytes() usize;
+
 pub const WorkType = types.WorkType;
 pub const WorkParams = types.WorkParams;
 pub const OpenParams = types.OpenParams;
@@ -808,6 +810,10 @@ pub const Worker = struct {
 
         const rc = pagefile.pagefile_write_slot(params.slot, &bounce, vm.PAGE_SIZE_4K);
         if (rc != 0) {
+            if (rc == -sos.ENOMEM and pageout_worker_counter < 64) {
+                const free_bytes = morecore_free_bytes();
+                _ = c.printf("[worker] workerPageOut: ENOMEM writing slot=%u free_bytes=%zu\n", @as(c_uint, params.slot), free_bytes);
+            }
             _ = c.printf("[worker] workerPageOut: pagefile_write_slot failed rc=%d\n", rc);
             file_op.completeErrno(-rc);
             return;
@@ -825,7 +831,7 @@ var worker_initialised = false;
 var active_worker_count: usize = 0;
 var enqueue_rr = std.atomic.Value(usize).init(0);
 
-const PAGEOUT_JOB_CAP: usize = 8;
+const PAGEOUT_JOB_CAP: usize = 4;
 var pageout_job_states: [PAGEOUT_JOB_CAP]FileOpState = undefined;
 var pageout_job_used: [PAGEOUT_JOB_CAP]bool = [_]bool{false} ** PAGEOUT_JOB_CAP;
 var pageout_job_done: [PAGEOUT_JOB_CAP]bool = [_]bool{false} ** PAGEOUT_JOB_CAP;

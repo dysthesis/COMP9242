@@ -24,6 +24,10 @@
  * This is rather terrible, but is the simplest option without a
  * huge amount of infrastructure.
  */
+#include "morecore.h"
+
+// Static heap size (4 MiB). Increasing this inflates the SOS image and consumes
+// additional kernel caps during bootstrap, so keep conservative.
 #define MORECORE_AREA_BYTE_SIZE 0x400000
 char morecore_area[MORECORE_AREA_BYTE_SIZE];
 
@@ -80,4 +84,19 @@ long sys_mmap(va_list ap)
 long sys_madvise(UNUSED va_list ap)
 {
     return 0;
+}
+
+/* Introspection helpers for diagnostics and guardrails. */
+size_t morecore_total_bytes(void)
+{
+    return MORECORE_AREA_BYTE_SIZE;
+}
+
+size_t morecore_free_bytes(void)
+{
+    /* morecore_top grows downward only via mmap; base grows upward via brk. */
+    if (morecore_top <= morecore_base) {
+        return 0;
+    }
+    return morecore_top - morecore_base;
 }

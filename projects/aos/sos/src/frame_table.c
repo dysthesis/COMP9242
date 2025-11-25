@@ -12,6 +12,7 @@
 #include "frame_table.h"
 #include "mapping.h"
 #include "pagefile.h"
+#include "sys/morecore.h"
 #include "vmem_layout.h"
 
 #include <assert.h>
@@ -262,10 +263,10 @@ cspace_t *frame_table_cspace(void) { return frame_table.cspace; }
 
 frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
   /* Keep a small reserve for kernel/NFS so eviction progress is possible. */
-  const size_t reserve = 16;
+  const size_t reserve = 32;
   /* Proactive reclamation threshold to avoid entering a no-free-frame state
    * where libnfs cannot allocate encode buffers. */
-  const size_t low_watermark = 96;
+  const size_t low_watermark = reserve + 96;
 
   /* Do not consume the reserve for user allocations; kernel may dip into it. */
   frame_t *frame = NULL;
@@ -647,7 +648,8 @@ static int pageout_wait_blocking(void) {
     }
     if (rc != -SOS_EAGAIN) {
       if (pwb_log_count < 64) {
-        ZF_LOGE("pageout_wait_blocking: error rc=%d", rc);
+        ZF_LOGE("pageout_wait_blocking: error rc=%d free_bytes=%zu free_len=%lu clock_len=%lu",
+                rc, morecore_free_bytes(), frame_table.free.length, frame_table.clock.length);
         pwb_log_count++;
       }
       return rc;

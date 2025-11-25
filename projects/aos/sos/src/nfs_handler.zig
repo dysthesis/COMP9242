@@ -1,5 +1,7 @@
 const NFS_POOL_SIZE = 4;
 const NFS_TIMEOUT_MS = 10000; // 10 seconds
+const NFS_HEAP_MIN_RESERVE: usize = 64 * 1024; // keep headroom for libnfs PDUs
+const HEAP_RESERVE_BYTES: usize = 128 * 1024; // emergency cushion for libnfs
 
 const DEFAULT_CREATE_MODE: c_int = 0o600; // rw-------
 const READ_MODE_MASK: u64 = 0o400 | 0o040 | 0o004;
@@ -136,8 +138,7 @@ pub const NfsPool = struct {
             zig_seL4_Yield_bridge();
             nfsServicePoll(c.POLLIN | c.POLLOUT);
             if (poll_count < 8 or (poll_count & 0x3fff) == 0) {
-                _ = c.printf("[nfs_pool] poll iter=%u elapsed=%lums\n",
-                    poll_count, elapsed);
+                _ = c.printf("[nfs_pool] poll iter=%u elapsed=%lums\n", poll_count, elapsed);
             }
 
             poll_count += 1;
@@ -156,6 +157,8 @@ var pool_initialised: bool = false;
 
 pub fn init() void {
     if (pool_initialised) return;
+
+    heap_reserve.ensure();
 
     const nfs_ctx = get_nfs_context();
     if (nfs_ctx == null) {
@@ -389,6 +392,15 @@ pub fn readSync(fh: *anyopaque, buf: [*]u8, count: usize) !usize {
 
 pub fn preadSync(fh: *anyopaque, buf: [*]u8, offset: usize, count: usize) !usize {
     const nfs_ctx = get_nfs_context() orelse return error.NoNFSContext;
+    var released_reserve = false;
+    if (morecore_free_bytes() <= NFS_HEAP_MIN_RESERVE) {
+        released_reserve = heap_reserve.release();
+        if (!released_reserve) {
+            noteEnomemPread();
+            return error.OutOfMemory;
+        }
+    }
+    defer if (released_reserve) heap_reserve.ensure();
     const slot = nfs_pool.acquire() orelse return error.PoolExhausted;
     defer nfs_pool.release(slot);
 
@@ -407,11 +419,19 @@ pub fn preadSync(fh: *anyopaque, buf: [*]u8, offset: usize, count: usize) !usize
     );
     if (rc < 0) {
         _ = c.printf("[nfs] nfs_pread_async failed: %d\n", rc);
+        if (rc == -sos.ENOMEM) {
+            noteEnomemPread();
+            return error.OutOfMemory;
+        }
         return error.NFSOperationFailed;
     }
 
     const status = NfsPool.wait(slot);
     if (status < 0) {
+        if (status == -@as(i32, @intCast(sos.ENOMEM))) {
+            noteEnomemPread();
+            return error.OutOfMemory;
+        }
         return error.OperationFailed;
     }
 
@@ -421,6 +441,15 @@ pub fn preadSync(fh: *anyopaque, buf: [*]u8, offset: usize, count: usize) !usize
 /// Write to file synchronously
 pub fn writeSync(fh: *anyopaque, buf: [*]const u8, count: usize) !usize {
     const nfs_ctx = get_nfs_context() orelse return error.NoNFSContext;
+    var released_reserve = false;
+    if (morecore_free_bytes() <= NFS_HEAP_MIN_RESERVE) {
+        released_reserve = heap_reserve.release();
+        if (!released_reserve) {
+            noteEnomemWrite();
+            return error.OutOfMemory;
+        }
+    }
+    defer if (released_reserve) heap_reserve.ensure();
     const slot = nfs_pool.acquire() orelse return error.PoolExhausted;
     defer nfs_pool.release(slot);
 
@@ -440,6 +469,7 @@ pub fn writeSync(fh: *anyopaque, buf: [*]const u8, count: usize) !usize {
     if (rc < 0) {
         _ = c.printf("[nfs] nfs_write_async failed: %d\n", rc);
         if (rc == -sos.ENOMEM) {
+            noteEnomemWrite();
             return error.OutOfMemory;
         }
         return error.NFSOperationFailed;
@@ -448,6 +478,7 @@ pub fn writeSync(fh: *anyopaque, buf: [*]const u8, count: usize) !usize {
     const status = NfsPool.wait(slot);
     if (status < 0) {
         if (status == -@as(i32, @intCast(sos.ENOMEM))) {
+            noteEnomemWrite();
             return error.OutOfMemory;
         }
         return error.OperationFailed;
@@ -671,6 +702,67 @@ const nfs_stat_64 = extern struct {
     nfs_ctime_nsec: u64,
     nfs_used: u64,
 };
+
+extern fn morecore_free_bytes() usize;
+
+/// Heap reserve to release under pressure so libnfs can allocate PDUs.
+const HeapReserve = struct {
+    ptr: ?[*]u8 = null,
+    len: usize = 0,
+    state: u8 = 0,
+
+    fn lock(self: *HeapReserve) void {
+        while (@cmpxchgStrong(u8, &self.state, 0, 1, .acq_rel, .acquire) != null) {}
+    }
+
+    fn unlock(self: *HeapReserve) void {
+        @atomicStore(u8, &self.state, 0, .release);
+    }
+
+    fn ensure(self: *HeapReserve) void {
+        self.lock();
+        defer self.unlock();
+        if (self.ptr != null) return;
+        const mem = sos.malloc(HEAP_RESERVE_BYTES);
+        if (mem != null) {
+            self.ptr = @ptrCast(mem);
+            self.len = HEAP_RESERVE_BYTES;
+            _ = c.printf("[nfs] heap reserve established (%zu bytes)\n", self.len);
+        } else {
+            _ = c.printf("[nfs] WARNING: failed to allocate heap reserve\n");
+        }
+    }
+
+    /// Release reserve if present; returns true if released.
+    fn release(self: *HeapReserve) bool {
+        self.lock();
+        defer self.unlock();
+        if (self.ptr) |p| {
+            sos.free(p);
+            self.ptr = null;
+            self.len = 0;
+            _ = c.printf("[nfs] heap reserve released\n");
+            return true;
+        }
+        return false;
+    }
+};
+
+var heap_reserve: HeapReserve = .{};
+var enomem_write_count: usize = 0;
+var enomem_pread_count: usize = 0;
+
+fn noteEnomemWrite() void {
+    _ = @atomicRmw(usize, &enomem_write_count, .Add, 1, .acq_rel);
+    const free_bytes = morecore_free_bytes();
+    _ = c.printf("[nfs] ENOMEM during write (free_bytes=%zu)\n", free_bytes);
+}
+
+fn noteEnomemPread() void {
+    _ = @atomicRmw(usize, &enomem_pread_count, .Add, 1, .acq_rel);
+    const free_bytes = morecore_free_bytes();
+    _ = c.printf("[nfs] ENOMEM during pread (free_bytes=%zu)\n", free_bytes);
+}
 
 fn assignStat(out: *sos_types.sos_stat_t, src: *const nfs_stat_64) void {
     out.st_type = sos_types.ST_FILE;
