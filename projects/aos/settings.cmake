@@ -70,6 +70,10 @@ set(KernelDebugBuild ON CACHE BOOL "" FORCE)
 set(HardwareDebugAPI ON CACHE BOOL "" FORCE)
 set(SosGDBSupport OFF CACHE BOOL "" FORCE) # Enable debugger
 
+# Increase root CNode size to accommodate userland image frames and untyped caps
+# Default of 12 (4096 slots) is insufficient for the CPIO archive and memory layout
+set(KernelRootCNodeSizeBits 14 CACHE STRING "" FORCE)
+
 # enable our networking libs
 set(LibPicotcp ON CACHE BOOL "" FORCE)
 set(LibPicotcpBsd ON CACHE BOOL "" FORCE)

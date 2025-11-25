@@ -1,7 +1,7 @@
 const NFS_POOL_SIZE = 4;
 const NFS_TIMEOUT_MS = 10000; // 10 seconds
 const NFS_HEAP_MIN_RESERVE: usize = 64 * 1024; // keep headroom for libnfs PDUs
-const HEAP_RESERVE_BYTES: usize = 128 * 1024; // emergency cushion for libnfs
+const HEAP_RESERVE_BYTES: usize = 256 * 1024; // emergency cushion for one eviction operation (increased from 128KB)
 
 const DEFAULT_CREATE_MODE: c_int = 0o600; // rw-------
 const READ_MODE_MASK: u64 = 0o400 | 0o040 | 0o004;
@@ -770,6 +770,17 @@ const HeapReserve = struct {
 var heap_reserve: HeapReserve = .{};
 var enomem_write_count: usize = 0;
 var enomem_pread_count: usize = 0;
+
+/// Expose heap reserve release for C callers (frame_table.c eviction pre-check).
+/// Returns 1 if reserve was released, 0 if already absent.
+pub export fn heap_reserve_release() callconv(.c) c_int {
+    return if (heap_reserve.release()) 1 else 0;
+}
+
+/// Expose heap reserve ensure for C callers (re-establish after release).
+pub export fn heap_reserve_ensure() callconv(.c) void {
+    heap_reserve.ensure();
+}
 
 fn noteEnomemWrite() void {
     _ = @atomicRmw(usize, &enomem_write_count, .Add, 1, .acq_rel);

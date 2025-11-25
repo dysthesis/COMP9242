@@ -121,6 +121,11 @@ extern int vm_pageout_finalise(size_t frame_ref, uint32_t slot);
 extern int vm_pageout_prepare(size_t frame_ref, uint32_t slot);
 extern int vm_pageout_abort(size_t frame_ref, uint32_t slot);
 
+/* Heap management bridge (implemented in Zig and morecore.c). */
+extern size_t morecore_free_bytes(void);
+extern int heap_reserve_release(void);
+extern void heap_reserve_ensure(void);
+
 #define SOS_EAGAIN 11
 /*
  * Allocate a frame at a particular address in SOS.
@@ -263,11 +268,27 @@ void frame_table_init(cspace_t *cspace, seL4_CPtr vspace) {
 cspace_t *frame_table_cspace(void) { return frame_table.cspace; }
 
 frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
-  /* Keep a small reserve for kernel/NFS so eviction progress is possible. */
-  const size_t reserve = 32;
+  /* Proportional reserve: 10% of capacity, minimum 32 frames, maximum 256 frames.
+   * This ensures eviction path has sufficient frames for:
+   * - NFS PDU allocations (via ut_cspace_alloc_from_object)
+   * - Pagefile slot metadata
+   * - Worker queue state */
+  const size_t min_reserve = 32;
+  const size_t max_reserve = 256;
+  const size_t proportional = frame_table.capacity / 10;
+  const size_t reserve = MAX(min_reserve, MIN(max_reserve, proportional));
+
   /* Proactive reclamation threshold to avoid entering a no-free-frame state
    * where libnfs cannot allocate encode buffers. */
   const size_t low_watermark = reserve + 96;
+
+  /* Log reserve sizing once during first allocation for diagnostics. */
+  static bool reserve_logged = false;
+  if (!reserve_logged) {
+    ZF_LOGE("alloc_frame: kernel reserve=%zu frames (%zu KiB) for capacity=%lu",
+            reserve, (reserve * BIT(seL4_PageBits)) / 1024, frame_table.capacity);
+    reserve_logged = true;
+  }
 
   /* Do not consume the reserve for user allocations; kernel may dip into it. */
   frame_t *frame = NULL;
@@ -301,13 +322,37 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
    * pagefile I/O failures. */
   const int max_evict_retries = 8;
 
+  /* Pre-flight check: if pagefile is ready but heap is critically low,
+   * eviction will likely fail. Release NFS heap reserve proactively and
+   * re-check before attempting eviction. */
+  const size_t heap_critical_threshold = 96 * 1024;  /* 96 KiB */
+
+  if (frame == NULL && pagefile_is_ready()) {
+    size_t heap_free = morecore_free_bytes();
+    if (heap_free < heap_critical_threshold) {
+      ZF_LOGE("alloc_frame: heap critically low before eviction (free_bytes=%zu, threshold=%zu)",
+              heap_free, heap_critical_threshold);
+      /* Attempt to release NFS heap reserve to create headroom. */
+      if (heap_reserve_release()) {
+        heap_free = morecore_free_bytes();
+        ZF_LOGE("alloc_frame: released NFS heap reserve, retrying (free_bytes=%zu)", heap_free);
+      } else {
+        ZF_LOGE("alloc_frame: NFS heap reserve already exhausted; eviction may fail");
+      }
+    }
+  }
+
   /* Prefer eviction (if available) before minting new frames to avoid ut exhaustion. */
   int evict_attempts = 0;
   while (frame == NULL && pagefile_is_ready() && evict_attempts < max_evict_retries) {
     if (evict_one_frame() == 0) {
+      /* Log heap state immediately after eviction submission. */
+      ZF_LOGD("alloc_frame: eviction submitted, awaiting completion (heap_free=%zu frames_free=%lu)",
+              morecore_free_bytes(), frame_table.free.length);
+
       int rc = pageout_wait_blocking();
       if (rc != 0) {
-        ZF_LOGE("alloc_frame: pageout_wait_blocking rc=%d", rc);
+        ZF_LOGE("alloc_frame: pageout_wait_blocking rc=%d (heap_free=%zu)", rc, morecore_free_bytes());
         evict_attempts++;
         continue; /* try another victim */
       }
@@ -340,9 +385,14 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
     evict_attempts = 0;
     while (frame == NULL && pagefile_is_ready() && evict_attempts < max_evict_retries) {
       if (evict_one_frame() == 0) {
+        /* Log heap state for final eviction attempt. */
+        ZF_LOGD("alloc_frame: final eviction submitted (heap_free=%zu frames_free=%lu)",
+                morecore_free_bytes(), frame_table.free.length);
+
         int rc = pageout_wait_blocking();
         if (rc != 0) {
-          ZF_LOGE("alloc_frame: final eviction pageout_wait_blocking rc=%d", rc);
+          ZF_LOGE("alloc_frame: final eviction pageout_wait_blocking rc=%d (heap_free=%zu)",
+                  rc, morecore_free_bytes());
           evict_attempts++;
           continue;
         }
@@ -650,9 +700,11 @@ static int pageout_wait_blocking(void) {
   int enomem_count = 0;
 
   if (pwb_log_count < 32) {
-    ZF_LOGE("pageout_wait_blocking: enter");
+    ZF_LOGE("pageout_wait_blocking: enter (free_bytes=%zu free_frames=%lu clock=%lu)",
+            morecore_free_bytes(), frame_table.free.length, frame_table.clock.length);
     pwb_log_count++;
   }
+
   while (true) {
     int rc = pageout_process_one_completion();
     if (rc == 0) {
@@ -666,12 +718,23 @@ static int pageout_wait_blocking(void) {
       if (rc == -ENOMEM) {
         enomem_count++;
         if (enomem_count >= max_enomem_retries) {
-          ZF_LOGE("pageout_wait_blocking: ENOMEM retry budget exhausted (%d attempts), propagating fatal error",
-                  enomem_count);
+          /* Disambiguate: ENOMEM from pagefile write indicates kernel heap exhaustion,
+           * not backing store failure. Provide actionable diagnostics. */
+          ZF_LOGE("pageout_wait_blocking: KERNEL HEAP EXHAUSTED after %d attempts", enomem_count);
+          ZF_LOGE("  heap_free=%zu frames_free=%lu clock_len=%lu reserve_status=CHECK_NFS_HANDLER",
+                  morecore_free_bytes(), frame_table.free.length, frame_table.clock.length);
+          ZF_LOGE("  DIAGNOSIS: NFS pagefile I/O cannot proceed due to insufficient heap for PDU encoding.");
+          ZF_LOGE("  REMEDY: Increase NFS_HEAP_MIN_RESERVE or reduce concurrent eviction load.");
           return rc;
         }
+      } else if (rc == -EIO || rc == -ENOSPC) {
+        /* Backing store failure: distinct from heap exhaustion. */
+        ZF_LOGE("pageout_wait_blocking: BACKING STORE ERROR rc=%d (EIO=%d ENOSPC=%d)",
+                rc, -EIO, -ENOSPC);
+        ZF_LOGE("  DIAGNOSIS: NFS pagefile I/O failed due to network or storage fault.");
+        return rc;
       } else {
-        /* Non-ENOMEM error: propagate immediately */
+        /* Other errors: propagate immediately with context. */
         if (pwb_log_count < 64) {
           ZF_LOGE("pageout_wait_blocking: error rc=%d free_bytes=%zu free_len=%lu clock_len=%lu",
                   rc, morecore_free_bytes(), frame_table.free.length, frame_table.clock.length);
