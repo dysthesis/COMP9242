@@ -26,9 +26,12 @@
  */
 #include "morecore.h"
 
-// Static heap size (4 MiB). Increasing this inflates the SOS image and consumes
-// additional kernel caps during bootstrap, so keep conservative.
-#define MORECORE_AREA_BYTE_SIZE 0x400000
+// Static heap size (8 MiB). Increased from 4 MiB to accommodate oversized per-client
+// metadata arrays (vm/client.zig metadata_pages consumes ~3 MB for 128 clients).
+// TECHNICAL DEBT: The proper fix is to refactor metadata_pages to use dynamic allocation
+// (e.g., HashMap or linked list) instead of pre-allocating 1024 entries per client.
+// This bandaid doubles heap size to prevent malloc failures during NFS eviction operations.
+#define MORECORE_AREA_BYTE_SIZE 0x800000
 char morecore_area[MORECORE_AREA_BYTE_SIZE];
 
 /* Pointer to free space in the morecore area. */

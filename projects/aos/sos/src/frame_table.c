@@ -276,15 +276,12 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
   }
 
   /* If we're getting close to the low watermark and paging is available,
-   * evict a small batch before we run completely dry. */
+   * evict a small batch before we run completely dry. Reserve enforcement
+   * occurs at consumption time (below), not during eviction itself. */
   if (frame == NULL && pagefile_is_ready() &&
       frame_table.free.length <= low_watermark && frame_table.clock.length > 0) {
     size_t evict_budget = low_watermark - frame_table.free.length + 1;
     while (evict_budget-- > 0 && frame_table.free.length <= low_watermark) {
-      if (frame_table.free.length <= reserve) {
-        ZF_LOGE("alloc_frame: skipping eviction (free_len=%lu <= reserve=%zu)", frame_table.free.length, reserve);
-        break;
-      }
       if (evict_one_frame() != 0) {
         break;
       }
@@ -294,6 +291,7 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
         break;
       }
     }
+    /* Enforce reserve at consumption: user allocations respect kernel reserve. */
     if (owner == FRAME_OWNER_KERNEL || frame_table.free.length > reserve) {
       frame = pop_front(&frame_table.free);
     }
@@ -306,12 +304,6 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
   /* Prefer eviction (if available) before minting new frames to avoid ut exhaustion. */
   int evict_attempts = 0;
   while (frame == NULL && pagefile_is_ready() && evict_attempts < max_evict_retries) {
-    /* Enforce reserve: user allocations must not consume kernel/NFS reserve */
-    if (owner != FRAME_OWNER_KERNEL && frame_table.free.length <= reserve) {
-      ZF_LOGE("alloc_frame: user allocation blocked by reserve (free_len=%lu <= reserve=%zu)",
-              frame_table.free.length, reserve);
-      break;
-    }
     if (evict_one_frame() == 0) {
       int rc = pageout_wait_blocking();
       if (rc != 0) {
@@ -319,8 +311,14 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
         evict_attempts++;
         continue; /* try another victim */
       }
+      /* Enforce reserve at consumption: kernel allocations bypass, user respects reserve. */
       if (frame_table.free.length > reserve || owner == FRAME_OWNER_KERNEL) {
         frame = pop_front(&frame_table.free);
+      } else {
+        /* Successfully freed frame, but reserve protects it for kernel use. */
+        ZF_LOGD("alloc_frame: eviction succeeded but frame reserved for kernel (free_len=%lu, reserve=%zu)",
+                frame_table.free.length, reserve);
+        break;
       }
     } else {
       ZF_LOGE("alloc_frame: eviction attempt failed (clock_len=%lu)", frame_table.clock.length);
@@ -341,24 +339,24 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
     /* Attempt synchronous eviction to free a frame (bounded retries) */
     evict_attempts = 0;
     while (frame == NULL && pagefile_is_ready() && evict_attempts < max_evict_retries) {
-      /* Enforce reserve: user allocations must not consume kernel/NFS reserve */
-      if (owner != FRAME_OWNER_KERNEL && frame_table.free.length <= reserve) {
-        ZF_LOGE("alloc_frame: final user allocation blocked by reserve (free_len=%lu <= reserve=%zu)",
-                frame_table.free.length, reserve);
-        break;
-      }
       if (evict_one_frame() == 0) {
         int rc = pageout_wait_blocking();
         if (rc != 0) {
-          ZF_LOGE("alloc_frame: pageout_wait_blocking rc=%d", rc);
+          ZF_LOGE("alloc_frame: final eviction pageout_wait_blocking rc=%d", rc);
           evict_attempts++;
           continue;
         }
+        /* Enforce reserve at consumption: kernel allocations bypass, user respects reserve. */
         if (frame_table.free.length > reserve || owner == FRAME_OWNER_KERNEL) {
           frame = pop_front(&frame_table.free);
+        } else {
+          /* Successfully freed frame, but reserve protects it for kernel use. */
+          ZF_LOGD("alloc_frame: final eviction succeeded but frame reserved for kernel (free_len=%lu, reserve=%zu)",
+                  frame_table.free.length, reserve);
+          break;
         }
       } else {
-        ZF_LOGE("alloc_frame: eviction attempt failed (clock_len=%lu)", frame_table.clock.length);
+        ZF_LOGE("alloc_frame: final eviction attempt failed (clock_len=%lu)", frame_table.clock.length);
         break;
       }
     }
