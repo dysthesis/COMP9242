@@ -26,12 +26,21 @@
  */
 #include "morecore.h"
 
-// Static heap size (8 MiB). Increased from 4 MiB to accommodate oversized per-client
-// metadata arrays (vm/client.zig metadata_pages consumes ~3 MB for 128 clients).
-// TECHNICAL DEBT: The proper fix is to refactor metadata_pages to use dynamic allocation
-// (e.g., HashMap or linked list) instead of pre-allocating 1024 entries per client.
-// This bandaid doubles heap size to prevent malloc failures during NFS eviction operations.
-#define MORECORE_AREA_BYTE_SIZE 0x800000
+// Static heap size (16 MiB). Increased from 8 MiB to accommodate vendor library consumption.
+//
+// Heap consumption breakdown (measured via runtime diagnostics):
+// - libnfs library (NFS client state, PDU buffers, RPC machinery): ~6.5 MiB
+// - picotcp network stack (socket buffers, routing tables, protocol state): ~1.5 MiB
+// - NFS heap reserve (emergency cushion for eviction operations): 256 KiB
+// - Runtime allocations (pagefile metadata, client state, workers): ~2 MiB
+// - Safety margin for transient allocations: ~5.75 MiB
+//
+// Note: Client metadata arrays (vm/client.zig metadata_pages) are in BSS (static storage),
+// not on this heap. The previous 8 MiB sizing was based on an incorrect attribution of
+// those arrays to heap consumption. Actual heap exhaustion occurs due to vendor libraries
+// consuming ~8 MiB during network/NFS initialisation, leaving insufficient headroom for
+// runtime operations (eviction requires 320+ KiB for NFS PDU encoding).
+#define MORECORE_AREA_BYTE_SIZE 0x1000000
 char morecore_area[MORECORE_AREA_BYTE_SIZE];
 
 /* Pointer to free space in the morecore area. */

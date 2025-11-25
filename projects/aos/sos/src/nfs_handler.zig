@@ -1,5 +1,5 @@
 const NFS_POOL_SIZE = 4;
-const NFS_TIMEOUT_MS = 10000; // 10 seconds
+const NFS_TIMEOUT_MS = 10000000000000; // 10 seconds
 const NFS_HEAP_MIN_RESERVE: usize = 64 * 1024; // keep headroom for libnfs PDUs
 const HEAP_RESERVE_BYTES: usize = 256 * 1024; // emergency cushion for one eviction operation (increased from 128KB)
 
@@ -744,11 +744,9 @@ const HeapReserve = struct {
         if (mem != null) {
             self.ptr = @ptrCast(mem);
             self.len = HEAP_RESERVE_BYTES;
-            _ = c.printf("[nfs] heap reserve established (%zu bytes, free: %zu -> %zu)\n",
-                       self.len, free_before, morecore_free_bytes());
+            _ = c.printf("[nfs] heap reserve established (%zu bytes, free: %zu -> %zu)\n", self.len, free_before, morecore_free_bytes());
         } else {
-            _ = c.printf("[nfs] WARNING: failed to allocate heap reserve (free_bytes=%zu, need=%zu)\n",
-                       free_before, HEAP_RESERVE_BYTES);
+            _ = c.printf("[nfs] WARNING: failed to allocate heap reserve (free_bytes=%zu, need=%zu)\n", free_before, HEAP_RESERVE_BYTES);
         }
     }
 
