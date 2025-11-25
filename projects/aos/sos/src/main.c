@@ -70,6 +70,7 @@ extern void worker_init(seL4_CPtr delegate_ep, seL4_CPtr work_ntfn);
 
 /* Import Zig NFS handler init */
 extern void nfs_handler_init(void);
+extern void nfs_handler_enter_syscall_loop(void);
 
 /* Poll asynchronous file operations */
 extern void checkCompletedFileOps(void);
@@ -917,8 +918,6 @@ NORETURN void *main_continued(UNUSED void *arg) {
   init_threads(ipc_ep, ipc_ep, sched_ctrl_start, sched_ctrl_end);
 #endif /* CONFIG_SOS_GDB_ENABLED */
 
-  frame_table_init(&cspace, seL4_CapInitThreadVSpace);
-
   /* Map the timer device (NOTE: this is the same mapping you will use for
    * your timer driver - sos uses the watchdog timers on this page to
    * implement reset infrastructure & network ticks, so touching the watchdog
@@ -931,9 +930,13 @@ NORETURN void *main_continued(UNUSED void *arg) {
   network_init(&cspace, timer_vaddr, ntfn);
   sos_nc = network_console_init();
 
-  /* Initialise NFS handler pool */
+  /* Initialise NFS handler pool BEFORE frame table to ensure untyped memory
+   * is available for notification object allocation */
   printf("NFS handler init\n");
   nfs_handler_init();
+
+  /* Initialise frame table AFTER NFS handler to avoid exhausting untyped memory */
+  frame_table_init(&cspace, seL4_CapInitThreadVSpace);
 
   /* Initialise worker thread infrastructure */
   printf("Worker init\n");
@@ -1015,15 +1018,21 @@ NORETURN void *main_continued(UNUSED void *arg) {
   ZF_LOGF_IF(init_irq_err != 0, "Failed to initialise timeout IRQ");
   seL4_IRQHandler_Ack(timeout_irq_handler);
 
-  /* Start the user application */
-  printf("Start first process\n");
-  bool success = start_first_process(APP_NAME, ipc_ep);
-  ZF_LOGF_IF(!success, "Failed to start first process");
-
   /* Initialise continuation pool allocator */
   continuation_bootstrap();
 
   printf("\nSOS entering syscall loop\n");
+
+  /* Enable notification-based blocking in NFS handler now that we're processing IRQs */
+  nfs_handler_enter_syscall_loop();
+
+  /* Start the user application - AFTER nfs_handler_enter_syscall_loop() to ensure
+   * NFS operations can complete via IRQ-driven callbacks if frame eviction occurs
+   * during process startup (stack/IPC buffer/ELF segment allocation). */
+  printf("Start first process\n");
+  bool success = start_first_process(APP_NAME, ipc_ep);
+  ZF_LOGF_IF(!success, "Failed to start first process");
+
   syscall_loop(ipc_ep);
 }
 /*

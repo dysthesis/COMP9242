@@ -643,6 +643,11 @@ pub const KernelFileHandle = struct {
         return nfs_handler.preadSync(self.nfs_fh, buf.ptr, offset, buf.len);
     }
 
+    /// Positioned write to kernel file handle.
+    pub fn pwrite(self: KernelFileHandle, buf: []const u8, offset: usize) !usize {
+        return nfs_handler.pwriteSync(self.nfs_fh, buf.ptr, offset, buf.len);
+    }
+
     /// Seek within kernel file handle.
     pub fn lseek(self: KernelFileHandle, offset: i64, whence: c_int) !u64 {
         return nfs_handler.lseekSync(self.nfs_fh, offset, whence);

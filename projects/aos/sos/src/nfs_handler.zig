@@ -45,6 +45,9 @@ pub const PoolSlot = struct {
     start_time: u64,
     timeout_ms: u32,
 
+    // Notification for blocking wait (seL4_CapNull if not allocated)
+    ntfn: sel4.seL4_CPtr,
+
     pub fn init() PoolSlot {
         return PoolSlot{
             .used = false,
@@ -57,6 +60,7 @@ pub const PoolSlot = struct {
             .seek_value = 0,
             .start_time = 0,
             .timeout_ms = NFS_TIMEOUT_MS,
+            .ntfn = sel4.seL4_CapNull,
         };
     }
 
@@ -121,39 +125,46 @@ pub const NfsPool = struct {
     }
 
     /// Wait for async operation to complete
-    /// NOTE: This runs in the worker context, so it MUST NOT block on seL4_Wait.
-    /// Instead, it actively polls the network stack until the operation completes.
+    /// Blocks on seL4 notification until main thread's IRQ handler signals completion.
+    /// FATAL if notification is not allocated - system cannot proceed without proper synchronization.
     pub fn wait(slot: *PoolSlot) i32 {
-        _ = c.printf("[nfs_pool] wait: entering active poll loop for slot=%p\n", slot);
-        var poll_count: u32 = 0;
-        while (!@atomicLoad(bool, &slot.async_finish, .acquire)) {
-            const elapsed = getCurrentTimeMs() - slot.start_time;
-            // if (elapsed > slot.timeout_ms) {
-            //     _ = c.printf("[nfs_pool] TIMEOUT after %lums\n", elapsed);
-            //     return -@as(i32, @intCast(sos.EIO));
-            // }
-
-            // Actively service the network stack to process NFS responses
-            // without blocking the syscall loop
-            zig_seL4_Yield_bridge();
-            nfsServicePoll(c.POLLIN | c.POLLOUT);
-            if (poll_count < 8 or (poll_count & 0x3fff) == 0) {
-                _ = c.printf("[nfs_pool] poll iter=%u elapsed=%lums\n", poll_count, elapsed);
-            }
-
-            poll_count += 1;
-            if (poll_count % 10000 == 0) {
-                _ = c.printf("[nfs_pool] wait: still polling slot=%p count=%u elapsed=%lums\n", slot, poll_count, elapsed);
-            }
+        // Verify notification was allocated during initialization
+        if (slot.ntfn == sel4.seL4_CapNull) {
+            _ = c.printf("[nfs_pool] FATAL: Notification not allocated for slot=%p\n", slot);
+            _ = c.printf("[nfs_pool] FATAL: Cannot proceed - NFS operations require notification-based synchronization\n");
+            _ = c.printf("[nfs_pool] FATAL: This indicates untyped memory exhaustion during initialization\n");
+            return -@as(i32, @intCast(sos.EIO));
         }
 
-        _ = c.printf("[nfs_pool] wait: completed slot=%p status=%d after %u polls\n", slot, slot.status, poll_count);
+        // Verify we're in syscall loop (main thread processing IRQs)
+        // NOTE: This is almost certainly our culprit! But if this is commented
+        // out, it gives rc -11 instead
+        if (!in_syscall_loop) {
+            _ = c.printf("[nfs_pool] FATAL: NFS operation attempted before syscall loop entry\n");
+            _ = c.printf("[nfs_pool] FATAL: nfs_handler_enter_syscall_loop() must be called first\n");
+            return -@as(i32, @intCast(sos.EIO));
+        }
+
+        _ = c.printf("[nfs_pool] wait: blocking on notification ntfn=%lu for slot=%p\n", slot.ntfn, slot);
+
+        // Block until callback signals the notification
+        // Main thread's network IRQ handler will process NFS events and signal us
+        while (!@atomicLoad(bool, &slot.async_finish, .acquire)) {
+            _ = sel4.seL4_Wait(slot.ntfn, null);
+            // Loop handles spurious wakeups - recheck async_finish after each signal
+        }
+
+        _ = c.printf("[nfs_pool] wait: completed via notification, slot=%p status=%d\n", slot, slot.status);
         return slot.status;
     }
 };
 
 var nfs_pool: NfsPool = undefined;
 var pool_initialised: bool = false;
+
+// Track whether main thread is in syscall_loop and processing IRQs
+// During bootstrap (false), NFS operations must busy-poll to avoid deadlock
+var in_syscall_loop: bool = false;
 
 pub fn init() void {
     if (pool_initialised) return;
@@ -170,9 +181,37 @@ pub fn init() void {
     }
 
     nfs_pool = NfsPool.init();
+
+    // Allocate notification objects for each pool slot to enable proper blocking
+    // CRITICAL: All notifications must be allocated successfully for NFS operations to work
+    var allocated_count: usize = 0;
+    for (&nfs_pool.slots, 0..) |*slot, idx| {
+        const ntfn_ut = sos.alloc_retype(&slot.ntfn, sel4.seL4_NotificationObject, sel4.seL4_NotificationBits);
+        if (ntfn_ut != null) {
+            allocated_count += 1;
+            _ = c.printf("[nfs_handler] Allocated notification %lu for slot %zu\n", slot.ntfn, idx);
+        } else {
+            // FATAL: Cannot proceed without notifications
+            _ = c.printf("[nfs_handler] FATAL: Failed to allocate notification for slot %zu\n", idx);
+            _ = c.printf("[nfs_handler] FATAL: Untyped memory exhausted - cannot allocate seL4 notification objects\n");
+            _ = c.printf("[nfs_handler] FATAL: Successfully allocated %zu/%u notifications before failure\n", allocated_count, @as(c_uint, NFS_POOL_SIZE));
+            _ = c.printf("[nfs_handler] FATAL: NFS operations require notifications for proper synchronization\n");
+            _ = c.printf("[nfs_handler] HINT: Ensure nfs_handler_init() is called BEFORE frame_table_init()\n");
+            @panic("nfs_handler_init: notification allocation failed - untyped memory exhausted");
+        }
+    }
+
     pool_initialised = true;
 
-    _ = c.printf("[nfs_handler] Pool initialised with %u slots\n", @as(c_uint, NFS_POOL_SIZE));
+    _ = c.printf("[nfs_handler] Pool initialised successfully: %u slots, %zu notifications allocated\n", @as(c_uint, NFS_POOL_SIZE), allocated_count);
+    _ = c.printf("[nfs_handler] All NFS pool slots have proper notification-based synchronization\n");
+}
+
+/// Signal that main thread has entered syscall_loop and is processing IRQs
+/// Must be called from main.c before entering syscall_loop to enable notification-based blocking
+pub export fn nfs_handler_enter_syscall_loop() callconv(.c) void {
+    in_syscall_loop = true;
+    _ = c.printf("[nfs_handler] Main thread entered syscall_loop - notification blocking enabled\n");
 }
 
 /// C-callable init
@@ -323,8 +362,12 @@ pub export fn nfsGenericCallbackZig(
     }
 
     // Signal completion to worker thread via atomic flag
-    // The wait loop actively polls this flag instead of blocking on a notification
     @atomicStore(bool, &slot.async_finish, true, .release);
+
+    // If notification is allocated, signal it to wake up the waiting thread
+    if (slot.ntfn != sel4.seL4_CapNull) {
+        sel4.seL4_Signal(slot.ntfn);
+    }
 }
 
 extern fn nfs_callback_c_bridge(err: c_int, nfs_ctx: ?*anyopaque, data: ?*anyopaque, private_data: ?*anyopaque) void;
@@ -497,6 +540,70 @@ pub fn writeSync(fh: *anyopaque, buf: [*]const u8, count: usize) !usize {
             noteEnomemWrite();
             return error.OutOfMemory;
         }
+        return error.OperationFailed;
+    }
+
+    return @intCast(status);
+}
+
+/// Write to file at specific offset synchronously (positioned write)
+pub fn pwriteSync(fh: *anyopaque, buf: [*]const u8, offset: usize, count: usize) !usize {
+    const nfs_ctx = get_nfs_context() orelse return error.NoNFSContext;
+    var released_reserve = false;
+    if (morecore_free_bytes() <= NFS_HEAP_MIN_RESERVE) {
+        released_reserve = heap_reserve.release();
+        if (!released_reserve) {
+            _ = c.printf("[nfs] pwriteSync: reserve unavailable, proceeding without cushion (free_bytes=%zu)\n", morecore_free_bytes());
+        }
+    }
+    defer {
+        if (released_reserve) {
+            heap_reserve.ensure();
+        }
+        // Self-healing: re-establish reserve if memory recovered and reserve is absent
+        if (!released_reserve and heap_reserve.ptr == null and morecore_free_bytes() > NFS_HEAP_MIN_RESERVE + HEAP_RESERVE_BYTES) {
+            _ = c.printf("[nfs] pwriteSync: self-healing reserve (free_bytes=%zu)\n", morecore_free_bytes());
+            heap_reserve.ensure();
+        }
+    }
+    const slot = nfs_pool.acquire() orelse return error.PoolExhausted; // NOTE: This seems to be the error being triggered by workerPageOut (rc -11)
+    defer nfs_pool.release(slot);
+
+    slot.operation = .Write;
+    slot.read_buf = null;
+    slot.stat_out = null;
+
+    const fh_typed: *nfsfh = @ptrCast(@alignCast(fh));
+    const rc = nfs_pwrite_async(
+        nfs_ctx,
+        fh_typed,
+        @intCast(offset),
+        count,
+        buf,
+        nfs_callback_c_bridge,
+        @as(?*anyopaque, @ptrCast(slot)),
+    ); // NOTE: This might be the culprit (this is a libnfs internal)
+    if (rc < 0) {
+        _ = c.printf("[nfs] nfs_pwrite_async failed: %d\n", rc);
+        if (rc == -sos.ENOMEM) {
+            noteEnomemWrite();
+            return error.OutOfMemory;
+        }
+
+        // NOTE: This is the error that is probably caused by a lack of or incorrect calling of
+        // nfs_handler_enter_syscall_loop()
+        return error.NFSOperationFailed;
+    }
+
+    const status = NfsPool.wait(slot); // NOTE: This might be the culprit
+    if (status < 0) {
+        if (status == -@as(i32, @intCast(sos.ENOMEM))) {
+            noteEnomemWrite();
+            return error.OutOfMemory;
+        }
+
+        // NOTE: This is the error that is probably caused by a lack of or incorrect calling of
+        // nfs_handler_enter_syscall_loop()
         return error.OperationFailed;
     }
 
@@ -688,6 +795,7 @@ extern fn nfs_is_mounted() bool;
 extern fn nfs_open2_async(nfs_ctx: ?*nfs_context, path: [*:0]const u8, flags: c_int, mode: c_int, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_read_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, count: u64, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_pread_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, offset: u64, count: u64, cb: nfs_cb, private_data: ?*anyopaque) c_int;
+extern fn nfs_pwrite_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, offset: u64, count: u64, buf: [*]const u8, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_write_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, count: u64, buf: [*]const u8, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_close_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, cb: nfs_cb, private_data: ?*anyopaque) c_int;
 extern fn nfs_lseek_async(nfs_ctx: ?*nfs_context, fh: ?*nfsfh, offset: i64, whence: c_int, cb: nfs_cb, private_data: ?*anyopaque) c_int;
