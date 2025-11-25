@@ -704,7 +704,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
   err = seL4_SchedControl_Configure(
       sched_ctrl_start, user_process.sched_context, US_IN_MS, US_IN_MS, 0, 0);
   if (err != seL4_NoError) {
-    ZF_LOGE("Unable to configure scheduling context");
+    ZF_LOGE("Unable to configure scheduling context err=%ld", err);
     goto out;
   }
 
@@ -1039,6 +1039,11 @@ int main(void) {
   seL4_BootInfo *boot_info = sel4runtime_bootinfo();
 
   debug_print_bootinfo(boot_info);
+
+  /* Fatal if we booted a non-MCS kernel: sched contexts are mandatory. */
+  if (boot_info->schedcontrol.start >= boot_info->schedcontrol.end) {
+    ZF_LOGF("No schedcontrol caps in BootInfo; kernel not built with MCS or image mismatch");
+  }
 
   printf("\nSOS Starting...\n");
 

@@ -261,6 +261,9 @@ void frame_table_init(cspace_t *cspace, seL4_CPtr vspace) {
 cspace_t *frame_table_cspace(void) { return frame_table.cspace; }
 
 frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
+  /* Keep a small reserve for kernel/NFS so eviction progress is possible. */
+  const size_t reserve = 8;
+
   frame_t *frame = pop_front(&frame_table.free);
 
   /* Bounded retry budget for eviction-backed allocation in case of transient
@@ -277,7 +280,9 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
         evict_attempts++;
         continue; /* try another victim */
       }
-      frame = pop_front(&frame_table.free);
+      if (frame_table.free.length > reserve || owner == FRAME_OWNER_KERNEL) {
+        frame = pop_front(&frame_table.free);
+      }
     } else {
       ZF_LOGE("alloc_frame: eviction attempt failed (clock_len=%lu)", frame_table.clock.length);
       break;
@@ -304,7 +309,9 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
           evict_attempts++;
           continue;
         }
-        frame = pop_front(&frame_table.free);
+        if (frame_table.free.length > reserve || owner == FRAME_OWNER_KERNEL) {
+          frame = pop_front(&frame_table.free);
+        }
       } else {
         ZF_LOGE("alloc_frame: eviction attempt failed (clock_len=%lu)", frame_table.clock.length);
         break;
