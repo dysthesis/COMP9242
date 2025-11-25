@@ -279,6 +279,10 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
       frame_table.free.length <= low_watermark && frame_table.clock.length > 0) {
     size_t evict_budget = low_watermark - frame_table.free.length + 1;
     while (evict_budget-- > 0 && frame_table.free.length <= low_watermark) {
+      if (frame_table.free.length <= reserve) {
+        ZF_LOGE("alloc_frame: skipping eviction (free_len=%lu <= reserve=%zu)", frame_table.free.length, reserve);
+        break;
+      }
       if (evict_one_frame() != 0) {
         break;
       }

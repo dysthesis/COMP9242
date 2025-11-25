@@ -133,7 +133,12 @@ pub const NfsPool = struct {
 
             // Actively service the network stack to process NFS responses
             // without blocking the syscall loop
+            zig_seL4_Yield_bridge();
             nfsServicePoll(c.POLLIN | c.POLLOUT);
+            if (poll_count < 8 or (poll_count & 0x3fff) == 0) {
+                _ = c.printf("[nfs_pool] poll iter=%u elapsed=%lums\n",
+                    poll_count, elapsed);
+            }
 
             poll_count += 1;
             if (poll_count % 10000 == 0) {
@@ -617,6 +622,8 @@ const c = cimports.c;
 const sos = cimports.sos;
 const sos_types = cimports.sos_types;
 const std = @import("std");
+
+extern fn zig_seL4_Yield_bridge() void;
 
 const nfs_context = opaque {};
 const nfsfh = opaque {};
