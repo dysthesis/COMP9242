@@ -396,11 +396,19 @@ pub fn preadSync(fh: *anyopaque, buf: [*]u8, offset: usize, count: usize) !usize
     if (morecore_free_bytes() <= NFS_HEAP_MIN_RESERVE) {
         released_reserve = heap_reserve.release();
         if (!released_reserve) {
-            noteEnomemPread();
-            return error.OutOfMemory;
+            _ = c.printf("[nfs] preadSync: reserve unavailable, proceeding without cushion (free_bytes=%zu)\n", morecore_free_bytes());
         }
     }
-    defer if (released_reserve) heap_reserve.ensure();
+    defer {
+        if (released_reserve) {
+            heap_reserve.ensure();
+        }
+        // Self-healing: re-establish reserve if memory recovered and reserve is absent
+        if (!released_reserve and heap_reserve.ptr == null and morecore_free_bytes() > NFS_HEAP_MIN_RESERVE + HEAP_RESERVE_BYTES) {
+            _ = c.printf("[nfs] preadSync: self-healing reserve (free_bytes=%zu)\n", morecore_free_bytes());
+            heap_reserve.ensure();
+        }
+    }
     const slot = nfs_pool.acquire() orelse return error.PoolExhausted;
     defer nfs_pool.release(slot);
 
@@ -445,11 +453,19 @@ pub fn writeSync(fh: *anyopaque, buf: [*]const u8, count: usize) !usize {
     if (morecore_free_bytes() <= NFS_HEAP_MIN_RESERVE) {
         released_reserve = heap_reserve.release();
         if (!released_reserve) {
-            noteEnomemWrite();
-            return error.OutOfMemory;
+            _ = c.printf("[nfs] writeSync: reserve unavailable, proceeding without cushion (free_bytes=%zu)\n", morecore_free_bytes());
         }
     }
-    defer if (released_reserve) heap_reserve.ensure();
+    defer {
+        if (released_reserve) {
+            heap_reserve.ensure();
+        }
+        // Self-healing: re-establish reserve if memory recovered and reserve is absent
+        if (!released_reserve and heap_reserve.ptr == null and morecore_free_bytes() > NFS_HEAP_MIN_RESERVE + HEAP_RESERVE_BYTES) {
+            _ = c.printf("[nfs] writeSync: self-healing reserve (free_bytes=%zu)\n", morecore_free_bytes());
+            heap_reserve.ensure();
+        }
+    }
     const slot = nfs_pool.acquire() orelse return error.PoolExhausted;
     defer nfs_pool.release(slot);
 
@@ -723,13 +739,16 @@ const HeapReserve = struct {
         self.lock();
         defer self.unlock();
         if (self.ptr != null) return;
+        const free_before = morecore_free_bytes();
         const mem = sos.malloc(HEAP_RESERVE_BYTES);
         if (mem != null) {
             self.ptr = @ptrCast(mem);
             self.len = HEAP_RESERVE_BYTES;
-            _ = c.printf("[nfs] heap reserve established (%zu bytes)\n", self.len);
+            _ = c.printf("[nfs] heap reserve established (%zu bytes, free: %zu -> %zu)\n",
+                       self.len, free_before, morecore_free_bytes());
         } else {
-            _ = c.printf("[nfs] WARNING: failed to allocate heap reserve\n");
+            _ = c.printf("[nfs] WARNING: failed to allocate heap reserve (free_bytes=%zu, need=%zu)\n",
+                       free_before, HEAP_RESERVE_BYTES);
         }
     }
 

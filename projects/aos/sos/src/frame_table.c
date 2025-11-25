@@ -16,6 +16,7 @@
 #include "vmem_layout.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <sel4/sel4.h>
 #include <sos/gen_config.h>
 #include <stdbool.h>
@@ -305,6 +306,12 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
   /* Prefer eviction (if available) before minting new frames to avoid ut exhaustion. */
   int evict_attempts = 0;
   while (frame == NULL && pagefile_is_ready() && evict_attempts < max_evict_retries) {
+    /* Enforce reserve: user allocations must not consume kernel/NFS reserve */
+    if (owner != FRAME_OWNER_KERNEL && frame_table.free.length <= reserve) {
+      ZF_LOGE("alloc_frame: user allocation blocked by reserve (free_len=%lu <= reserve=%zu)",
+              frame_table.free.length, reserve);
+      break;
+    }
     if (evict_one_frame() == 0) {
       int rc = pageout_wait_blocking();
       if (rc != 0) {
@@ -334,6 +341,12 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
     /* Attempt synchronous eviction to free a frame (bounded retries) */
     evict_attempts = 0;
     while (frame == NULL && pagefile_is_ready() && evict_attempts < max_evict_retries) {
+      /* Enforce reserve: user allocations must not consume kernel/NFS reserve */
+      if (owner != FRAME_OWNER_KERNEL && frame_table.free.length <= reserve) {
+        ZF_LOGE("alloc_frame: final user allocation blocked by reserve (free_len=%lu <= reserve=%zu)",
+                frame_table.free.length, reserve);
+        break;
+      }
       if (evict_one_frame() == 0) {
         int rc = pageout_wait_blocking();
         if (rc != 0) {
@@ -352,8 +365,8 @@ frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
   }
 
   if (frame == NULL) {
-    ZF_LOGE("alloc_frame: failed (pagefile_ready=%d free_len=%lu clock_len=%lu)",
-            pagefile_is_ready(), frame_table.free.length, frame_table.clock.length);
+    ZF_LOGE("alloc_frame: failed (owner=%d pagefile_ready=%d free_len=%lu clock_len=%lu reserve=%zu)",
+            owner, pagefile_is_ready(), frame_table.free.length, frame_table.clock.length, reserve);
   }
 
   if (frame != NULL) {
@@ -630,9 +643,14 @@ static int pageout_wait_for_completion(size_t max_iters) {
   return -SOS_EAGAIN;
 }
 
-/* Block until at least one page-out completion is processed or an error occurs. */
+/* Block until at least one page-out completion is processed or an error occurs.
+ * Bounded retry: if ENOMEM persists for max_enomem_retries consecutive polls,
+ * propagate the error to avoid infinite spinning. */
 static int pageout_wait_blocking(void) {
   static size_t pwb_log_count = 0;
+  const int max_enomem_retries = 128;
+  int enomem_count = 0;
+
   if (pwb_log_count < 32) {
     ZF_LOGE("pageout_wait_blocking: enter");
     pwb_log_count++;
@@ -647,12 +665,22 @@ static int pageout_wait_blocking(void) {
       return 0;
     }
     if (rc != -SOS_EAGAIN) {
-      if (pwb_log_count < 64) {
-        ZF_LOGE("pageout_wait_blocking: error rc=%d free_bytes=%zu free_len=%lu clock_len=%lu",
-                rc, morecore_free_bytes(), frame_table.free.length, frame_table.clock.length);
-        pwb_log_count++;
+      if (rc == -ENOMEM) {
+        enomem_count++;
+        if (enomem_count >= max_enomem_retries) {
+          ZF_LOGE("pageout_wait_blocking: ENOMEM retry budget exhausted (%d attempts), propagating fatal error",
+                  enomem_count);
+          return rc;
+        }
+      } else {
+        /* Non-ENOMEM error: propagate immediately */
+        if (pwb_log_count < 64) {
+          ZF_LOGE("pageout_wait_blocking: error rc=%d free_bytes=%zu free_len=%lu clock_len=%lu",
+                  rc, morecore_free_bytes(), frame_table.free.length, frame_table.clock.length);
+          pwb_log_count++;
+        }
+        return rc;
       }
-      return rc;
     }
     seL4_Yield();
   }
