@@ -262,9 +262,36 @@ cspace_t *frame_table_cspace(void) { return frame_table.cspace; }
 
 frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags) {
   /* Keep a small reserve for kernel/NFS so eviction progress is possible. */
-  const size_t reserve = 8;
+  const size_t reserve = 16;
+  /* Proactive reclamation threshold to avoid entering a no-free-frame state
+   * where libnfs cannot allocate encode buffers. */
+  const size_t low_watermark = 96;
 
-  frame_t *frame = pop_front(&frame_table.free);
+  /* Do not consume the reserve for user allocations; kernel may dip into it. */
+  frame_t *frame = NULL;
+  if (owner == FRAME_OWNER_KERNEL || frame_table.free.length > reserve) {
+    frame = pop_front(&frame_table.free);
+  }
+
+  /* If we're getting close to the low watermark and paging is available,
+   * evict a small batch before we run completely dry. */
+  if (frame == NULL && pagefile_is_ready() &&
+      frame_table.free.length <= low_watermark && frame_table.clock.length > 0) {
+    size_t evict_budget = low_watermark - frame_table.free.length + 1;
+    while (evict_budget-- > 0 && frame_table.free.length <= low_watermark) {
+      if (evict_one_frame() != 0) {
+        break;
+      }
+      int rc = pageout_wait_blocking();
+      if (rc != 0) {
+        ZF_LOGE("alloc_frame: proactive pageout rc=%d", rc);
+        break;
+      }
+    }
+    if (owner == FRAME_OWNER_KERNEL || frame_table.free.length > reserve) {
+      frame = pop_front(&frame_table.free);
+    }
+  }
 
   /* Bounded retry budget for eviction-backed allocation in case of transient
    * pagefile I/O failures. */

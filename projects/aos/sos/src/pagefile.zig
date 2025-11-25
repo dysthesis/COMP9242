@@ -667,8 +667,14 @@ pub export fn pagefile_write_slot(slot: u32, buf: [*]const u8, len: usize) callc
         return -sos.EIO;
     };
 
-    const bytes_written = state.file_handle.write(buf[0..PAGE_SIZE]) catch {
-        return -sos.EIO;
+    const bytes_written = state.file_handle.write(buf[0..PAGE_SIZE]) catch |err| {
+        // Preserve errno semantics so callers can distinguish ENOMEM from I/O faults.
+        return switch (err) {
+            error.OutOfMemory => -sos.ENOMEM,
+            error.PoolExhausted => -sos.EAGAIN,
+            error.NoNFSContext => -sos.ENODEV,
+            error.NFSOperationFailed, error.OperationFailed => -sos.EIO,
+        };
     };
 
     if (bytes_written != PAGE_SIZE) {

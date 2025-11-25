@@ -434,11 +434,17 @@ pub fn writeSync(fh: *anyopaque, buf: [*]const u8, count: usize) !usize {
     );
     if (rc < 0) {
         _ = c.printf("[nfs] nfs_write_async failed: %d\n", rc);
+        if (rc == -sos.ENOMEM) {
+            return error.OutOfMemory;
+        }
         return error.NFSOperationFailed;
     }
 
     const status = NfsPool.wait(slot);
     if (status < 0) {
+        if (status == -@as(i32, @intCast(sos.ENOMEM))) {
+            return error.OutOfMemory;
+        }
         return error.OperationFailed;
     }
 
