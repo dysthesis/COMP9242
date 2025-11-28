@@ -13,6 +13,10 @@ pub const Client = struct {
     heap_region: region.Region = .{},
     stack_region: region.Region = .{},
 
+    // ELF segment regions (PT_LOAD segments from ELF loading)
+    elf_regions: [MAX_ELF_REGIONS]region.Region = [_]region.Region{.{}} ** MAX_ELF_REGIONS,
+    elf_region_count: usize = 0,
+
     metadata_allocator: allocator.MetadataAllocator = allocator.MetadataAllocator{},
     metadata_alloc_handle: std.mem.Allocator = undefined,
     metadata_base: usize = 0,
@@ -499,6 +503,27 @@ pub const Client = struct {
         }
         return null;
     }
+
+    pub fn addElfRegion(self: *Self, start: usize, end: usize, prot: c_int) super.VmError!void {
+        if (self.elf_region_count >= MAX_ELF_REGIONS) {
+            _ = c.printf("[vm_elf] too many ELF regions (max=%lu)\n", @as(c_ulong, @intCast(MAX_ELF_REGIONS)));
+            return super.VmError.Capacity;
+        }
+
+        if (start >= end) {
+            _ = c.printf("[vm_elf] invalid region bounds [0x%lx, 0x%lx)\n", @as(c_ulong, @intCast(start)), @as(c_ulong, @intCast(end)));
+            return super.VmError.InvalidArgs;
+        }
+
+        const idx = self.elf_region_count;
+        self.elf_regions[idx].reset(region.RegionKind.Normal);
+        self.elf_regions[idx].configure(start, region.RegionKind.Normal, prot);
+        self.elf_regions[idx].start = start;
+        self.elf_regions[idx].end = end;
+        self.elf_region_count += 1;
+
+        _ = c.printf("[vm_elf] created region %lu: [0x%lx, 0x%lx) prot=%d\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(start)), @as(c_ulong, @intCast(end)), prot);
+    }
 };
 
 pub const AddrSpace = @import("addr_space.zig").AddrSpace;
@@ -522,3 +547,7 @@ const nfs_handler = @import("../nfs_handler.zig");
 extern fn sos_metadata_base_runtime() usize;
 
 extern var cspace: sos.cspace_t;
+
+/// Maximum number of ELF regions (PT_LOAD segments) per process
+/// Typical ELF binaries have 2-4 loadable segments
+pub const MAX_ELF_REGIONS: usize = 8;

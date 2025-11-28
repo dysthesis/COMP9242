@@ -412,6 +412,19 @@ pub export fn vm_reset_state(vm_handle: *VmHandle) callconv(.c) void {
     vm_handle.reset();
 }
 
+pub export fn vm_add_elf_region(
+    vm_handle: *VmHandle,
+    start: usize,
+    end: usize,
+    prot: c_int,
+) callconv(.c) c_int {
+    const state = vm_handle.ensureVmState();
+    state.addElfRegion(start, end, prot) catch |err| {
+        return -vmErrorToErrno(err);
+    };
+    return 0;
+}
+
 pub const VmFaultResult = enum(c_int) {
     handled = 0,
     deferred = 1,

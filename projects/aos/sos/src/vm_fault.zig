@@ -180,6 +180,26 @@ fn tryDeferPager(
 }
 
 fn findPagerRegion(state: *vm.client.Client, page_base: usize) ?*region.Region {
+    // Check heap region by bounds
+    const heap = &state.heap_region;
+    if (heap.start > 0 and heap.start <= page_base and page_base < heap.end) {
+        return heap;
+    }
+
+    // Check stack region by bounds
+    const stack = &state.stack_region;
+    if (stack.start > 0 and stack.start <= page_base and page_base < stack.end) {
+        return stack;
+    }
+
+    // Check ELF regions by bounds
+    for (state.elf_regions[0..state.elf_region_count]) |*elf_region| {
+        if (elf_region.start <= page_base and page_base < elf_region.end) {
+            return elf_region;
+        }
+    }
+
+    // Check mmap regions via RB-tree
     return state.findMmapRegion(page_base);
 }
 

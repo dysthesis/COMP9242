@@ -35,6 +35,9 @@ uint8_t *vm_get_user_page_data(struct vm_handle *handle, uintptr_t user_vaddr);
 
 void vm_reset_state(struct vm_handle *handle);
 
+int vm_add_elf_region(struct vm_handle *handle, uintptr_t start, uintptr_t end,
+                      int prot);
+
 vm_fault_result_t handle_vm_fault(struct vm_handle *handle, seL4_Word badge,
                                   const seL4_MessageInfo_t *message,
                                   bool *have_reply, seL4_CPtr *reply,

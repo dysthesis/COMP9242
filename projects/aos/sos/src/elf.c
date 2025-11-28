@@ -17,6 +17,7 @@
 #include <assert.h>
 #include <cspace/cspace.h>
 #include <errno.h>
+#include <sys/mman.h>
 
 #include "frame_table.h"
 #include "ut.h"
@@ -78,6 +79,24 @@ static int load_segment_into_vspace(cspace_t *cspace, seL4_CPtr loadee, const ch
                                     struct vm_handle *vm_handle, unsigned long elf_flags)
 {
     assert(file_size <= segment_size);
+
+    /* Create ELF region for this segment if using VM subsystem */
+    if (vm_handle != NULL) {
+        uintptr_t segment_start = ROUND_DOWN(dst, PAGE_SIZE_4K);
+        uintptr_t segment_end = ROUND_UP(dst + segment_size, PAGE_SIZE_4K);
+
+        int prot = 0;
+        if (elf_flags & PF_R) prot |= PROT_READ;
+        if (elf_flags & PF_W) prot |= PROT_WRITE;
+        if (elf_flags & PF_X) prot |= PROT_EXEC;
+
+        int region_err = vm_add_elf_region(vm_handle, segment_start, segment_end, prot);
+        if (region_err < 0) {
+            ZF_LOGE("Failed to create ELF region [%p, %p) prot=%d errno=%d",
+                (void*)segment_start, (void*)segment_end, prot, -region_err);
+            return -1;
+        }
+    }
 
     /* We work a page at a time in the destination vspace. */
     unsigned int pos = 0;
