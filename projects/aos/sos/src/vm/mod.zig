@@ -160,8 +160,20 @@ pub export fn vm_pageout_finalise(frame_ref: usize, slot: u32) callconv(.c) c_in
                 continue;
             }
 
-            if (page_entry.pagefile_slot >= 0) {
-                // Already has a backing slot; do not allow double assignment.
+            // Handle slot assignment based on current page state:
+            // - PAGEOUT_PENDING: slot already set by vm_pageout_prepare, verify it matches
+            // - RESIDENT: slot should be unassigned, set it now
+            const was_already_pending = page_entry.state == page.PageState.PAGEOUT_PENDING;
+            if (was_already_pending) {
+                const slot_i32: i32 = @intCast(slot);
+                if (page_entry.pagefile_slot != slot_i32) {
+                    _ = c.printf("[vm_pageout_finalise] slot mismatch: expected=%d actual=%d\n", slot_i32, page_entry.pagefile_slot);
+                    return -sos.EINVAL;
+                }
+                // Slot already correct from vm_pageout_prepare
+            } else if (page_entry.pagefile_slot >= 0) {
+                // RESIDENT page with an existing backing slot should not happen
+                _ = c.printf("[vm_pageout_finalise] RESIDENT page already has backing slot=%d\n", page_entry.pagefile_slot);
                 return -sos.EBUSY;
             }
 
@@ -190,7 +202,10 @@ pub export fn vm_pageout_finalise(frame_ref: usize, slot: u32) callconv(.c) c_in
             page_entry.cap_slot = sel4.seL4_CapNull;
             page_entry.cap_owner = null;
             page_entry.owns_cap = false;
-            page_entry.pagefile_slot = @intCast(slot);
+            // Only set pagefile_slot if it wasn't already set by vm_pageout_prepare
+            if (!was_already_pending) {
+                page_entry.pagefile_slot = @intCast(slot);
+            }
             page_entry.dirty = false;
             page_entry.referenced = false;
             page_entry.transitionState(.SWAPPED);
