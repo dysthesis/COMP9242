@@ -124,6 +124,12 @@ pub const Client = struct {
         // any address covered by a declared RegionKind.Mmap.
         if (self.findMmapRegion(addr) != null) return true;
 
+        // any address covered by recorded ELF segments (text/data/bss).
+        // ELF regions are registered via vm_add_elf_region during exec setup.
+        for (self.elf_regions[0..self.elf_region_count]) |*elf_region| {
+            if (elf_region.start <= addr and addr < elf_region.end) return true;
+        }
+
         // everything else is out of policy.
         return false;
     }
