@@ -526,6 +526,10 @@ pub const Client = struct {
         self.elf_regions[idx].configure(start, region.RegionKind.Normal, prot);
         self.elf_regions[idx].start = start;
         self.elf_regions[idx].end = end;
+        // Mark as already mapped so pager lookups consider these ranges valid.
+        // ELF segments are populated eagerly by the loader; later faults (after eviction)
+        // must match these regions to pick permissions/backing.
+        self.elf_regions[idx].mapped = true;
         self.elf_region_count += 1;
 
         _ = c.printf("[vm_elf] created region %lu: [0x%lx, 0x%lx) prot=%d\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(start)), @as(c_ulong, @intCast(end)), prot);
