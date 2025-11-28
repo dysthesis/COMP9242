@@ -455,6 +455,14 @@ fn finalisePagerJob(idx: usize, meta: PagerJobMeta, errno: c_int) void {
     _ = c.printf("[pager] finalizePagerJob: page=0x%lx waiter_count=%u\n", @as(c_ulong, @intCast(meta.key.page_base)), @as(c_uint, waiter_count));
 
     const wait_head = meta.page.waiters.detachAll();
+
+    if (errno == sos.ENOMEM or errno == sos.E2BIG or errno == sos.EFAULT) {
+        _ = c.printf("[pager] FATAL error errno=%d, terminating client\n", errno);
+        // TODO: Implement process termination
+        // For now, just don't resume to prevent infinite loop
+        return;
+    }
+
     const head_ptr = if (wait_head) |h| @intFromPtr(h) else 0;
     _ = c.printf("[pager] finalizePagerJob: detached wait_head=0x%lx\n", @as(c_ulong, head_ptr));
 
