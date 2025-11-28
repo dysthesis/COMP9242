@@ -114,6 +114,8 @@ pub const NfsPool = struct {
             }
         }
 
+        // NOTE: This is probably the cause for workerPageOut erring with rc -11
+        // but the error message is not being triggered??
         _ = c.printf("[nfs_pool] ERROR: Pool exhausted (%u slots)\n", @as(c_uint, NFS_POOL_SIZE));
         return null;
     }
