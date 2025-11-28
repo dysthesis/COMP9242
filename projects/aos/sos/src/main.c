@@ -1049,6 +1049,12 @@ NORETURN void *main_continued(UNUSED void *arg) {
   /* Initialise continuation pool allocator */
   continuation_bootstrap();
 
+  /* Start the user application - BEFORE entering syscall loop to allow bootstrap
+   * IRQ polling to handle frame eviction during process startup. */
+  printf("Start first process\n");
+  bool success = start_first_process(APP_NAME, ipc_ep);
+  ZF_LOGF_IF(!success, "Failed to start first process");
+
   printf("\nSOS entering syscall loop\n");
 
   /* Clear bootstrap IRQ notification - syscall loop will handle IRQ processing from now on */
@@ -1056,13 +1062,6 @@ NORETURN void *main_continued(UNUSED void *arg) {
 
   /* Enable notification-based blocking in NFS handler now that we're processing IRQs */
   nfs_handler_enter_syscall_loop();
-
-  /* Start the user application - AFTER nfs_handler_enter_syscall_loop() to ensure
-   * NFS operations can complete via IRQ-driven callbacks if frame eviction occurs
-   * during process startup (stack/IPC buffer/ELF segment allocation). */
-  printf("Start first process\n");
-  bool success = start_first_process(APP_NAME, ipc_ep);
-  ZF_LOGF_IF(!success, "Failed to start first process");
 
   syscall_loop(ipc_ep);
 }
