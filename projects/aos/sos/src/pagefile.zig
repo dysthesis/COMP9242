@@ -651,10 +651,8 @@ pub export fn pagefile_write_slot(slot: u32, buf: [*]const u8, len: usize) callc
         // Preserve errno semantics so callers can distinguish ENOMEM from I/O faults.
         return switch (err) {
             error.OutOfMemory => -sos.ENOMEM,
-            error.PoolExhausted => -sos.EAGAIN, // NOTE: This seems to be the error being triggered by workerPageOut (rc -11)
+            error.PoolExhausted => -sos.EAGAIN,
             error.NoNFSContext => -sos.ENODEV,
-            // NOTE: This is the error that is probably caused by a lack of or incorrect calling of
-            // nfs_handler_enter_syscall_loop()
             error.NFSOperationFailed, error.OperationFailed => -sos.EIO,
         };
     };

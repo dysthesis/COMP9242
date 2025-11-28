@@ -99,6 +99,10 @@ extern void checkCompletedFileOps(void);
 /* Network console handle for SOS console output */
 struct network_console *sos_nc;
 
+/* Bootstrap IRQ notification - used by frame eviction during initialization
+ * to actively poll network IRQs before entering syscall loop */
+static seL4_CPtr bootstrap_irq_ntfn = seL4_CapNull;
+
 /*
  * A dummy starting syscall
  */
@@ -843,6 +847,26 @@ static void sos_ipc_init(seL4_CPtr *ipc_ep, seL4_CPtr *ntfn) {
 /* called by crt */
 seL4_CPtr get_seL4_CapInitThreadTCB(void) { return seL4_CapInitThreadTCB; }
 
+/* Bootstrap IRQ polling - used during initialization before syscall loop
+ * to drive NFS callbacks for frame eviction operations.
+ * Returns true if an IRQ was processed, false otherwise. */
+bool bootstrap_poll_irqs(void) {
+  if (bootstrap_irq_ntfn == seL4_CapNull) {
+    return false;
+  }
+
+  seL4_Word badge = 0;
+  seL4_Poll(bootstrap_irq_ntfn, &badge);
+
+  if (badge != 0) {
+    bool have_reply = false;
+    sos_handle_irq_notification(&badge, &have_reply);
+    return true;
+  }
+
+  return false;
+}
+
 /* tell muslc about our "syscalls", which will be called by muslc on invocations
  * to the c library */
 void init_muslc(void) {
@@ -902,6 +926,10 @@ NORETURN void *main_continued(UNUSED void *arg) {
   /* Initialise other system compenents here */
   seL4_CPtr ipc_ep, ntfn;
   sos_ipc_init(&ipc_ep, &ntfn);
+
+  /* Store notification handle for bootstrap IRQ polling during frame eviction */
+  bootstrap_irq_ntfn = ntfn;
+
   sos_init_irq_dispatch(&cspace, seL4_CapIRQControl, ntfn, IRQ_EP_BADGE,
                         IRQ_IDENT_BADGE_BITS);
 
@@ -1022,6 +1050,9 @@ NORETURN void *main_continued(UNUSED void *arg) {
   continuation_bootstrap();
 
   printf("\nSOS entering syscall loop\n");
+
+  /* Clear bootstrap IRQ notification - syscall loop will handle IRQ processing from now on */
+  bootstrap_irq_ntfn = seL4_CapNull;
 
   /* Enable notification-based blocking in NFS handler now that we're processing IRQs */
   nfs_handler_enter_syscall_loop();

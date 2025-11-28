@@ -96,6 +96,9 @@ static struct {
 /* Management of frame nodes */
 static frame_ref_t ref_from_frame(frame_t *frame);
 
+/* Bootstrap IRQ polling (from main.c) - used during initialization */
+extern bool bootstrap_poll_irqs(void);
+
 /* Management of frame list */
 static void push_front(frame_list_t *list, frame_t *frame);
 static void push_back(frame_list_t *list, frame_t *frame);
@@ -743,7 +746,14 @@ static int pageout_wait_blocking(void) {
         return rc;
       }
     }
-    seL4_Yield();
+
+    /* During bootstrap (before syscall loop), actively poll IRQs to drive NFS callbacks.
+     * This mirrors the pagefile_init wait pattern and allows worker thread NFS operations
+     * to complete even though the main thread isn't in syscall_loop yet.
+     * After syscall loop entry, bootstrap_poll_irqs() returns false and we just yield. */
+    if (!bootstrap_poll_irqs()) {
+      seL4_Yield();
+    }
   }
 }
 

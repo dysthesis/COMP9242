@@ -138,14 +138,11 @@ pub const NfsPool = struct {
             return -@as(i32, @intCast(sos.EIO));
         }
 
-        // Verify we're in syscall loop (main thread processing IRQs)
-        // NOTE: This is almost certainly our culprit! But if this is commented
-        // out, it gives rc -11 instead
+        // Bootstrap phase detection: before syscall loop, bootstrap_poll_irqs() in
+        // frame_table.c actively drives IRQ processing to allow NFS callbacks to complete.
+        // Log a warning for diagnostic purposes, but proceed with notification blocking.
         if (!in_syscall_loop) {
-            // _ = c.printf("[nfs_pool] FATAL: NFS operation attempted before syscall loop entry\n");
-            // _ = c.printf("[nfs_pool] FATAL: nfs_handler_enter_syscall_loop() must be called first\n");
-            // return -@as(i32, @intCast(sos.EIO));
-            nfs_handler_enter_syscall_loop();
+            _ = c.printf("[nfs_pool] WARNING: NFS operation before syscall loop - relying on bootstrap_poll_irqs()\n");
         }
 
         _ = c.printf("[nfs_pool] wait: blocking on notification ntfn=%lu for slot=%p\n", slot.ntfn, slot);
