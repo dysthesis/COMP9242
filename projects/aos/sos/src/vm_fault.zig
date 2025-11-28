@@ -446,26 +446,40 @@ fn installPagerResult(meta: PagerJobMeta, job_state: *worker.FileOpState) c_int 
 }
 
 fn finalisePagerJob(idx: usize, meta: PagerJobMeta, errno: c_int) void {
-    _ = c.printf("[pager] finalizePagerJob: idx=%zu errno=%d\n", idx, errno);
+    _ = c.printf("[pager] finalisePagerJob: idx=%zu errno=%d\n", idx, errno);
     const table = pager.global();
     _ = table.release(meta.key);
 
     // Check wait queue state before detaching
     const waiter_count = meta.page.waiters.count;
-    _ = c.printf("[pager] finalizePagerJob: page=0x%lx waiter_count=%u\n", @as(c_ulong, @intCast(meta.key.page_base)), @as(c_uint, waiter_count));
+    _ = c.printf("[pager] finalisePagerJob: page=0x%lx waiter_count=%u\n", @as(c_ulong, @intCast(meta.key.page_base)), @as(c_uint, waiter_count));
 
     const wait_head = meta.page.waiters.detachAll();
+    const head_ptr = if (wait_head) |h| @intFromPtr(h) else 0;
+    _ = c.printf("[pager] finalisePagerJob: detached wait_head=0x%lx\n", @as(c_ulong, head_ptr));
 
-    if (errno == sos.ENOMEM or errno == sos.E2BIG or errno == sos.EFAULT) {
-        _ = c.printf("[pager] FATAL error errno=%d, terminating client\n", errno);
-        // TODO: Implement process termination
-        // For now, just don't resume to prevent infinite loop
+    // Fatal errors indicate resource exhaustion or unrecoverable system state.
+    // Resuming the thread would cause immediate re-fault and infinite loop.
+    // We deliberately do NOT resume threads on fatal errors - the process
+    // will remain blocked forever, which is better than an infinite loop.
+    // TODO: Implement proper process termination when this occurs.
+    if (errno == sos.ENOMEM or errno == sos.E2BIG or errno == sos.ENOSPC) {
+        _ = c.printf("[pager] FATAL: Cannot install page due to errno=%d\n", errno);
+        _ = c.printf("[pager] FATAL: Resource exhaustion - process will be blocked permanently\n");
+        _ = c.printf("[pager] FATAL: System requires reboot or manual intervention\n");
+
+        // Do NOT call resumePageWaiters - leave threads suspended
+        // This prevents the infinite fault loop at the cost of a deadlocked process
+
+        // Clean up pager job state
+        pager_job_states[idx].reset();
+        releasePagerJobSlot(idx);
+        pager_stats.job_failures += 1;
+
         return;
     }
 
-    const head_ptr = if (wait_head) |h| @intFromPtr(h) else 0;
-    _ = c.printf("[pager] finalizePagerJob: detached wait_head=0x%lx\n", @as(c_ulong, head_ptr));
-
+    // Non-fatal errors: resume threads with error code so they can handle it
     continuation.resumePageWaiters(wait_head, errno);
     _ = c.printf("[pager] finalisePagerJob: resumePageWaiters returned\n");
 
