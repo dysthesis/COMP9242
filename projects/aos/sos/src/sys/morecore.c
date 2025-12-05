@@ -24,7 +24,23 @@
  * This is rather terrible, but is the simplest option without a
  * huge amount of infrastructure.
  */
-#define MORECORE_AREA_BYTE_SIZE 0x100000
+#include "morecore.h"
+
+// Static heap size (16 MiB). Increased from 8 MiB to accommodate vendor library consumption.
+//
+// Heap consumption breakdown (measured via runtime diagnostics):
+// - libnfs library (NFS client state, PDU buffers, RPC machinery): ~6.5 MiB
+// - picotcp network stack (socket buffers, routing tables, protocol state): ~1.5 MiB
+// - NFS heap reserve (emergency cushion for eviction operations): 256 KiB
+// - Runtime allocations (pagefile metadata, client state, workers): ~2 MiB
+// - Safety margin for transient allocations: ~5.75 MiB
+//
+// Note: Client metadata arrays (vm/client.zig metadata_pages) are in BSS (static storage),
+// not on this heap. The previous 8 MiB sizing was based on an incorrect attribution of
+// those arrays to heap consumption. Actual heap exhaustion occurs due to vendor libraries
+// consuming ~8 MiB during network/NFS initialisation, leaving insufficient headroom for
+// runtime operations (eviction requires 320+ KiB for NFS PDU encoding).
+#define MORECORE_AREA_BYTE_SIZE 0x1000000
 char morecore_area[MORECORE_AREA_BYTE_SIZE];
 
 /* Pointer to free space in the morecore area. */
@@ -80,4 +96,19 @@ long sys_mmap(va_list ap)
 long sys_madvise(UNUSED va_list ap)
 {
     return 0;
+}
+
+/* Introspection helpers for diagnostics and guardrails. */
+size_t morecore_total_bytes(void)
+{
+    return MORECORE_AREA_BYTE_SIZE;
+}
+
+size_t morecore_free_bytes(void)
+{
+    /* morecore_top grows downward only via mmap; base grows upward via brk. */
+    if (morecore_top <= morecore_base) {
+        return 0;
+    }
+    return morecore_top - morecore_base;
 }

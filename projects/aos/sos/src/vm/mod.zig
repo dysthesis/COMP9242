@@ -1,4 +1,5 @@
 //! This module is the entrypoint to the virtual memory management system.
+pub const DebugVmLogs = false;
 
 pub extern var cspace: sos.cspace_t;
 
@@ -71,7 +72,9 @@ pub inline fn vmErrorToErrno(err: anyerror) c_int {
 
 fn vmStateIndex(caller: *sos.client_t) usize {
     const id: usize = @intCast(caller.*.id);
-    _ = c.printf("[vm_state] vmStateIndex caller=0x%lx id=%lu\n", @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(id)));
+    if (DebugVmLogs) {
+        _ = c.printf("[vm_state] vmStateIndex caller=0x%lx id=%lu\n", @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(id)));
+    }
     return id;
 }
 
@@ -88,9 +91,9 @@ pub inline fn pageBase(addr: usize) usize {
 }
 
 pub export fn vm_state_acquire(cl: *sos.client_t) callconv(.c) *VmHandle {
-    _ = c.printf(
-        "[vm_state_acquire] entered vm_state_acquire...\n",
-    );
+    if (DebugVmLogs) {
+        _ = c.printf("[vm_state_acquire] entered vm_state_acquire...\n");
+    }
     bootstrapVmStates();
     const idx = vmStateIndex(cl);
     handle.vm_handles[idx] = VmHandle{
@@ -133,6 +136,235 @@ pub export fn vm_state_release(cl: *sos.client_t) callconv(.c) void {
     handle.vm_handle_active[idx] = false;
     handle.vm_handles[idx] = VmHandle{ .idx = idx, .generation = 0, .client = null };
     vm_states[idx].teardown();
+}
+
+/// Finalise page-out for a given frame by unmapping it from any client address
+/// space and transitioning the page record to SWAPPED with the supplied
+/// pagefile slot. Returns 0 on success, -errno on failure.
+pub export fn vm_pageout_finalise(frame_ref: usize, slot: u32) callconv(.c) c_int {
+    bootstrapVmStates();
+
+    var unmapped: bool = false;
+
+    for (&vm_states) |*state| {
+        if (!state.initialised) continue;
+
+        var it = state.addr_space.iterator();
+        while (it.next()) |entry| {
+            const vaddr = entry.key_ptr.*;
+            var page_entry = entry.value_ptr;
+
+            if (page_entry.frame_ref != frame_ref or
+                (page_entry.state != page.PageState.RESIDENT and page_entry.state != page.PageState.PAGEOUT_PENDING))
+            {
+                continue;
+            }
+
+            // Handle slot assignment based on current page state:
+            // - PAGEOUT_PENDING: slot already set by vm_pageout_prepare, verify it matches
+            // - RESIDENT: slot should be unassigned, set it now
+            const was_already_pending = page_entry.state == page.PageState.PAGEOUT_PENDING;
+            if (was_already_pending) {
+                const slot_i32: i32 = @intCast(slot);
+                if (page_entry.pagefile_slot != slot_i32) {
+                    _ = c.printf("[vm_pageout_finalise] slot mismatch: expected=%d actual=%d\n", slot_i32, page_entry.pagefile_slot);
+                    return -sos.EINVAL;
+                }
+                // Slot already correct from vm_pageout_prepare
+            } else if (page_entry.pagefile_slot >= 0) {
+                // RESIDENT page with an existing backing slot should not happen
+                _ = c.printf("[vm_pageout_finalise] RESIDENT page already has backing slot=%d\n", page_entry.pagefile_slot);
+                return -sos.EBUSY;
+            }
+
+            page_entry.transitionState(.PAGEOUT_PENDING);
+
+            if (page_entry.cap_slot != sel4.seL4_CapNull) {
+                const unmap_err = sel4.seL4_ARM_Page_Unmap(page_entry.cap_slot);
+                if (unmap_err != sel4.seL4_NoError) {
+                    _ = c.printf("[vm_pageout_finalise] Page_Unmap err=%d vaddr=0x%lx\n", @as(c_int, @intCast(unmap_err)), @as(c_ulong, @intCast(vaddr)));
+                    return -sos.EIO;
+                }
+            }
+
+            if (page_entry.owns_cap and page_entry.cap_owner != null) {
+                const owner = page_entry.cap_owner.?;
+                const del_err = sos.cspace_delete(owner, page_entry.cap_slot);
+                if (del_err != sel4.seL4_NoError) {
+                    _ = c.printf("[vm_pageout_finalise] cspace_delete err=%d vaddr=0x%lx\n", @as(c_int, @intCast(del_err)), @as(c_ulong, @intCast(vaddr)));
+                    return -sos.EIO;
+                }
+                _ = sos.cspace_free_slot(owner, page_entry.cap_slot);
+            }
+
+            state.addr_space.recordLeafUnmap(vaddr);
+
+            page_entry.cap_slot = sel4.seL4_CapNull;
+            page_entry.cap_owner = null;
+            page_entry.owns_cap = false;
+            // Only set pagefile_slot if it wasn't already set by vm_pageout_prepare
+            if (!was_already_pending) {
+                page_entry.pagefile_slot = @intCast(slot);
+            }
+            page_entry.dirty = false;
+            page_entry.referenced = false;
+            page_entry.transitionState(.SWAPPED);
+            page_entry.frame_ref = 0;
+            page_entry.owns_frame = false;
+
+            unmapped = true;
+        }
+    }
+
+    if (!unmapped) {
+        return -sos.ENOENT;
+    }
+
+    sos.free_frame(frame_ref);
+    sos.frame_unbind_slot(frame_ref);
+
+    if (pageout_finalise_log_count < 32) {
+        _ = c.printf("[vm_pageout_finalise] ok frame=%lu slot=%u\n", @as(c_ulong, @intCast(frame_ref)), @as(c_uint, slot));
+        pageout_finalise_log_count += 1;
+    }
+
+    return 0;
+}
+
+/// Abort a page-out after an I/O failure by remapping the resident frame and
+/// restoring metadata to RESIDENT. Returns 0 on success, -errno on failure.
+pub export fn vm_pageout_abort(frame_ref: usize, slot: u32) callconv(.c) c_int {
+    bootstrapVmStates();
+
+    var restored: bool = false;
+
+    for (&vm_states) |*state| {
+        if (!state.initialised) continue;
+
+        var it = state.addr_space.iterator();
+        while (it.next()) |entry| {
+            const vaddr = entry.key_ptr.*;
+            var page_entry = entry.value_ptr;
+
+            if (page_entry.frame_ref != frame_ref or page_entry.state != page.PageState.PAGEOUT_PENDING) {
+                continue;
+            }
+            const slot_i32: i32 = @intCast(slot);
+            if (page_entry.pagefile_slot >= 0 and page_entry.pagefile_slot != slot_i32) {
+                continue;
+            }
+
+            var prot: c_int = sos.PROT_READ | sos.PROT_WRITE;
+            if (page_entry.region) |reg| {
+                prot = reg.prot();
+            }
+            const readable = (prot & sos.PROT_READ) != 0 or (prot & sos.PROT_EXEC) != 0;
+            const writable = (prot & sos.PROT_WRITE) != 0;
+            const executable = (prot & sos.PROT_EXEC) != 0;
+
+            const slot_cap = sos.cspace_alloc_slot(&cspace);
+            if (slot_cap == sel4.seL4_CapNull) {
+                sos.frame_unbind_slot(frame_ref);
+                return -sos.ENOMEM;
+            }
+
+            const src_cspace = sos.frame_table_cspace();
+            const frame_cap = sos.frame_page(frame_ref);
+            if (sos.cspace_copy(&cspace, slot_cap, src_cspace, frame_cap, sos.seL4_AllRights) != sel4.seL4_NoError) {
+                sos.cspace_free_slot(&cspace, slot_cap);
+                sos.frame_unbind_slot(frame_ref);
+                return -sos.EIO;
+            }
+
+            state.mapOwnedFrame(vaddr, frame_ref, slot_cap, readable, writable, executable, true, true) catch |e| {
+                _ = sos.cspace_delete(&cspace, slot_cap);
+                _ = sos.cspace_free_slot(&cspace, slot_cap);
+                sos.frame_unbind_slot(frame_ref);
+                return -vmErrorToErrno(e);
+            };
+
+            page_entry.pagefile_slot = -1;
+            page_entry.dirty = false;
+            page_entry.referenced = false;
+            // mapOwnedFrame already set state to RESIDENT and inserted into clock
+
+            sos.frame_unbind_slot(frame_ref);
+            restored = true;
+            break;
+        }
+    }
+
+    if (!restored) {
+        sos.frame_unbind_slot(frame_ref);
+        return -sos.ENOENT;
+    }
+
+    return 0;
+}
+
+/// Prepare a page for page-out by unmapping all client mappings and
+/// transitioning metadata to PAGEOUT_PENDING with the chosen pagefile slot.
+/// This must run before copying frame contents to the pagefile to avoid
+/// post-copy modifications.
+pub export fn vm_pageout_prepare(frame_ref: usize, slot: u32) callconv(.c) c_int {
+    bootstrapVmStates();
+
+    // Enforce unique slot binding across all pages sharing this frame.
+    if (!sos.frame_bind_slot(frame_ref, slot)) {
+        return -sos.EBUSY;
+    }
+
+    var unmapped: bool = false;
+
+    for (&vm_states) |*state| {
+        if (!state.initialised) continue;
+
+        var it = state.addr_space.iterator();
+        while (it.next()) |entry| {
+            const vaddr = entry.key_ptr.*;
+            var page_entry = entry.value_ptr;
+
+            if (page_entry.frame_ref != frame_ref or page_entry.state != page.PageState.RESIDENT) {
+                continue;
+            }
+
+            page_entry.transitionState(.PAGEOUT_PENDING);
+
+            if (page_entry.cap_slot != sel4.seL4_CapNull) {
+                const unmap_err = sel4.seL4_ARM_Page_Unmap(page_entry.cap_slot);
+                if (unmap_err != sel4.seL4_NoError) {
+                    return -sos.EIO;
+                }
+            }
+
+            if (page_entry.owns_cap and page_entry.cap_owner != null) {
+                const owner = page_entry.cap_owner.?;
+                const del_err = sos.cspace_delete(owner, page_entry.cap_slot);
+                if (del_err != sel4.seL4_NoError) {
+                    return -sos.EIO;
+                }
+                _ = sos.cspace_free_slot(owner, page_entry.cap_slot);
+            }
+
+            state.addr_space.recordLeafUnmap(vaddr);
+
+            page_entry.cap_slot = sel4.seL4_CapNull;
+            page_entry.cap_owner = null;
+            page_entry.owns_cap = false;
+            page_entry.pagefile_slot = @intCast(slot);
+            page_entry.dirty = false;
+            page_entry.referenced = false;
+
+            unmapped = true;
+        }
+    }
+
+    if (!unmapped) {
+        sos.frame_unbind_slot(frame_ref);
+        return -sos.ENOENT;
+    }
+
+    return 0;
 }
 
 pub export fn vm_register_stack_mapping(vm_handle: *VmHandle, vaddr: usize, frame_ref: usize, cap_slot: sel4.seL4_CPtr) callconv(.c) void {
@@ -180,39 +412,24 @@ pub export fn vm_reset_state(vm_handle: *VmHandle) callconv(.c) void {
     vm_handle.reset();
 }
 
-pub export fn handle_vm_fault(
+pub export fn vm_add_elf_region(
     vm_handle: *VmHandle,
-    badge: sel4.seL4_Word,
-    message: [*c]const sel4.seL4_MessageInfo_t,
-) callconv(.c) bool {
-    _ = badge;
-    vm_handle.validate();
-    const info = message.*;
-    if (sel4.seL4_MessageInfo_get_label(info) != sel4.seL4_Fault_VMFault) {
-        return false;
-    }
-
-    if (sel4.seL4_MessageInfo_get_length(info) < 2) {
-        _ = c.printf("[vm_fault] unexpected length=%lu\n", @as(c_ulong, sel4.seL4_MessageInfo_get_length(info)));
-        return false;
-    }
-
-    const fault_addr_word = sel4.seL4_GetMR(sel4.seL4_VMFault_Addr);
-    const fsr = sel4.seL4_GetMR(sel4.seL4_VMFault_FSR);
-    const prefetch = sel4.seL4_GetMR(sel4.seL4_VMFault_PrefetchFault) != 0;
-    const fault_addr: usize = @intCast(fault_addr_word);
-    const want_write = (fsr & (1 << 6)) != 0;
-
-    const addr_raw: c_ulong = @intCast(fault_addr);
-    const fsr_raw: c_ulong = @intCast(fsr);
-    _ = c.printf("[vm_fault] addr=0x%lx fsr=0x%lx write=%d fetch=%d\n", @as(c_ulong, addr_raw), @as(c_ulong, fsr_raw), @as(c_int, if (want_write) 1 else 0), @as(c_int, if (prefetch) 1 else 0));
-
-    vm_handle.handleFault(fault_addr, want_write, prefetch) catch |err| {
-        _ = c.printf("[vm_fault] handler error=%d\n", vmErrorToErrno(err));
-        return false;
+    start: usize,
+    end: usize,
+    prot: c_int,
+) callconv(.c) c_int {
+    const state = vm_handle.ensureVmState();
+    state.addElfRegion(start, end, prot) catch |err| {
+        return -vmErrorToErrno(err);
     };
-    return true;
+    return 0;
 }
+
+pub const VmFaultResult = enum(c_int) {
+    handled = 0,
+    deferred = 1,
+    fatal = 2,
+};
 
 pub const VmHandle = handle.VmHandle;
 
@@ -224,6 +441,7 @@ const cimports = @import("cimports");
 const c = cimports.c;
 const sel4 = cimports.sel4;
 const sos = cimports.sos;
+var pageout_finalise_log_count: usize = 0;
 
 pub const logging = @import("logging.zig");
 pub const addr_space = @import("addr_space.zig");

@@ -2,6 +2,8 @@ const std = @import("std");
 const cimports = @import("cimports");
 const sel4 = cimports.sel4;
 const sos = cimports.sos;
+const c_int_t = i32;
+const file = @import("../file.zig");
 
 /// Indicator for region type
 pub const RegionKind = enum(u4) {
@@ -35,9 +37,11 @@ pub const Region = struct {
     used: bool = false,
     /// Whether any mappings have been recorded yet
     mapped: bool = false,
+    /// Optional backing information for pager integration
+    backing: Backing = .Anonymous,
 
     /// Initialise a region with the provided range, kind, and protection flags
-    pub fn configure(self: *Region, start: usize, kind: RegionKind, prot_flags: c_int) void {
+    pub fn configure(self: *Region, start: usize, kind: RegionKind, prot_flags: c_int_t) void {
         self.start = start;
         self.end = start;
         self.attr = .{ .kind = kind, .data = protToData(prot_flags) };
@@ -47,6 +51,7 @@ pub const Region = struct {
         );
         self.used = true;
         self.mapped = false;
+        self.backing = .Anonymous;
     }
 
     /// Reset the region to an unused state with the provided kind.
@@ -57,6 +62,7 @@ pub const Region = struct {
         self.perm = std.mem.zeroes(sos.seL4_CapRights_t);
         self.used = false;
         self.mapped = false;
+        self.backing = .Anonymous;
     }
 
     /// Update the recorded access rights for the region.
@@ -93,14 +99,44 @@ pub const Region = struct {
     }
 
     /// Return the stored protection flags for the region.
-    pub fn prot(self: *const Region) c_int {
+    pub fn prot(self: *const Region) c_int_t {
         return dataToProt(self.attr.data);
+    }
+
+    pub fn setFileBacking(
+        self: *Region,
+        fd: c_int_t,
+        offset: usize,
+        length: usize,
+        handle_ref: ?*anyopaque,
+        owner: ?*file.ClientIoState,
+    ) void {
+        self.backing = .{
+            .File = .{
+                .fd = fd,
+                .offset = offset,
+                .length = length,
+                .handle_ref = handle_ref,
+                .handle_owner = owner,
+            },
+        };
     }
 };
 
+pub const Backing = union(enum) {
+    Anonymous,
+    File: struct {
+        fd: c_int_t,
+        offset: usize,
+        length: usize,
+        handle_ref: ?*anyopaque,
+        handle_owner: ?*file.ClientIoState,
+    },
+};
+
 /// Convert protection booleans into a POSIX-style mask.
-pub fn encodeProtFlags(readable: bool, writable: bool, executable: bool) c_int {
-    var prot: c_int = 0;
+pub fn encodeProtFlags(readable: bool, writable: bool, executable: bool) c_int_t {
+    var prot: c_int_t = 0;
     if (readable) prot |= sos.PROT_READ;
     if (writable) prot |= sos.PROT_WRITE;
     if (executable) prot |= sos.PROT_EXEC;
@@ -125,12 +161,12 @@ pub fn mergeCapRights(a: sos.seL4_CapRights_t, b: sos.seL4_CapRights_t) sos.seL4
 }
 
 /// Convert POSIX-style protection flags to the packed data representation.
-pub fn protToData(prot: c_int) u60 {
+pub fn protToData(prot: c_int_t) u60 {
     const masked: u64 = @as(u64, @intCast(prot)) & ((@as(u64, 1) << 60) - 1);
     return @intCast(masked);
 }
 
 /// Convert the packed data representation back to POSIX-style flags.
-pub fn dataToProt(data: u60) c_int {
+pub fn dataToProt(data: u60) c_int_t {
     return @intCast(@as(u64, data));
 }

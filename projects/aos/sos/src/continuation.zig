@@ -2,6 +2,8 @@
 pub const MAX_RESPONSE_SIZE: usize = 64;
 
 const worker_types = @import("worker_types.zig");
+const vm = @import("vm/mod.zig");
+const page = vm.page;
 
 /// State specific to the type of operation being suspended.
 pub const ContinuationState = union(enum) {
@@ -27,6 +29,17 @@ pub const ContinuationState = union(enum) {
     Custom: struct {
         data: ?*anyopaque,
     },
+
+    /// Deferred page fault waiting on pager completion
+    PageFault: struct {
+        vm_handle: *vm.VmHandle,
+        fault_addr: usize,
+        page_base: usize,
+        want_write: bool,
+        prefetch: bool,
+        wait_node: page.WaitQueue.Node = .{},
+        job_slot: ?usize = null,
+    },
 };
 
 /// What we are waiting on. Used to index into the appropriate wait queue.
@@ -48,6 +61,12 @@ pub const WaitOn = union(enum) {
 
     /// Waiting for a file operation to complete
     FileOp: struct {},
+
+    /// Waiting for a pager completion on a virtual page
+    Page: struct {
+        client_id: u32,
+        page_base: usize,
+    },
 };
 
 /// Result of a continuation's resume function
@@ -115,6 +134,11 @@ pub const Continuation = struct {
         _ = sos.cspace_delete(&cspace, self.reply);
         sos.cspace_free_slot(&cspace, self.reply);
         sos.ut_free(self.reply_ut);
+
+        switch (self.state) {
+            .PageFault => |*pf| pf.wait_node.clear(),
+            else => {},
+        }
     }
 
     pub fn processFileOpCompletion(self: *Continuation) bool {
@@ -132,6 +156,7 @@ pub const Continuation = struct {
                     .Errno => |errno| return self.failFileOp(@intCast(errno)),
                     .Bytes => return self.failFileOp(sos.EIO),
                     .Status => |status| return self.failFileOp(@intCast(status)),
+                    .Offset => return self.failFileOp(sos.EIO),
                 };
                 break :blk libipc.SyscallResponse{ .Open = .{ .result = fd_result } };
             },
@@ -141,21 +166,26 @@ pub const Continuation = struct {
                     .Errno => |errno| return self.failFileOp(@intCast(errno)),
                     .Fd => return self.failFileOp(sos.EIO),
                     .Status => |status| return self.failFileOp(@intCast(status)),
+                    .Offset => return self.failFileOp(sos.EIO),
                 };
 
                 _ = c.printf("[cont] file read complete bytes=%zu\n", bytes);
 
-                if (bytes > file_op.payload.len) {
-                    return self.failFileOp(sos.EIO);
-                }
-
                 const vm_handle = file_op.vm_handle orelse return self.failFileOp(sos.EFAULT);
                 const params = file_op.params.Read;
-                const payload_slice = file_op.payload[0..bytes];
-                vm_handle.copyToClient(payload_slice, params.client_buf) catch |err| {
-                    const errno = vm.vmErrorToErrno(err);
-                    return self.failFileOp(errno);
-                };
+                if (bytes > 0) {
+                    if (file_op.payload_len == bytes) {
+                        const payload_slice = file_op.payload[0..bytes];
+                        vm_handle.copyToClient(payload_slice, params.client_buf) catch |err| {
+                            const errno = vm.vmErrorToErrno(err);
+                            return self.failFileOp(errno);
+                        };
+                    } else if (file_op.payload_len == 0) {
+                        // Data already copied by worker.
+                    } else {
+                        return self.failFileOp(sos.EIO);
+                    }
+                }
 
                 const result_bytes = std.math.cast(c_int, bytes) orelse return self.failFileOp(sos.EIO);
                 break :blk libipc.SyscallResponse{ .Read = .{ .result = result_bytes } };
@@ -166,6 +196,7 @@ pub const Continuation = struct {
                     .Errno => |errno| return self.failFileOp(@intCast(errno)),
                     .Fd => return self.failFileOp(sos.EIO),
                     .Status => |status| return self.failFileOp(@intCast(status)),
+                    .Offset => return self.failFileOp(sos.EIO),
                 };
                 const result_bytes = std.math.cast(c_int, bytes) orelse return self.failFileOp(sos.EIO);
                 break :blk libipc.SyscallResponse{ .Write = .{ .result = result_bytes } };
@@ -174,6 +205,7 @@ pub const Continuation = struct {
                 const status = switch (file_op.result) {
                     .Status => |value| value,
                     .Errno => |errno| return self.failFileOp(@intCast(errno)),
+                    .Offset => return self.failFileOp(sos.EIO),
                     else => return self.failFileOp(sos.EIO),
                 };
                 break :blk libipc.SyscallResponse{ .Close = .{ .result = status } };
@@ -182,6 +214,7 @@ pub const Continuation = struct {
                 const result_status = switch (file_op.result) {
                     .Status => |value| value,
                     .Errno => |errno| return self.failFileOp(@intCast(errno)),
+                    .Offset => return self.failFileOp(sos.EIO),
                     else => return self.failFileOp(sos.EIO),
                 };
 
@@ -199,6 +232,44 @@ pub const Continuation = struct {
 
                 break :blk libipc.SyscallResponse{ .Stat = .{ .result = result_status } };
             },
+            .GetDirent => blk: {
+                const vm_handle = file_op.vm_handle orelse return self.failFileOp(sos.EFAULT);
+                const params = file_op.params.GetDirent;
+                const to_copy = @min(file_op.payload_len, params.out_len);
+                if (to_copy > 0) {
+                    vm_handle.copyToClient(file_op.payload[0..to_copy], params.out_buf) catch |err| {
+                        const errno = vm.vmErrorToErrno(err);
+                        return self.failFileOp(errno);
+                    };
+                }
+
+                switch (file_op.result) {
+                    .Bytes => |count| {
+                        const result_bytes = std.math.cast(c_int, count) orelse return self.failFileOp(sos.EIO);
+                        break :blk libipc.SyscallResponse{ .GetDirent = .{ .result = result_bytes } };
+                    },
+                    .Errno => |errno| {
+                        return self.failFileOp(@intCast(errno));
+                    },
+                    else => return self.failFileOp(sos.EIO),
+                }
+            },
+            .Lseek => blk: {
+                const offset = switch (file_op.result) {
+                    .Offset => |value| value,
+                    .Errno => |errno| return self.failFileOp(@intCast(errno)),
+                    else => return self.failFileOp(sos.EIO),
+                };
+                break :blk libipc.SyscallResponse{ .Lseek = .{ .result = offset } };
+            },
+            .Unlink => blk: {
+                const status = switch (file_op.result) {
+                    .Status => |value| value,
+                    .Errno => |errno| return self.failFileOp(@intCast(errno)),
+                    else => return self.failFileOp(sos.EIO),
+                };
+                break :blk libipc.SyscallResponse{ .Unlink = .{ .result = status } };
+            },
             else => return self.failFileOp(sos.ENOSYS),
         };
 
@@ -213,6 +284,30 @@ pub const Continuation = struct {
         return true;
     }
 };
+
+pub const PageFaultEvent = extern struct {
+    errno: c_int = 0,
+};
+
+pub fn pageFaultResume(
+    _: *Continuation,
+    event_data: ?*anyopaque,
+    result: *ContinuationResult,
+) callconv(.c) void {
+    var errno: c_int = 0;
+    if (event_data) |payload| {
+        const info: *const PageFaultEvent = @ptrFromInt(@intFromPtr(payload));
+        errno = info.errno;
+    }
+
+    if (errno != 0) {
+        result.* = .{ .Error = .{ .errno = errno } };
+        return;
+    }
+
+    const msg = sel4.seL4_MessageInfo_new(0, 0, 0, 0);
+    result.* = .{ .Complete = .{ .response = msg } };
+}
 
 // Global cspace defined in main.c, accessible via extern.
 extern var cspace: sos.cspace_t;
@@ -450,6 +545,15 @@ pub const WaitQueues = struct {
                         cont.sendError(sos.ENOSYS);
                         ContinuationPool.free(cont);
                     },
+                    .Page => |pg| {
+                        _ = c.printf(
+                            "[continuation] ERROR: Page retry unsupported client=%u page=0x%lx\n",
+                            pg.client_id,
+                            @as(c_ulong, @intCast(pg.page_base)),
+                        );
+                        cont.sendError(sos.EIO);
+                        ContinuationPool.free(cont);
+                    },
                 }
             },
         }
@@ -612,6 +716,46 @@ pub const FileOpQueue = struct {
     }
 };
 
+pub fn resumePageWaiters(head: ?*page.WaitQueue.Node, errno: c_int) void {
+    // Log entry
+    const head_ptr = if (head) |h| @intFromPtr(h) else 0;
+    _ = c.printf("[pager] resumePageWaiters: entered head=0x%lx errno=%d\n", @as(c_ulong, head_ptr), errno);
+
+    if (head == null) {
+        _ = c.printf("[pager] resumePageWaiters: wait queue is empty, no waiters to resume\n");
+        return;
+    }
+
+    var payload = PageFaultEvent{ .errno = errno };
+    var node_opt = head;
+    var resumed_count: u32 = 0;
+
+    while (node_opt) |node| {
+        const next = node.next;
+        _ = c.printf("[pager] resumePageWaiters: processing node=%p cont=%p\n", node, node.cont);
+
+        const cont_ptr = node.cont orelse {
+            _ = c.printf("[pager] WARN: queue node %p missing continuation\n", node);
+            node.clear();
+            node_opt = next;
+            continue;
+        };
+
+        const cont = @as(*Continuation, @ptrFromInt(@intFromPtr(cont_ptr)));
+        _ = c.printf("[pager] resumePageWaiters: resuming continuation %p client=%u\n", cont, @as(c_uint, cont.client.id));
+
+        node.clear();
+        const event_ptr: ?*anyopaque = @as(?*anyopaque, @ptrCast(&payload));
+        WaitQueues.resumeContinuation(cont, event_ptr);
+
+        resumed_count += 1;
+        _ = c.printf("[pager] resumePageWaiters: resumed continuation %p successfully\n", cont);
+        node_opt = next;
+    }
+
+    _ = c.printf("[pager] resumePageWaiters: completed, resumed %u waiters\n", resumed_count);
+}
+
 /// Initialise the continuation pool from C code.
 pub export fn continuation_bootstrap() callconv(.c) void {
     ContinuationPool.bootstrap();
@@ -640,6 +784,5 @@ const c = cimports.c;
 const sos_types = cimports.sos_types;
 
 const std = @import("std");
-const vm = @import("vm/mod.zig");
 const libipc = @import("libipc");
 const file = @import("file.zig");

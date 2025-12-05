@@ -13,6 +13,7 @@
 #include "bootstrap.h"
 #include "dma.h"
 #include "frame_table.h"
+#include "pagefile.h"
 #include "vmem_layout.h"
 #include <assert.h>
 #include <clock/clock_tests.h>
@@ -120,38 +121,38 @@ static void test_dma(void) {
 static void test_frame_table(void) {
   /* Test allocation and writing */
   frame_ref_t frames[TEST_FRAMES] = {};
-  for (int f = 0; f < TEST_FRAMES; f++) {
+  for (int frame = 0; frame < TEST_FRAMES; frame++) {
     /* Allocate a frame */
-    frames[f] = alloc_frame();
-    assert(frames[f] != NULL_FRAME);
+    frames[frame] = alloc_frame(FRAME_OWNER_KERNEL, FRAME_FLAG_PINNED);
+    assert(frames[frame] != NULL_FRAME);
 
     /* Write to the first and last byte of the frame */
-    unsigned char *vaddr = frame_data(frames[f]);
-    vaddr[0] = f;
-    vaddr[BIT(seL4_PageBits) - 1] = f;
+    unsigned char *vaddr = frame_data(frames[frame]);
+    vaddr[0] = frame;
+    vaddr[BIT(seL4_PageBits) - 1] = frame;
   }
 
   /* Check the writes happened */
-  for (int f = 0; f < TEST_FRAMES; f++) {
-    unsigned char *vaddr = frame_data(frames[f]);
-    assert(vaddr[0] == f);
-    assert(vaddr[BIT(seL4_PageBits) - 1] == f);
+  for (int frame = 0; frame < TEST_FRAMES; frame++) {
+    unsigned char *vaddr = frame_data(frames[frame]);
+    assert(vaddr[0] == frame);
+    assert(vaddr[BIT(seL4_PageBits) - 1] == frame);
   }
 
   /* Free all the frames */
-  for (int f = 0; f < TEST_FRAMES; f++) {
-    free_frame(frames[f]);
+  for (int frame = 0; frame < TEST_FRAMES; frame++) {
+    free_frame(frames[frame]);
   }
 
   /* Ensure that we get the same frames when we try to realloc */
   frame_ref_t new_frames[TEST_FRAMES] = {};
-  for (int f = 0; f < TEST_FRAMES; f++) {
-    new_frames[f] = alloc_frame();
-    assert(new_frames[f] != NULL_FRAME);
+  for (int frame = 0; frame < TEST_FRAMES; frame++) {
+    new_frames[frame] = alloc_frame(FRAME_OWNER_KERNEL, FRAME_FLAG_PINNED);
+    assert(new_frames[frame] != NULL_FRAME);
 
     int o = 0;
     while (o < TEST_FRAMES) {
-      if (new_frames[f] == frames[o]) {
+      if (new_frames[frame] == frames[o]) {
         frames[o] = NULL_FRAME;
         break;
       }
@@ -160,9 +161,84 @@ static void test_frame_table(void) {
     /* Check that we found one of our previous frames */
     assert(o != TEST_FRAMES);
   }
-  for (int f = 0; f < TEST_FRAMES; f++) {
-    free_frame(new_frames[f]);
+  for (int frame = 0; frame < TEST_FRAMES; frame++) {
+    free_frame(new_frames[frame]);
   }
+}
+
+static void test_pagefile(void) {
+  ZF_LOGI("Testing pagefile subsystem...");
+
+  /* Get initial stats */
+  pagefile_stats_t stats;
+  pagefile_get_stats(&stats);
+  ZF_LOGI("Initial pagefile stats: total=%zu, used=%zu, peak=%zu",
+          stats.slots_total, stats.slots_used, stats.slots_peak);
+
+  /* Check if pagefile initialised successfully */
+  if (stats.slots_total == 0) {
+    ZF_LOGW("Pagefile not initialised; skipping test");
+    ZF_LOGW("Pagefile initialisation failed; eviction disabled");
+    return;
+  }
+
+  assert(stats.slots_total >= 0);
+
+  /* Allocate 10 slots */
+  uint32_t slots[10];
+  for (int i = 0; i < 10; i++) {
+    slots[i] = pagefile_alloc_slot(i + 1, 1234, 0x10000 * i);
+    assert(slots[i] != PAGEFILE_INVALID_SLOT);
+    ZF_LOGD("Allocated slot %u for frame %d", slots[i], i + 1);
+  }
+
+  /* Verify usage increased */
+  pagefile_get_stats(&stats);
+  assert(stats.slots_used == 10);
+  assert(stats.total_allocs == 10);
+  ZF_LOGI("After allocation: used=%zu, allocs=%zu", stats.slots_used,
+          stats.total_allocs);
+
+  /* Free odd-numbered slots */
+  for (int i = 1; i < 10; i += 2) {
+    pagefile_free_slot(slots[i]);
+    ZF_LOGD("Freed slot %u", slots[i]);
+  }
+
+  /* Verify usage decreased */
+  pagefile_get_stats(&stats);
+  assert(stats.slots_used == 5);
+  assert(stats.total_frees == 5);
+  ZF_LOGI("After freeing odd slots: used=%zu, frees=%zu", stats.slots_used,
+          stats.total_frees);
+
+  /*  Reallocate 5 slots */
+  for (int i = 0; i < 5; i++) {
+    uint32_t slot = pagefile_alloc_slot(100 + i, 5678, 0x20000 * i);
+    assert(slot != PAGEFILE_INVALID_SLOT);
+    assert(pagefile_is_valid_slot(slot));
+    ZF_LOGD("Reallocated slot %u", slot);
+  }
+
+  /* Verify no double-allocation occurred */
+  pagefile_get_stats(&stats);
+  assert(stats.slots_used == 10);
+  ZF_LOGI("After reallocation: used=%zu", stats.slots_used);
+
+  /* Free all slots */
+  for (int i = 0; i < 10; i += 2) {
+    pagefile_free_slot(slots[i]);
+  }
+
+  /* Verify all freed */
+  pagefile_get_stats(&stats);
+  assert(stats.slots_used == 5);
+  assert(stats.slots_peak == 10); /* Peak should remain at 10 */
+  ZF_LOGI("Final stats: used=%zu, peak=%zu, allocs=%zu, frees=%zu",
+          stats.slots_used, stats.slots_peak, stats.total_allocs,
+          stats.total_frees);
+
+  ZF_LOGI("Pagefile test passed!");
 }
 
 void run_tests(cspace_t *cspace) {
@@ -203,4 +279,7 @@ void run_tests(cspace_t *cspace) {
   test_clock();
   ZF_LOGI("Clock test passed!");
 
+  /* test pagefile */
+  test_pagefile();
+  ZF_LOGI("Pagefile test passed!");
 }

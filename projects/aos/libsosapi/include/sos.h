@@ -56,6 +56,14 @@ typedef struct {
   char command[N_NAME]; /* Name of exectuable */
 } sos_process_t;
 
+typedef struct {
+  uint64_t deferred_faults;
+  uint64_t dedup_hits;
+  uint64_t job_submissions;
+  uint64_t job_completions;
+  uint64_t job_failures;
+} sos_pager_stats_t;
+
 /* I/O system calls */
 
 int sos_open(const char *path, fmode_t mode);
@@ -84,6 +92,12 @@ int sos_write(int file, const char *buf, size_t nbyte);
  * Returns the number of bytes written. <nbyte disk is full.
  * Returns -1 on error (invalid file).
  */
+
+int64_t sos_lseek(int file, int64_t offset, int whence);
+/* Repositions file offset. Returns new offset on success, -1 on error. */
+
+int sos_unlink(const char *path);
+/* Remove a file. Returns 0 on success, -1 on error. */
 
 int sos_getdirent(int pos, char *name, size_t nbyte);
 /* Reads name of entry "pos" in directory into "name", max "nbyte" bytes.
@@ -129,6 +143,8 @@ void sos_usleep(int usec);
  */
 
 extern int sos_errno;
+
+int sos_pager_stats(sos_pager_stats_t *stats);
 
 /*************************************************************************/
 /*                                   */

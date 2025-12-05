@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-typedef enum { FD_NONE = 0, FD_DEV_CONSOLE } fd_kind_t;
+typedef enum { FD_NONE = 0, FD_DEV_CONSOLE, FD_FILE_REGULAR } fd_kind_t;
 
 typedef ssize_t (*file_read_fn)(int id, void *buf, size_t len);
 typedef ssize_t (*file_write_fn)(int id, const void *buf, size_t len);
@@ -25,6 +25,7 @@ typedef struct {
     const file_ops_t *ops;
     int dev_id;
     uint16_t refcnt;
+    size_t offset;
 } sos_fd_entry_t;
 
 typedef struct {

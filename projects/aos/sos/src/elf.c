@@ -17,6 +17,7 @@
 #include <assert.h>
 #include <cspace/cspace.h>
 #include <errno.h>
+#include <sys/mman.h>
 
 #include "frame_table.h"
 #include "ut.h"
@@ -79,6 +80,24 @@ static int load_segment_into_vspace(cspace_t *cspace, seL4_CPtr loadee, const ch
 {
     assert(file_size <= segment_size);
 
+    /* Create ELF region for this segment if using VM subsystem */
+    if (vm_handle != NULL) {
+        uintptr_t segment_start = ROUND_DOWN(dst, PAGE_SIZE_4K);
+        uintptr_t segment_end = ROUND_UP(dst + segment_size, PAGE_SIZE_4K);
+
+        int prot = 0;
+        if (elf_flags & PF_R) prot |= PROT_READ;
+        if (elf_flags & PF_W) prot |= PROT_WRITE;
+        if (elf_flags & PF_X) prot |= PROT_EXEC;
+
+        int region_err = vm_add_elf_region(vm_handle, segment_start, segment_end, prot);
+        if (region_err < 0) {
+            ZF_LOGE("Failed to create ELF region [%p, %p) prot=%d errno=%d",
+                (void*)segment_start, (void*)segment_end, prot, -region_err);
+            return -1;
+        }
+    }
+
     /* We work a page at a time in the destination vspace. */
     unsigned int pos = 0;
     seL4_Error err = seL4_NoError;
@@ -88,14 +107,14 @@ static int load_segment_into_vspace(cspace_t *cspace, seL4_CPtr loadee, const ch
         /* create slot for the frame to load the data into */
         seL4_CPtr loadee_frame = cspace_alloc_slot(cspace);
         if (loadee_frame == seL4_CapNull) {
-            ZF_LOGD("Failed to alloc slot");
+            ZF_LOGE("elf load: Failed to alloc slot at vaddr=%p", (void *)loadee_vaddr);
             return -1;
         }
 
         /* allocate the untyped for the loadees address space */
-        frame_ref_t frame = alloc_frame();
+        frame_ref_t frame = alloc_frame(FRAME_OWNER_USER, FRAME_FLAG_EVICTABLE);
         if (frame == NULL_FRAME) {
-            ZF_LOGD("Failed to alloc frame");
+            ZF_LOGE("elf load: Failed to alloc frame at vaddr=%p", (void *)loadee_vaddr);
             return -1;
         }
 

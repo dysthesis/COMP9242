@@ -235,6 +235,24 @@ pub export fn sos_write(file: c_int, buf: [*c]const u8, nbyte: usize) callconv(.
     return @as(c_int, @intCast(total));
 }
 
+pub export fn sos_lseek(file: c_int, offset: i64, whence: c_int) callconv(.c) i64 {
+    const syscall = Syscall{
+        .Lseek = .{
+            .fd = signedIntToWord(file),
+            .offset = signedIntToWord(offset),
+            .whence = signedIntToWord(whence),
+        },
+    };
+    const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| return switch (handleCallError(err)) {
+        -1 => -@as(i64, sos.EINVAL),
+        else => -@as(i64, sos.EINVAL),
+    };
+    return switch (reply) {
+        .Lseek => |payload| handleVmReturn(payload.result),
+        else => unreachable,
+    };
+}
+
 fn handleVmReturn(raw: i64) i64 {
     if (raw < 0) {
         sos_errno = @intCast(-raw);
@@ -287,16 +305,90 @@ pub export fn sos_mmap_call(
 }
 
 pub export fn sos_getdirent(pos: c_int, name: [*c]u8, nbyte: usize) callconv(.c) c_int {
-    _ = pos;
-    _ = name;
-    _ = nbyte;
-    return setErrno(sos.ENOSYS);
+    if (name == null) {
+        return setErrno(sos.EINVAL);
+    }
+    if (nbyte == 0) {
+        return setErrno(sos.EINVAL);
+    }
+
+    const index = std.math.cast(usize, pos) orelse return setErrno(sos.EINVAL);
+
+    const buf_ptr: [*]u8 = @ptrCast(name);
+    const buf_addr: usize = @intFromPtr(buf_ptr);
+    const buf_len = if (nbyte > INT_MAX_USIZE) INT_MAX_USIZE else nbyte;
+    if (buf_len == 0) {
+        return setErrno(sos.EINVAL);
+    }
+
+    const syscall = Syscall{
+        .GetDirent = .{
+            .index = index,
+            .buf_addr = buf_addr,
+            .buf_size = buf_len,
+        },
+    };
+
+    const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| return handleCallError(err);
+    return switch (reply) {
+        .GetDirent => |payload| handleResult(payload.result),
+        else => unreachable,
+    };
 }
 
 pub export fn sos_stat(path: [*c]const u8, buf: ?*sos_types.sos_stat_t) callconv(.c) c_int {
-    _ = path;
-    _ = buf;
-    return setErrno(sos.ENOSYS);
+    if (path == null or buf == null) {
+        return setErrno(sos.EINVAL);
+    }
+
+    const stat_ptr = buf.?;
+    const path_bytes: [*]const u8 = @ptrCast(path);
+    const len = strnlen(path_bytes, MAX_IO_BUF);
+    if (len >= MAX_IO_BUF) {
+        return setErrno(sos.ENAMETOOLONG);
+    }
+
+    const syscall = Syscall{
+        .Stat = .{
+            .path_addr = usizeToWord(@intFromPtr(path_bytes)),
+            .path_len = usizeToWord(len + 1),
+            .out_addr = usizeToWord(@intFromPtr(stat_ptr)),
+            .out_len = usizeToWord(@sizeOf(sos_types.sos_stat_t)),
+        },
+    };
+
+    const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| return handleCallError(err);
+    return switch (reply) {
+        .Stat => |payload| handleResult(payload.result),
+        else => unreachable,
+    };
+}
+
+pub export fn sos_unlink(path: [*c]const u8) callconv(.c) c_int {
+    if (path == null) {
+        return setErrno(sos.EINVAL);
+    }
+
+    const path_bytes: [*]const u8 = @ptrCast(path);
+    const len = strnlen(path_bytes, MAX_IO_BUF);
+    if (len == 0) {
+        return setErrno(sos.EINVAL);
+    }
+    if (len >= MAX_IO_BUF) {
+        return setErrno(sos.ENAMETOOLONG);
+    }
+
+    const syscall = Syscall{
+        .Unlink = .{
+            .path_addr = usizeToWord(@intFromPtr(path_bytes)),
+            .path_len = usizeToWord(len + 1),
+        },
+    };
+    const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| return handleCallError(err);
+    return switch (reply) {
+        .Unlink => |payload| handleResult(payload.result),
+        else => unreachable,
+    };
 }
 
 pub export fn sos_process_create(path: [*c]const u8) callconv(.c) sos_types.pid_t {
@@ -361,6 +453,27 @@ pub export fn sos_usleep(usec: c_int) callconv(.c) void {
     }
 
     clearErrno();
+}
+
+pub export fn sos_pager_stats(out: ?*sos_types.sos_pager_stats_t) callconv(.c) c_int {
+    if (out == null) {
+        return setErrno(sos.EINVAL);
+    }
+
+    const syscall = Syscall{ .PagerStats = .{} };
+    const reply = syscall.call(SOS_IPC_EP_CAP) catch |err| return handleCallError(err);
+    return switch (reply) {
+        .PagerStats => |payload| blk: {
+            out.?.deferred_faults = payload.deferred_faults;
+            out.?.dedup_hits = payload.dedup_hits;
+            out.?.job_submissions = payload.job_submissions;
+            out.?.job_completions = payload.job_completions;
+            out.?.job_failures = payload.job_failures;
+            clearErrno();
+            break :blk 0;
+        },
+        else => unreachable,
+    };
 }
 
 pub export fn sos_time_stamp() callconv(.c) i64 {

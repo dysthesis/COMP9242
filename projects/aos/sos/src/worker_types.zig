@@ -13,6 +13,10 @@ pub const WorkType = enum(u8) {
     OpenDir,
     ReadDir,
     GetDirent,
+    PageFill,
+    PageOut,
+    Lseek,
+    Unlink,
 };
 
 pub const OPEN_PATH_CAPACITY: usize = 256;
@@ -38,6 +42,13 @@ pub const WriteParams = struct {
     client_id: u32,
 };
 
+pub const LseekParams = struct {
+    fd: usize,
+    offset: i64,
+    whence: c_int,
+    client_id: u32,
+};
+
 pub const CloseParams = struct {
     fd: usize,
     client_id: u32,
@@ -60,12 +71,50 @@ pub const ReadDirParams = struct {
     client_id: u32,
 };
 
+pub const UnlinkParams = struct {
+    path: [OPEN_PATH_CAPACITY:0]u8,
+    client_id: u32,
+};
+
 pub const GetDirentParams = struct {
     index: usize,
     capacity: usize,
     client_id: u16,
     out_buf: usize,
     out_len: usize,
+};
+
+pub const PageFillSource = union(enum) {
+    /// Anonymous memory requiring zero-initialised contents
+    Anonymous,
+
+    /// File-backed mapping requiring data fetched from a file descriptor
+    File: struct {
+        fd: c_int,
+        file_offset: usize,
+        length: usize = vm.PAGE_SIZE_4K,
+        handle_ref: ?*anyopaque = null,
+    },
+
+    /// Pagefile-backed swap slot requiring read from pagefile
+    Pagefile: struct {
+        slot: u32,
+    },
+};
+
+pub const PageFillParams = struct {
+    client_id: u32,
+    page_base: usize,
+    prot: c_int,
+    region_kind: vm.region.RegionKind,
+    want_write: bool,
+    prefetch: bool,
+    source: PageFillSource,
+};
+
+pub const PageOutParams = struct {
+    slot: u32,
+    frame_ref: usize,
 };
 
 pub const WorkParams = union(WorkType) {
@@ -77,6 +126,10 @@ pub const WorkParams = union(WorkType) {
     OpenDir: OpenDirParams,
     ReadDir: ReadDirParams,
     GetDirent: GetDirentParams,
+    PageFill: PageFillParams,
+    PageOut: PageOutParams,
+    Lseek: LseekParams,
+    Unlink: UnlinkParams,
 };
 
 pub const FileOpResult = union(enum) {
@@ -84,6 +137,7 @@ pub const FileOpResult = union(enum) {
     Bytes: usize,
     Errno: i32,
     Status: i32,
+    Offset: i64,
 
     pub fn okFd(fd: usize) FileOpResult {
         return .{ .Fd = fd };
@@ -99,6 +153,10 @@ pub const FileOpResult = union(enum) {
 
     pub fn status(value: i32) FileOpResult {
         return .{ .Status = value };
+    }
+
+    pub fn offset(value: i64) FileOpResult {
+        return .{ .Offset = value };
     }
 };
 
@@ -140,6 +198,10 @@ pub const FileOpState = struct {
         self.finish(FileOpResult.status(value));
     }
 
+    pub fn completeOffset(self: *FileOpState, value: i64) void {
+        self.finish(FileOpResult.offset(value));
+    }
+
     pub fn isCompleted(self: *const FileOpState) bool {
         return @atomicLoad(bool, &self.completed, .acquire);
     }
@@ -152,6 +214,12 @@ pub const FileOpState = struct {
         return self.payload[0..];
     }
 };
+
+comptime {
+    if (WRITE_BUFFER_CAPACITY < vm.PAGE_SIZE_4K) {
+        @compileError("WRITE_BUFFER_CAPACITY must be at least one page for pager jobs");
+    }
+}
 
 test "FileOpResult helpers" {
     var res = FileOpResult.okFd(5);

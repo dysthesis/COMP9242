@@ -83,11 +83,12 @@ ut_t *ut_alloc_4k_untyped(uintptr_t *paddr)
 {
     ut_t **list = &table.free_untypeds[SIZE_BITS_TO_INDEX(seL4_PageBits)];
     if (*list == NULL) {
-        ZF_LOGE("out of memory");
+        ZF_LOGE("ut_alloc_4k_untyped: out of memory (n_4k_untyped=%zu)", table.n_4k_untyped);
         return NULL;
     }
 
     ut_t *n = pop(list);
+    table.n_4k_untyped--;
     if (paddr) {
         *paddr = ut_to_paddr(n);
     }

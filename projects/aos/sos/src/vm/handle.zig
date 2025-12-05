@@ -113,6 +113,7 @@ pub const VmHandle = struct {
 
     pub fn copyCStringFromClient(self: *Self, client_va: usize, dest: []u8) VmError!usize {
         if (dest.len == 0) return 0;
+        const state = self.ensureVmState();
 
         var copied: usize = 0;
         var first_zero: ?usize = null;
@@ -126,6 +127,7 @@ pub const VmHandle = struct {
             const src_ptr: [*]const u8 = @as([*]const u8, @ptrCast(slice.ptr));
             const src_slice = src_ptr[0..chunk];
             std.mem.copyForwards(u8, dest[copied .. copied + chunk], src_slice);
+            markPageAccess(state, client_va + copied, false);
 
             if (first_zero == null) {
                 if (std.mem.indexOfScalar(u8, src_slice, 0)) |idx| {
@@ -139,7 +141,8 @@ pub const VmHandle = struct {
         return first_zero orelse copied;
     }
 
-    pub fn copyFromClient(self: *Self, client_va: usize, dest: []u8) VmError!void {
+    pub fn copyFromClient(self: *Self, dest: []u8, client_va: usize) VmError!void {
+        const state = self.ensureVmState();
         var copied: usize = 0;
         while (copied < dest.len) {
             const remaining = dest.len - copied;
@@ -149,6 +152,7 @@ pub const VmHandle = struct {
             const chunk = @min(slice.len, remaining);
             const src_ptr: [*]const u8 = @as([*]const u8, @ptrCast(slice.ptr));
             std.mem.copyForwards(u8, dest[copied .. copied + chunk], src_ptr[0..chunk]);
+            markPageAccess(state, client_va + copied, false);
             copied += chunk;
         }
 
@@ -158,6 +162,7 @@ pub const VmHandle = struct {
     }
 
     pub fn copyToClient(self: *Self, src: []const u8, client_va: usize) VmError!void {
+        const state = self.ensureVmState();
         var copied: usize = 0;
         while (copied < src.len) {
             const remaining = src.len - copied;
@@ -167,6 +172,7 @@ pub const VmHandle = struct {
             const chunk = @min(slice.len, remaining);
             const dst_ptr: [*]u8 = @as([*]u8, @ptrCast(slice.ptr));
             std.mem.copyForwards(u8, dst_ptr[0..chunk], src[copied .. copied + chunk]);
+            markPageAccess(state, client_va + copied, true);
             copied += chunk;
         }
     }
@@ -194,6 +200,18 @@ pub const VmHandle = struct {
         return self.client.?;
     }
 
+    fn markPageAccess(state: *client.Client, vaddr: usize, write: bool) void {
+        const base = Address.init(vaddr).pageBase(PAGE_SIZE_4K).raw();
+        if (state.findPage(base)) |page_entry| {
+            page_entry.referenced = true;
+            sos.frame_mark_referenced(page_entry.frame_ref);
+            if (write) {
+                page_entry.dirty = true;
+                sos.frame_mark_dirty(page_entry.frame_ref);
+            }
+        }
+    }
+
     pub fn getState(self: *Self) *client.Client {
         validate(self);
         bootstrapVmStates();
@@ -201,25 +219,35 @@ pub const VmHandle = struct {
     }
 
     pub fn ensureVmState(self: *Self) *client.Client {
-        _ = c.printf("[vm_state] entered ensureVmState...\n");
+        if (DebugVmLogs) {
+            _ = c.printf("[vm_state] entered ensureVmState...\n");
+        }
         const idx = self.idx;
         const cl = self.getClient();
         const state = self.getState();
         if (!state.initialised) {
-            _ = c.printf("[vm_state] initialise idx=%lu caller=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))));
+            if (DebugVmLogs) {
+                _ = c.printf("[vm_state] initialise idx=%lu caller=0x%lx\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))));
+            }
             state.init(idx, cl) catch {
                 @panic("Client.init failed");
             };
         } else {
-            _ = c.printf("[vm_state] reuse idx=%lu caller=0x%lx heap_break=0x%lx mapped_end=0x%lx stack_low=0x%lx active_mmaps=%lu mapped_pages=%lu\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(state.stack_low)), @as(c_ulong, @intCast(state.active_mmaps)), @as(c_ulong, @intCast(state.mapped_count)));
+            if (DebugVmLogs) {
+                _ = c.printf("[vm_state] reuse idx=%lu caller=0x%lx heap_break=0x%lx mapped_end=0x%lx stack_low=0x%lx active_mmaps=%lu mapped_pages=%lu\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(@intFromPtr(cl))), @as(c_ulong, @intCast(state.heap_break)), @as(c_ulong, @intCast(state.heap_mapped_end)), @as(c_ulong, @intCast(state.stack_low)), @as(c_ulong, @intCast(state.active_mmaps)), @as(c_ulong, @intCast(state.mapped_count)));
+            }
         }
 
-        _ = c.printf("[vm_state] ensureVmState done!\n");
+        if (DebugVmLogs) {
+            _ = c.printf("[vm_state] ensureVmState done!\n");
+        }
         return state;
     }
 
     pub fn brk(self: *Self, requested: usize) VmError!usize {
-        _ = c.printf("[vm_brk] entered brk...\n");
+        if (DebugVmLogs) {
+            _ = c.printf("[vm_brk] entered brk...\n");
+        }
         const state = self.ensureVmState();
 
         if (requested == 0) return state.heap_break;
@@ -228,31 +256,55 @@ pub const VmHandle = struct {
 
         state.heap_break = requested;
 
-        _ = c.printf("[vm_brk] set break lazily to 0x%lx (mapping deferred)\n", @as(c_ulong, @intCast(state.heap_break)));
+        if (DebugVmLogs) {
+            _ = c.printf("[vm_brk] set break lazily to 0x%lx (mapping deferred)\n", @as(c_ulong, @intCast(state.heap_break)));
+        }
 
         return requested;
     }
 
-    pub fn mmap(self: *Self, addr: usize, length: usize, prot: c_int, flags: c_int, fd: c_int, offset: usize) VmError!usize {
-        _ = c.printf("[vm_mmap] entered mmap...\n");
+    pub fn mmap(self: *Self, client_ctx: *clients.Client, addr: usize, length: usize, prot: c_int, flags: c_int, fd: c_int, offset: usize) VmError!usize {
+        if (DebugVmLogs) {
+            _ = c.printf("[vm_mmap] entered mmap...\n");
+        }
         const caller_ptr: c_ulong = @intCast(@intFromPtr(self.getClient()));
-        _ = c.printf("[vm_mmap] enter caller=0x%lx addr=0x%lx length=0x%lx prot=0x%x flags=0x%x fd=%d offset=0x%lx\n", caller_ptr, @as(c_ulong, @intCast(addr)), @as(c_ulong, @intCast(length)), prot, flags, fd, @as(c_ulong, @intCast(offset)));
+        if (DebugVmLogs) {
+            _ = c.printf("[vm_mmap] enter caller=0x%lx addr=0x%lx length=0x%lx prot=0x%x flags=0x%x fd=%d offset=0x%lx\n", caller_ptr, @as(c_ulong, @intCast(addr)), @as(c_ulong, @intCast(length)), prot, flags, fd, @as(c_ulong, @intCast(offset)));
+        }
         if (length == 0) {
-            _ = c.printf("[vm_mmap] zero length invalid\n");
+            if (DebugVmLogs) {
+                _ = c.printf("[vm_mmap] zero length invalid\n");
+            }
             return VmError.InvalidArgs;
         }
-        if ((flags & sos.MAP_ANONYMOUS) == 0 or (flags & sos.MAP_PRIVATE) == 0) {
-            _ = c.printf("[vm_mmap] unsupported flags combination flags=0x%x\n", flags);
+        if ((flags & sos.MAP_PRIVATE) == 0) {
+            _ = c.printf("[vm_mmap] MAP_PRIVATE required flags=0x%x\n", flags);
             return VmError.Unsupported;
         }
+        const want_anonymous = (flags & sos.MAP_ANONYMOUS) != 0;
         const unsupported_flags = flags & ~(sos.MAP_ANONYMOUS | sos.MAP_PRIVATE);
         if (unsupported_flags != 0) {
             _ = c.printf("[vm_mmap] extra unsupported flags=0x%x\n", unsupported_flags);
             return VmError.Unsupported;
         }
-        if (addr != 0 or offset != 0 or fd != -1) {
-            _ = c.printf("[vm_mmap] unsupported addr/offset/fd addr=0x%lx offset=0x%lx fd=%d\n", @as(c_ulong, @intCast(addr)), @as(c_ulong, @intCast(offset)), fd);
+        if (addr != 0) {
+            _ = c.printf("[vm_mmap] hint addr unsupported addr=0x%lx\n", @as(c_ulong, @intCast(addr)));
             return VmError.Unsupported;
+        }
+        if (want_anonymous) {
+            if (fd != -1 or offset != 0) {
+                _ = c.printf("[vm_mmap] anonymous mapping must use fd=-1 offset=0\n");
+                return VmError.Unsupported;
+            }
+        } else {
+            if (fd < 0) {
+                _ = c.printf("[vm_mmap] file-backed mmap missing fd\n");
+                return VmError.Unsupported;
+            }
+            if ((offset & (PAGE_SIZE_4K - 1)) != 0) {
+                _ = c.printf("[vm_mmap] file-backed offset must be page-aligned offset=0x%lx\n", @as(c_ulong, @intCast(offset)));
+                return VmError.InvalidArgs;
+            }
         }
 
         const aligned = alignForward(length, PAGE_SIZE_4K);
@@ -274,28 +326,43 @@ pub const VmHandle = struct {
         }
 
         const base = state.mmap_next;
-        const tracker = state.leaseMmapRegion(base, prot) catch |err| {
+        var retained_handle: ?*anyopaque = null;
+        if (!want_anonymous) {
+            const retained = client_ctx.retainFileHandleOpaque(@intCast(fd)) catch {
+                _ = c.printf("[vm_mmap] retainFileHandleOpaque failed fd=%d\n", fd);
+                return VmError.InvalidArgs;
+            };
+            retained_handle = retained;
+        }
+        errdefer if (retained_handle) |ref| {
+            client_ctx.releaseFileHandleOpaque(ref);
+        };
+
+        const backing_info: region.Backing = if (want_anonymous)
+            .Anonymous
+        else .{ .File = .{
+            .fd = fd,
+            .offset = offset,
+            .length = aligned,
+            .handle_ref = retained_handle,
+            .handle_owner = if (retained_handle != null) client_ctx.ioState() else null,
+        } };
+
+        const tracker = state.leaseMmapRegion(base, prot, backing_info) catch |err| {
             return err;
         };
 
-        var cursor = base;
         const end_addr = base + aligned;
-        var map_failed = false;
-        _ = c.printf("[vm_mmap] base=0x%lx end=0x%lx\n", @as(c_ulong, @intCast(base)), @as(c_ulong, @intCast(end_addr)));
-        while (cursor < end_addr) : (cursor += PAGE_SIZE_4K) {
-            _ = c.printf("[vm_mmap] mapping cursor=0x%lx\n", @as(c_ulong, @intCast(cursor)));
-            state.mapAnonymousPage(self, cursor, tracker) catch |err| {
-                const err_code: c_int = vmErrorToErrno(err);
-                _ = c.printf("[vm_mmap] mapAnonymousPage failed cursor=0x%lx errno=%d\n", @as(c_ulong, @intCast(cursor)), err_code);
-                map_failed = true;
-                break;
-            };
-            _ = c.printf("[vm_mmap] mapped cursor=0x%lx\n", @as(c_ulong, @intCast(cursor)));
-        }
-
-        if (map_failed) {
-            state.releaseMmapRegion(tracker);
-            return VmError.MapFailed;
+        if (want_anonymous) {
+            // Defer per-page allocation and mapping to first fault. We still need
+            // the region recorded so fault lookup succeeds.
+            tracker.start = base;
+            tracker.end = end_addr;
+            tracker.mapped = true;
+        } else {
+            tracker.start = base;
+            tracker.end = base + aligned;
+            tracker.mapped = true;
         }
 
         state.mmap_next = end_addr;
@@ -308,14 +375,56 @@ pub const VmHandle = struct {
         _ = c.printf(
             "[vm_fault] entered handleFault...\n",
         );
-        _ = want_write;
         _ = is_fetch;
         const state = self.ensureVmState();
         const base_addr = Address.init(fault_addr).pageBase(PAGE_SIZE_4K);
         const base = base_addr.raw();
 
-        if (state.findPage(base) != null) {
-            return;
+        // Check if page record exists and is actually mapped in hardware
+        if (state.findPage(base)) |page_entry| {
+            if (page_entry.state == .RESIDENT) {
+                // Update reference/dirty tracking on any resident access
+                page_entry.referenced = true;
+                if (want_write) {
+                    page_entry.dirty = true;
+                    sos.frame_mark_dirty(page_entry.frame_ref);
+                }
+
+                // Write fault upgrade path for dirty tracking
+                if (want_write and page_entry.temp_ro and page_entry.cap_slot != sel4.seL4_CapNull) {
+                    const rights = region.rightsFromBooleans(true, true);
+                    var attrs = sel4.seL4_ARM_Default_VMAttributes;
+                    if (page_entry.region) |reg| {
+                        if ((reg.prot() & sos.PROT_EXEC) == 0) {
+                            attrs |= sel4.seL4_ARM_ExecuteNever;
+                        }
+                    } else {
+                        attrs |= sel4.seL4_ARM_ExecuteNever;
+                    }
+
+                    const unmap_err = sel4.seL4_ARM_Page_Unmap(page_entry.cap_slot);
+                    if (unmap_err != sel4.seL4_NoError) {
+                        return VmError.MapFailed;
+                    }
+
+                    try mapping.map_owned_frame(&state.addr_space, page_entry.cap_slot, base, rights, attrs);
+
+                    page_entry.temp_ro = false;
+                    page_entry.dirty = true;
+                    page_entry.referenced = true;
+                    sos.frame_mark_dirty(page_entry.frame_ref);
+                    return;
+                }
+
+                // Page is already mapped, fault should not have occurred.
+                // This can happen if TLB is stale, so we just return success.
+                return;
+            }
+            // Page record exists but not resident. This means a deferred page
+            // fault is already in progress. Return Unsupported to trigger
+            // deduplication in the pager.
+            _ = c.printf("[vm_fault] found non-resident page at 0x%lx (deferred fault in progress)\n", @as(c_ulong, @intCast(base)));
+            return VmError.Unsupported;
         }
 
         const min_stack = state.stack_guard + PAGE_SIZE_4K;
@@ -336,10 +445,19 @@ pub const VmHandle = struct {
         }
 
         if (state.findMmapRegion(base)) |tracker| {
-            try state.mapAnonymousPage(self, base, tracker);
-            return;
+            switch (tracker.backing) {
+                .Anonymous => {
+                    try state.mapAnonymousPage(self, base, tracker);
+                    return;
+                },
+                .File => {
+                    _ = c.printf("[vm_fault] file-backed page needs pager base=0x%lx\n", @as(c_ulong, @intCast(base)));
+                    return VmError.Unsupported;
+                },
+            }
         }
 
+        // Swapped page? handled via pager dedup path below
         return VmError.Unsupported;
     }
 
@@ -441,16 +559,20 @@ const sos = cimports.sos;
 const c = cimports.c;
 const sel4 = cimports.sel4;
 pub const client = @import("client.zig");
-
+const clients = @import("../client.zig");
+const region = @import("region.zig");
+const mapping = @import("mapping.zig");
 const super = @import("mod.zig");
 const Address = super.Address;
+const DebugVmLogs = super.DebugVmLogs;
 const vm_get_user_page_data = super.vm_get_user_page_data;
 const bootstrapVmStates = super.bootstrapVmStates;
 const VmError = super.VmError;
 const HEAP_BASE = super.HEAP_BASE;
 const HEAP_LIMIT = super.HEAP_LIMIT;
-pub const MMAP_LIMIT = super.MMAP_BASE;
+pub const MMAP_LIMIT = super.MMAP_LIMIT;
 const alignForward = super.alignForward;
+const vmStateIndex = super.vmStateIndex;
 const vmErrorToErrno = super.vmErrorToErrno;
 
 const std = @import("std");

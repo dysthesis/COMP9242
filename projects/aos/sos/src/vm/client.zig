@@ -13,6 +13,10 @@ pub const Client = struct {
     heap_region: region.Region = .{},
     stack_region: region.Region = .{},
 
+    // ELF segment regions (PT_LOAD segments from ELF loading)
+    elf_regions: [MAX_ELF_REGIONS]region.Region = [_]region.Region{.{}} ** MAX_ELF_REGIONS,
+    elf_region_count: usize = 0,
+
     metadata_allocator: allocator.MetadataAllocator = allocator.MetadataAllocator{},
     metadata_alloc_handle: std.mem.Allocator = undefined,
     metadata_base: usize = 0,
@@ -52,6 +56,17 @@ pub const Client = struct {
             }
             entry.owns_frame = entry.owns_frame or owns_frame;
             entry.owns_cap = entry.owns_cap or owns_cap;
+            if (frame_ref != 0) {
+                entry.transitionState(.RESIDENT);
+            } else if (entry.state != .FREE) {
+                entry.transitionState(.FREE);
+            }
+            entry.dirty = false;
+            entry.referenced = false;
+            entry.pagefile_slot = -1;
+            entry.temp_ro = false;
+            // Do not reset waiters, as threads may be waiting for this page
+            // entry.waiters.reset();
             return entry;
         }
 
@@ -61,11 +76,40 @@ pub const Client = struct {
             .cap_owner = cap_owner,
             .owns_frame = owns_frame,
             .owns_cap = owns_cap,
+            .state = if (frame_ref != 0) .RESIDENT else .FREE,
+            .dirty = false,
+            .referenced = false,
+            .pagefile_slot = -1,
+            .temp_ro = false,
         }) catch {
             return super.VmError.Capacity;
         };
         self.mapped_count = self.addr_space.num_mapped();
         return self.addr_space.getPtr(vaddr).?;
+    }
+
+    pub fn ensurePageRecord(
+        self: *Self,
+        vaddr: usize,
+        tracker: ?*region.Region,
+    ) super.VmError!*page.MappedPage {
+        if (self.findPage(vaddr)) |entry| {
+            if (tracker != null and entry.region == null) {
+                entry.region = tracker;
+            }
+            return entry;
+        }
+
+        const inserted = self.insertPage(vaddr, 0, sel4.seL4_CapNull, null, false, false) catch |err| {
+            return err;
+        };
+        inserted.region = tracker;
+        // State is already FREE from insertPage with frame_ref=0
+        inserted.dirty = false;
+        inserted.referenced = false;
+        inserted.pagefile_slot = -1;
+        inserted.waiters.reset();
+        return inserted;
     }
 
     fn isLegalUserMapping(self: *Client, base: Address) bool {
@@ -79,6 +123,12 @@ pub const Client = struct {
 
         // any address covered by a declared RegionKind.Mmap.
         if (self.findMmapRegion(addr) != null) return true;
+
+        // any address covered by recorded ELF segments (text/data/bss).
+        // ELF regions are registered via vm_add_elf_region during exec setup.
+        for (self.elf_regions[0..self.elf_region_count]) |*elf_region| {
+            if (elf_region.start <= addr and addr < elf_region.end) return true;
+        }
 
         // everything else is out of policy.
         return false;
@@ -101,80 +151,79 @@ pub const Client = struct {
         const writable = (prot_flags & sos.PROT_WRITE) != 0;
         const executable = (prot_flags & sos.PROT_EXEC) != 0;
 
-        _ = c.printf("[vm_map] enter caller=0x%lx vaddr=0x%lx read=%d write=%d exec=%d mapped_count=%lu\n", @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(vaddr)), @as(c_int, if (readable) 1 else 0), @as(c_int, if (writable) 1 else 0), @as(c_int, if (executable) 1 else 0), @as(c_ulong, @intCast(self.mapped_count)));
-
-        if (self.findPage(vaddr) != null) {
-            _ = c.printf("[vm_map] already mapped vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
-            return;
+        if (super.DebugVmLogs) {
+            _ = c.printf("[vm_map] enter caller=0x%lx vaddr=0x%lx read=%d write=%d exec=%d mapped_count=%lu\n", @as(c_ulong, @intCast(@intFromPtr(caller))), @as(c_ulong, @intCast(vaddr)), @as(c_int, if (readable) 1 else 0), @as(c_int, if (writable) 1 else 0), @as(c_int, if (executable) 1 else 0), @as(c_ulong, @intCast(self.mapped_count)));
         }
 
-        const proc_vspace = sos.client_get_vspace(caller);
-        if (proc_vspace == 0) {
-            return super.VmError.ClientContext;
+        // If a record already exists and is resident, nothing to do.
+        if (self.findPage(vaddr)) |page_entry| {
+            if (page_entry.state == .RESIDENT) {
+                if (super.DebugVmLogs) {
+                    _ = c.printf("[vm_map] already mapped vaddr=0x%lx\n", @as(c_ulong, @intCast(vaddr)));
+                }
+                return;
+            }
         }
 
-        const frame_ref = sos.alloc_frame();
-        if (frame_ref == 0) {
-            _ = c.printf("[vm_map] alloc_frame failed caller=0x%lx\n", @as(c_ulong, @intCast(@intFromPtr(caller))));
-            return super.VmError.OutOfFrames;
-        }
-        _ = c.printf("[vm_map] alloc_frame ok frame_ref=%lu\n", @as(c_ulong, @intCast(frame_ref)));
-
-        const frame_raw = sos.frame_data(frame_ref);
-        const frame_bytes = @as([*]u8, @ptrCast(frame_raw));
-        @memset(frame_bytes[0..super.PAGE_SIZE_4K], 0);
-        _ = c.printf("[vm_map] cleared frame_data addr=0x%lx size=%lu\n", @as(c_ulong, @intCast(@intFromPtr(frame_raw))), @as(c_ulong, @intCast(super.PAGE_SIZE_4K)));
-
-        const slot = sos.cspace_alloc_slot(&cspace);
-        if (slot == sel4.seL4_CapNull) {
-            sos.free_frame(frame_ref);
-            _ = c.printf("[vm_map] cspace_alloc_slot failed frame_ref=%lu\n", @as(c_ulong, @intCast(frame_ref)));
-            return super.VmError.OutOfSlots;
-        }
-        _ = c.printf("[vm_map] allocated slot=%lu owner_cspace=0x%lx\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(@intFromPtr(&cspace))));
-        _ = c.printf("[vm_map] allocated slot=%lu for frame_ref=%lu\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
-
-        const src_cspace = sos.frame_table_cspace();
-        const frame_cap = sos.frame_page(frame_ref);
-        const copy_err = sos.cspace_copy(&cspace, slot, src_cspace, frame_cap, sos.seL4_AllRights);
-        if (copy_err != sel4.seL4_NoError) {
-            _ = sos.cspace_free_slot(&cspace, slot);
-            sos.free_frame(frame_ref);
-            const copy_err_i32: c_int = @intCast(copy_err);
-            _ = c.printf("[vm_map] cspace_copy failed err=%d slot=%lu frame_ref=%lu\n", copy_err_i32, @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
-            return super.VmError.MapFailed;
-        }
-        _ = c.printf("[vm_map] copied frame cap slot=%lu frame_ref=%lu\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)));
-
-        const rights = region.rightsFromBooleans(readable, writable);
-        var attrs = sel4.seL4_ARM_Default_VMAttributes;
-        if (!executable) {
-            attrs = attrs | sel4.seL4_ARM_ExecuteNever;
-        }
-
-        mapping.map_owned_frame(&self.addr_space, slot, vaddr, rights, attrs) catch |err| {
-            _ = sos.cspace_delete(&cspace, slot);
-            _ = sos.cspace_free_slot(&cspace, slot);
-            sos.free_frame(frame_ref);
-            _ = c.printf("[vm_map] map_frame failed err=%d slot=%lu frame_ref=%lu vaddr=0x%lx\n", super.vmErrorToErrno(err), @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
-            return err;
-        };
-        _ = c.printf("[vm_map] map_frame success slot=%lu frame_ref=%lu vaddr=0x%lx\n", @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(vaddr)));
-
-        _ = self.insertPage(vaddr, frame_ref, slot, &cspace, true, true) catch |err| {
+        const inserted = self.ensurePageRecord(vaddr, tracker) catch |err| {
             if (err == super.VmError.Capacity) {
                 const meta_used = self.metadata_cursor - self.metadata_base;
                 _ = c.printf("[vm_meta] capacity hit vaddr=0x%lx mapped_count=%lu used_bytes=%lu limit_bytes=%lu pages=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(self.mapped_count)), @as(c_ulong, @intCast(meta_used)), @as(c_ulong, @intCast(allocator.METADATA_REGION_BYTES)), @as(c_ulong, @intCast(self.metadata_page_count)));
             }
-            _ = sos.cspace_delete(&cspace, slot);
-            _ = sos.cspace_free_slot(&cspace, slot);
+            return err;
+        };
+        inserted.region = tracker;
+
+        // If a frame is already resident the earlier check returned; otherwise
+        // allocate and map a fresh frame for this anonymous page.
+        const frame_ref = sos.alloc_frame(sos.FRAME_OWNER_USER, 0);
+        if (frame_ref == 0) {
+            return super.VmError.OutOfFrames;
+        }
+
+        const slot = sos.cspace_alloc_slot(&super.cspace);
+        if (slot == sel4.seL4_CapNull) {
+            sos.free_frame(frame_ref);
+            return super.VmError.OutOfSlots;
+        }
+
+        const src_cspace = sos.frame_table_cspace();
+        const frame_cap = sos.frame_page(frame_ref);
+        if (sos.cspace_copy(&super.cspace, slot, src_cspace, frame_cap, sos.seL4_AllRights) != sel4.seL4_NoError) {
+            sos.cspace_free_slot(&super.cspace, slot);
+            sos.free_frame(frame_ref);
+            return super.VmError.MapFailed;
+        }
+
+        const rights = region.rightsFromBooleans(readable, writable);
+        var attrs = sel4.seL4_ARM_Default_VMAttributes;
+        if (!executable) {
+            attrs |= sel4.seL4_ARM_ExecuteNever;
+        }
+
+        mapping.map_owned_frame(&self.addr_space, slot, vaddr, rights, attrs) catch |err| {
+            _ = sos.cspace_delete(&super.cspace, slot);
+            sos.cspace_free_slot(&super.cspace, slot);
             sos.free_frame(frame_ref);
             return err;
         };
-        self.mapped_count = self.addr_space.num_mapped();
-        // self.addr_space.recordLeafMap(vaddr);
 
-        _ = c.printf("[vm_map] recorded mapping vaddr=0x%lx frame_ref=%lu slot=%lu new_mapped_count=%lu\n", @as(c_ulong, @intCast(vaddr)), @as(c_ulong, @intCast(frame_ref)), @as(c_ulong, @intCast(slot)), @as(c_ulong, @intCast(self.mapped_count)));
+        // Update the page record to reflect the resident mapping.
+        inserted.frame_ref = frame_ref;
+        inserted.cap_slot = slot;
+        inserted.cap_owner = &super.cspace;
+        inserted.owns_frame = true;
+        inserted.owns_cap = true;
+        inserted.transitionState(page.PageState.RESIDENT);
+        inserted.dirty = false;
+        inserted.referenced = false;
+        inserted.pagefile_slot = -1;
+        inserted.temp_ro = false;
+        // leave waiters as-is (pager may be waiting)
+        self.mapped_count = self.addr_space.num_mapped();
+
+        // Admit to eviction clock only after the VM metadata reflects a resident page.
+        sos.frame_clock_consider(frame_ref);
 
         tracker.updateAccess(readable, writable, executable);
         tracker.recordMapping(vaddr, super.PAGE_SIZE_4K);
@@ -213,7 +262,7 @@ pub const Client = struct {
 
         try mapping.map_owned_frame(&self.addr_space, cap_slot, vaddr, rights, attrs);
 
-        _ = self.insertPage(vaddr, frame_ref, cap_slot, &super.cspace, owns_frame, owns_cap) catch |err| {
+        const inserted = self.insertPage(vaddr, frame_ref, cap_slot, &super.cspace, owns_frame, owns_cap) catch |err| {
             self.addr_space.recordLeafUnmap(vaddr);
             const unmap_err = sel4.seL4_ARM_Page_Unmap(cap_slot);
             if (unmap_err != sel4.seL4_NoError) {
@@ -228,8 +277,17 @@ pub const Client = struct {
             }
             return err;
         };
+        inserted.region = null;
+        // State is already set correctly from insertPage
+        inserted.dirty = false;
+        inserted.referenced = false;
+        inserted.pagefile_slot = -1;
+        inserted.waiters.reset();
 
         self.mapped_count = self.addr_space.num_mapped();
+
+        // Now that the mapping is recorded as resident, allow eviction clock membership.
+        sos.frame_clock_consider(frame_ref);
     }
 
     pub fn metadataAllocator(self: *Client) std.mem.Allocator {
@@ -281,6 +339,7 @@ pub const Client = struct {
     }
 
     fn releaseAllPages(self: *Self) void {
+        self.releaseAllFileBackings();
         var it = self.addr_space.iterator();
         while (it.next()) |kv| {
             const vaddr = kv.key_ptr.*;
@@ -291,6 +350,33 @@ pub const Client = struct {
         self.mapped_count = 0;
         if (self.addr_space.hasLivePagingNodes()) {
             _ = c.printf("[vm_teardown] warning: paging nodes remain after release\n");
+        }
+    }
+
+    fn releaseAllFileBackings(self: *Self) void {
+        var it = self.addr_space.regions.iter();
+        while (it.next()) |node| {
+            switch (node.reg.backing) {
+                .Anonymous => {},
+                .File => |info| {
+                    releaseFileBackingHandle(info.handle_owner, info.handle_ref);
+                    node.reg.backing = .Anonymous;
+                },
+            }
+        }
+    }
+
+    fn releaseFileBackingHandle(owner: ?*file.ClientIoState, handle_ptr: ?*anyopaque) void {
+        const io_state = owner orelse return;
+        const handle_ref = file.handleRefFromOpaque(handle_ptr) orelse return;
+        const release = io_state.releaseHandleRef(handle_ref);
+        switch (release) {
+            .Closed => |raw| {
+                nfs_handler.closeSync(raw) catch {
+                    _ = c.printf("[vm_mmap] closeSync failed\n");
+                };
+            },
+            else => {},
         }
     }
 
@@ -312,7 +398,7 @@ pub const Client = struct {
                 return allocator.MetadataAllocError.OutOfMemory;
             }
 
-            const frame_ref = sos.alloc_frame();
+            const frame_ref = sos.alloc_frame(sos.FRAME_OWNER_KERNEL, sos.FRAME_FLAG_PINNED);
             if (frame_ref == 0) {
                 _ = c.printf("[vm_meta] alloc_frame failed\n");
                 return allocator.MetadataAllocError.OutOfMemory;
@@ -362,7 +448,7 @@ pub const Client = struct {
         return (self.metadata_base - allocator.METADATA_REGION_START) / allocator.METADATA_REGION_BYTES;
     }
 
-    pub fn leaseMmapRegion(self: *Self, base: usize, prot: c_int) super.VmError!*region.Region {
+    pub fn leaseMmapRegion(self: *Self, base: usize, prot: c_int, backing: region.Backing) super.VmError!*region.Region {
         if (self.active_mmaps >= super.MAX_MMAP_REGIONS) {
             _ = c.printf("[vm_mmap] no free region slots (active=%lu, max=%lu)\n", @as(c_ulong, @intCast(self.active_mmaps)), @as(c_ulong, @intCast(super.MAX_MMAP_REGIONS)));
             return super.VmError.Capacity;
@@ -378,6 +464,7 @@ pub const Client = struct {
         node.* = .{ .rb = undefined, .reg = .{} };
         node.reg.reset(region.RegionKind.Mmap);
         node.reg.configure(base, region.RegionKind.Mmap, prot);
+        node.reg.backing = backing;
 
         if (self.addr_space.findRegion(base)) |exist| {
             if (exist.reg.contains(base)) {
@@ -400,6 +487,13 @@ pub const Client = struct {
         if (!tracker.used) return;
 
         const node: *RegionNode = @alignCast(@fieldParentPtr("reg", tracker));
+        switch (tracker.backing) {
+            .Anonymous => {},
+            .File => |info| {
+                releaseFileBackingHandle(info.handle_owner, info.handle_ref);
+                tracker.backing = .Anonymous;
+            },
+        }
 
         self.addr_space.removeRegion(node);
         self.addr_space.alloc.destroy(node);
@@ -414,6 +508,31 @@ pub const Client = struct {
             return reg;
         }
         return null;
+    }
+
+    pub fn addElfRegion(self: *Self, start: usize, end: usize, prot: c_int) super.VmError!void {
+        if (self.elf_region_count >= MAX_ELF_REGIONS) {
+            _ = c.printf("[vm_elf] too many ELF regions (max=%lu)\n", @as(c_ulong, @intCast(MAX_ELF_REGIONS)));
+            return super.VmError.Capacity;
+        }
+
+        if (start >= end) {
+            _ = c.printf("[vm_elf] invalid region bounds [0x%lx, 0x%lx)\n", @as(c_ulong, @intCast(start)), @as(c_ulong, @intCast(end)));
+            return super.VmError.InvalidArgs;
+        }
+
+        const idx = self.elf_region_count;
+        self.elf_regions[idx].reset(region.RegionKind.Normal);
+        self.elf_regions[idx].configure(start, region.RegionKind.Normal, prot);
+        self.elf_regions[idx].start = start;
+        self.elf_regions[idx].end = end;
+        // Mark as already mapped so pager lookups consider these ranges valid.
+        // ELF segments are populated eagerly by the loader; later faults (after eviction)
+        // must match these regions to pick permissions/backing.
+        self.elf_regions[idx].mapped = true;
+        self.elf_region_count += 1;
+
+        _ = c.printf("[vm_elf] created region %lu: [0x%lx, 0x%lx) prot=%d\n", @as(c_ulong, @intCast(idx)), @as(c_ulong, @intCast(start)), @as(c_ulong, @intCast(end)), prot);
     }
 };
 
@@ -432,7 +551,13 @@ const cimports = @import("cimports");
 const sel4 = cimports.sel4;
 const c = cimports.c;
 const sos = cimports.sos;
+const file = @import("../file.zig");
+const nfs_handler = @import("../nfs_handler.zig");
 
 extern fn sos_metadata_base_runtime() usize;
 
 extern var cspace: sos.cspace_t;
+
+/// Maximum number of ELF regions (PT_LOAD segments) per process
+/// Typical ELF binaries have 2-4 loadable segments
+pub const MAX_ELF_REGIONS: usize = 8;

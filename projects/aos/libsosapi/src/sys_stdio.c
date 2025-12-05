@@ -185,3 +185,50 @@ long sys_close(va_list ap)
     int fd = va_arg(ap, int);
     return sos_close(fd);
 }
+
+long sys_lseek(va_list ap)
+{
+    int fd = va_arg(ap, int);
+    off_t offset = va_arg(ap, off_t);
+    int whence = va_arg(ap, int);
+
+    long long result = sos_lseek(fd, offset, whence);
+    if (result < 0) {
+        errno = (int)(-result);
+        return -1;
+    }
+    return (long)result;
+}
+
+static long unlink_common(const char *pathname)
+{
+    if (pathname == NULL) {
+        errno = EFAULT;
+        return -1;
+    }
+    int rc = sos_unlink(pathname);
+    if (rc < 0) {
+        errno = -rc;
+        return -1;
+    }
+    return rc;
+}
+
+long sys_unlink(va_list ap)
+{
+    const char *pathname = va_arg(ap, const char *);
+    return unlink_common(pathname);
+}
+
+long sys_unlinkat(va_list ap)
+{
+    int dirfd = va_arg(ap, int);
+    const char *pathname = va_arg(ap, const char *);
+    int flags = va_arg(ap, int);
+
+    if (dirfd != AT_FDCWD || flags != 0) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return unlink_common(pathname);
+}

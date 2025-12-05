@@ -1,5 +1,7 @@
 #include <sel4/config.h>
 #include <sel4/types.h>
+/* Avoid including sel4/sel4.h to prevent inline redefinitions; forward declare the needed symbol. */
+void seL4_Yield(void);
 
 #ifdef CONFIG_KERNEL_MCS
 #define MCS_PARAM_DECL(r) register seL4_Word reply_reg asm(r) = reply
@@ -212,4 +214,10 @@ static inline void arm_sys_null(seL4_Word sys) {
   asm volatile("svc #0"
                : /* no outputs */
                : "r"(scno));
+}
+
+/* Provide a concrete symbol for Zig callers; emit the yield syscall directly. */
+void zig_seL4_Yield_bridge(void) {
+  arm_sys_null(seL4_SysYield);
+  asm volatile("" ::: "memory");
 }

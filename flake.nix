@@ -6,10 +6,11 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-23.05";
     nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
     systems.url = "github:nix-systems/default";
+    treefmt-nix.url = "github:numtide/treefmt-nix";
     pwndbg = {
       url = "github:pwndbg/pwndbg";
       inputs.nixpkgs.follows = "nixpkgs-unstable";
-      };
+    };
   };
 
   outputs = inputs @ {
@@ -20,6 +21,9 @@
   }:
     flake-parts.lib.mkFlake {inherit inputs;} {
       systems = import systems;
+      imports = [
+        inputs.treefmt-nix.flakeModule
+      ];
       perSystem = {
         self',
         pkgs,
@@ -37,6 +41,10 @@
         };
         packages = import ./nix/pkgs {inherit self' self pkgs;};
         devShells = import ./nix/shell {inherit self' self lib pkgs inputs;};
+        treefmt = {
+          projectRootFile = "flake.nix";
+          programs.zig.enable = true;
+        };
       };
     };
 }

@@ -6,8 +6,15 @@
 
 #include "frame_table.h"
 #include "ipc.h"
+#include "ut.h"
 
 struct vm_handle;
+
+typedef enum vm_fault_result {
+    VM_FAULT_HANDLED = 0,
+    VM_FAULT_DEFERRED = 1,
+    VM_FAULT_FATAL = 2,
+} vm_fault_result_t;
 
 struct vm_handle *vm_state_acquire(client_t *client);
 struct vm_handle *vm_state_lookup(client_t *client);
@@ -22,11 +29,18 @@ int vm_map_owned_frame(struct vm_handle *handle, uintptr_t vaddr,
                        bool readable, bool writable, bool executable,
                        bool owns_frame, bool owns_cap);
 
+int vm_pageout_abort(size_t frame_ref, uint32_t slot);
+
 uint8_t *vm_get_user_page_data(struct vm_handle *handle, uintptr_t user_vaddr);
 
 void vm_reset_state(struct vm_handle *handle);
 
-bool handle_vm_fault(struct vm_handle *handle, seL4_Word badge,
-                     const seL4_MessageInfo_t *message);
+int vm_add_elf_region(struct vm_handle *handle, uintptr_t start, uintptr_t end,
+                      int prot);
+
+vm_fault_result_t handle_vm_fault(struct vm_handle *handle, seL4_Word badge,
+                                  const seL4_MessageInfo_t *message,
+                                  bool *have_reply, seL4_CPtr *reply,
+                                  ut_t **reply_ut);
 
 uintptr_t sos_metadata_base_runtime(void);

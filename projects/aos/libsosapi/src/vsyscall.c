@@ -31,9 +31,16 @@ void sosapi_init_syscall_table(void)
     muslcsys_install_syscall(__NR_read, sys_read);
     muslcsys_install_syscall(__NR_ioctl, sys_ioctl);
     muslcsys_install_syscall(__NR_openat, sys_openat);
+    muslcsys_install_syscall(__NR_lseek, sys_lseek);
     muslcsys_install_syscall(__NR_brk, sys_brk);
+    muslcsys_install_syscall(__NR_mmap, sys_mmap);
+    muslcsys_install_syscall(__NR_munmap, sys_munmap);
     muslcsys_install_syscall(__NR_writev, sys_writev);
     muslcsys_install_syscall(__NR_write, sys_write);
+    muslcsys_install_syscall(__NR_unlinkat, sys_unlinkat);
+#ifdef __NR_unlink
+    muslcsys_install_syscall(__NR_unlink, sys_unlink);
+#endif
     muslcsys_install_syscall(__NR_set_tid_address, sys_set_tid_address);
     muslcsys_install_syscall(__NR_nanosleep, sys_nanosleep);
     muslcsys_install_syscall(__NR_clock_gettime, sys_clock_gettime);

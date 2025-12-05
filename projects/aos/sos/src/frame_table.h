@@ -14,10 +14,10 @@
 #include "bootstrap.h"
 #include "ut.h"
 
-#include <stdlib.h>
+#include <cspace/cspace.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <cspace/cspace.h>
+#include <stdlib.h>
 
 /*
  * Every frame in the frame table is referenced by a compact index into
@@ -40,10 +40,24 @@ typedef size_t frame_ref_t;
  * correct structure.
  */
 typedef enum {
-    NO_LIST = 1,
-    FREE_LIST = 2,
-    ALLOCATED_LIST = 3,
+  NO_LIST = 1,
+  FREE_LIST = 2,
+  ALLOCATED_LIST = 3,
 } list_id_t;
+
+typedef enum {
+  FRAME_OWNER_KERNEL = 0,
+  FRAME_OWNER_USER = 1,
+  FRAME_OWNER_PAGER = 2,
+  FRAME_OWNER_NETWORK = 3,
+} frame_owner_t;
+
+typedef uint32_t frame_flags_t;
+
+#define FRAME_FLAG_EVICTABLE (1u << 0)
+#define FRAME_FLAG_PINNED (1u << 1)
+#define FRAME_FLAG_DIRTY (1u << 2)
+#define FRAME_FLAG_REFERENCED (1u << 3)
 
 /* Array of names for each of the lists above. */
 extern char *frame_table_list_names[];
@@ -53,17 +67,19 @@ extern char *frame_table_list_names[];
 
 /* The actual representation of a frame in the frame table. */
 typedef struct frame frame_t;
-PACKED struct frame {
-    /* Page used to map frame into SOS memory. */
-    seL4_ARM_Page sos_page: 20;
-    /* Index in frame table of previous element in list. */
-    frame_ref_t prev : 19;
-    /* Index in frame table of next element in list. */
-    frame_ref_t next : 19;
-    /* Indicates which list the frame is in. */
-    list_id_t list_id : 2;
-    /* Unused bits */
-    size_t unused : 4;
+struct frame {
+  seL4_ARM_Page sos_page;
+  frame_ref_t prev;
+  frame_ref_t next;
+  list_id_t list_id;
+  frame_owner_t owner;
+  frame_flags_t flags;
+  uint16_t pin_count;
+  uint16_t reserved16;
+  uint32_t swap_slot; /* bound pagefile slot when swapped or pending */
+  /* Clock list linkage, NULL_FRAME when not enqueued. */
+  frame_ref_t clock_prev;
+  frame_ref_t clock_next;
 };
 compile_time_assert("Small CPtr size", 20 >= INITIAL_TASK_CSPACE_BITS);
 
@@ -103,7 +119,7 @@ cspace_t *frame_table_cspace(void);
  * You will need to modify the frame table to deal with the case where
  * only a limited number of frames may be held by the frame table.
  */
-frame_ref_t alloc_frame(void);
+frame_ref_t alloc_frame(frame_owner_t owner, frame_flags_t flags);
 
 /*
  * Free a frame allocated by the frame table.
@@ -112,6 +128,12 @@ frame_ref_t alloc_frame(void);
  * returning it to the untyped allocator.
  */
 void free_frame(frame_ref_t frame_ref);
+bool frame_bind_slot(frame_ref_t frame_ref, uint32_t slot);
+void frame_unbind_slot(frame_ref_t frame_ref);
+
+/* Expose clock eligibility reconsideration so VM mappings can admit frames
+ * only after they are fully recorded as resident. */
+void frame_clock_consider(frame_ref_t frame_ref);
 
 /*
  * Get the contents of a frame as mapped into SOS.
@@ -120,6 +142,11 @@ void free_frame(frame_ref_t frame_ref);
  * frame data as mapped into SOS.
  */
 unsigned char *frame_data(frame_ref_t frame_ref);
+
+/*
+ * Mark a frame as referenced.
+ */
+void frame_mark_referenced(frame_ref_t frame_ref);
 
 /*
  * Get the capability to the page used to map the frame into SOS.
@@ -135,3 +162,25 @@ seL4_ARM_Page frame_page(frame_ref_t frame_ref);
  * This should only be used for debugging.
  */
 frame_t *frame_from_ref(frame_ref_t frame_ref);
+
+/* Mark a frame dirty. */
+void frame_mark_dirty(frame_ref_t frame_ref);
+
+/*
+ * Select an evictable victim frame using the clock algorithm.
+ *
+ * Returns NULL_FRAME if no eligible frame exists.
+ */
+frame_ref_t clock_select_victim(void);
+
+/*
+ * Page-out a victim frame to the pagefile synchronously.
+ * Caller is responsible for unmapping and VM state updates.
+ */
+int pageout_frame(frame_ref_t victim);
+
+/* Convenience helper: select a victim via clock list and page it out. */
+int evict_one_frame(void);
+
+/* Mark a frame as DIRTY. */
+void frame_mark_dirty(frame_ref_t frame_ref);

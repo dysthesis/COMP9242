@@ -15,6 +15,7 @@
 #include <cspace/cspace.h>
 #include <sel4runtime.h>
 #include <threads.h>
+#include <stddef.h>
 
 extern cspace_t cspace;
 
@@ -31,11 +32,15 @@ typedef struct {
   ut_t *sched_context_ut;
   seL4_CPtr sched_context;
 
-  ut_t *stack_ut;
-  seL4_CPtr stack;
+  /* TLS backing store; retained for lifetime of thread. */
+  void *tls_mem;
+  uintptr_t tls_base;
+
+  /* Number of stack pages allocated for diagnostic purposes. */
+  size_t stack_pages;
+
   seL4_Word badge;
 
-  uintptr_t tls_base;
 } sos_thread_t;
 
 typedef void thread_main_f(void *);

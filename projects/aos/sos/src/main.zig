@@ -6,6 +6,8 @@ const console_name_ptr: [*c]const u8 = @ptrCast(&console_name[0]);
 
 const NormalisePathError = error{
     NameTooLong,
+    InvalidComponent,
+    Empty,
 };
 
 const Path = struct {
@@ -40,90 +42,22 @@ const Path = struct {
 
 fn normaliseInto(out: []u8, input: []const u8) NormalisePathError!usize {
     if (out.len == 0) return error.NameTooLong;
+    if (input.len == 0) return error.Empty;
+    if (input.len >= out.len) return error.NameTooLong;
 
-    const absolute = input.len > 0 and input[0] == '/';
-    var out_len: usize = 0;
-    var depth: usize = 0;
-    var segment_end: [worker.OPEN_PATH_CAPACITY]usize = undefined;
-    var segments: usize = 0;
-
-    if (absolute) {
-        out[0] = '/';
-        out_len = 1;
+    if (std.mem.indexOfScalar(u8, input, '/')) |_| {
+        return error.InvalidComponent;
+    }
+    if (std.mem.indexOfScalar(u8, input, '\\')) |_| {
+        return error.InvalidComponent;
+    }
+    if (std.mem.indexOf(u8, input, "..")) |_| {
+        return error.InvalidComponent;
     }
 
-    var i: usize = 0;
-    while (i < input.len) {
-        while (i < input.len and (input[i] == '/' or input[i] == 0)) : (i += 1) {}
-        if (i >= input.len) break;
-
-        const start = i;
-        while (i < input.len and input[i] != '/' and input[i] != 0) : (i += 1) {}
-        const segment = input[start..i];
-
-        if (segment.len == 0 or std.mem.eql(u8, segment, ".")) {
-            continue;
-        }
-
-        if (std.mem.eql(u8, segment, "..")) {
-            if (depth > 0) {
-                depth -= 1;
-                out_len = segment_end[depth];
-                if (absolute and out_len == 0) {
-                    out[out_len] = '/';
-                    out_len = 1;
-                }
-            } else if (!absolute) {
-                if (segments > 0) {
-                    if (out_len >= out.len) return error.NameTooLong;
-                    out[out_len] = '/';
-                    out_len += 1;
-                }
-                if (out_len + 2 >= out.len) return error.NameTooLong;
-                out[out_len] = '.';
-                out[out_len + 1] = '.';
-                out_len += 2;
-                segment_end[depth] = out_len;
-                depth += 1;
-                segments += 1;
-            }
-            continue;
-        }
-
-        const base_len: usize = if (absolute) 1 else 0;
-        if (out_len > base_len and segments > 0) {
-            if (out_len >= out.len) return error.NameTooLong;
-            out[out_len] = '/';
-            out_len += 1;
-        } else if (!absolute and segments > 0) {
-            if (out_len >= out.len) return error.NameTooLong;
-            out[out_len] = '/';
-            out_len += 1;
-        }
-
-        if (out_len + segment.len >= out.len) return error.NameTooLong;
-        std.mem.copyForwards(u8, out[out_len .. out_len + segment.len], segment);
-        out_len += segment.len;
-
-        if (depth >= segment_end.len) return error.NameTooLong;
-        segment_end[depth] = out_len;
-        depth += 1;
-        segments += 1;
-    }
-
-    if (absolute and out_len == 1) {
-        out[out_len] = 0;
-        return out_len;
-    }
-
-    if (!absolute and segments == 0) {
-        out[0] = 0;
-        return 0;
-    }
-
-    if (out_len >= out.len) return error.NameTooLong;
-    out[out_len] = 0;
-    return out_len;
+    std.mem.copyForwards(u8, out[0..input.len], input);
+    out[input.len] = 0;
+    return input.len;
 }
 
 fn mapFileTableError(err: file.FileTableError) c_int {
@@ -157,8 +91,9 @@ const ServerContext = struct {
         const client_ctx = clients.get(client_id) orelse {
             return SyscallResponse{ .Open = .{ .result = -sos.EINVAL } };
         };
+        const client_id_u16 = @as(u16, @intCast(client_ctx.id));
         const state = client_ctx.ioState();
-        ensureStdio(state);
+        ensureStdio(state, client_id_u16);
 
         const flags: c_int = @intCast(args.arg);
         const user_buf_addr: usize = @intCast(args.buf_addr);
@@ -195,13 +130,19 @@ const ServerContext = struct {
 
         const expected = "console";
         if (path_slice.len == expected.len and std.mem.eql(u8, path_slice, expected)) {
-            return self.handleConsoleOpen(state, flags, client_id);
+            return self.handleConsoleOpen(client_ctx, state, flags, client_id);
         }
 
         return self.startAsyncOpen(caller, client_ctx, path_slice, flags);
     }
 
-    fn handleConsoleOpen(self: *ServerContext, state: *SosClientIoState, flags: c_int, client_id: usize) SyscallResponse {
+    fn handleConsoleOpen(
+        self: *ServerContext,
+        client_ctx: *clients.Client,
+        state: *SosClientIoState,
+        flags: c_int,
+        client_id: usize,
+    ) SyscallResponse {
         _ = self;
         const accmode = flags & c.O_ACCMODE;
         const want_read = accmode == c.O_RDONLY or accmode == c.O_RDWR;
@@ -210,47 +151,70 @@ const ServerContext = struct {
             return .{ .Open = .{ .result = -sos.EINVAL } };
         }
 
-        if (want_read and sos.global_console.reader_in_use) {
-            return .{ .Open = .{ .result = -sos.EBUSY } };
-        }
-
-        var fd: c_int = -1;
-        var i: usize = 0;
-        while (i < SOS_MAX_OPEN_FILES) : (i += 1) {
-            if (!state.fds[i].used) {
-                fd = @intCast(i);
-                break;
-            }
-        }
-        if (fd < 0) {
-            return .{ .Open = .{ .result = -sos.EMFILE } };
-        }
-
         const console_ops = file.vfs_lookup_ops(console_name_ptr) orelse {
             return .{ .Open = .{ .result = -sos.ENODEV } };
+        };
+
+        const client_id_u16 = @as(u16, @intCast(client_id));
+        console.acquireConsoleAccess(client_id_u16, want_read, want_write) catch {
+            return .{ .Open = .{ .result = -sos.EBUSY } };
         };
 
         var dev_id: c_int = 0;
         if (console_ops.open) |open_fn| {
             const ret = open_fn(console_name_ptr, flags, &dev_id);
             if (ret < 0) {
+                var temp_entry = file.empty_fd;
+                temp_entry.readable = want_read;
+                temp_entry.writable = want_write;
+                console.releaseConsoleAccess(client_id_u16, &temp_entry);
                 return .{ .Open = .{ .result = ret } };
             }
         }
 
-        const client_id_u16 = @as(@TypeOf(sos.global_console.reader_owner_id), @intCast(client_id));
-        if (want_read) {
-            sos.global_console.reader_in_use = true;
-            sos.global_console.reader_owner_id = client_id_u16;
-        }
-        if (want_write) {
-            sos.global_console.write_refcnt += 1;
-        }
+        const table = client_ctx.fileTable();
+        const console_handle: file.FileHandle = console.console_object_ptr orelse unreachable;
+        const fd = table.allocFd(console_handle) catch |alloc_err| {
+            if (console_ops.close) |close_fn| {
+                _ = close_fn(dev_id);
+            }
+            var temp_entry = file.empty_fd;
+            temp_entry.readable = want_read;
+            temp_entry.writable = want_write;
+            console.releaseConsoleAccess(client_id_u16, &temp_entry);
+            const errno = mapFileTableError(alloc_err);
+            return .{ .Open = .{ .result = -errno } };
+        };
 
         const fd_index: usize = @intCast(fd);
+        if (fd_index >= state.fds.len) {
+            table.freeFd(fd_index) catch {};
+            if (console_ops.close) |close_fn| {
+                _ = close_fn(dev_id);
+            }
+            var temp_entry = file.empty_fd;
+            temp_entry.readable = want_read;
+            temp_entry.writable = want_write;
+            console.releaseConsoleAccess(client_id_u16, &temp_entry);
+            return .{ .Open = .{ .result = -sos.EMFILE } };
+        }
+
+        if (state.fds[fd_index].used) {
+            table.freeFd(fd_index) catch {};
+            if (console_ops.close) |close_fn| {
+                _ = close_fn(dev_id);
+            }
+            var temp_entry = file.empty_fd;
+            temp_entry.readable = want_read;
+            temp_entry.writable = want_write;
+            console.releaseConsoleAccess(client_id_u16, &temp_entry);
+            return .{ .Open = .{ .result = -sos.EBUSY } };
+        }
+
         const slot = &state.fds[fd_index];
         setupConsoleFd(slot, console_ops, want_read, want_write, dev_id);
-        return .{ .Open = .{ .result = fd } };
+        state.file_table.entries[fd_index].handle = @ptrCast(slot);
+        return .{ .Open = .{ .result = @as(c_int, @intCast(fd)) } };
     }
 
     fn startAsyncGetDirent(
@@ -274,6 +238,13 @@ const ServerContext = struct {
             self.reply.* = old_reply_cap;
             self.reply_ut.* = old_reply_ut;
             return .{ .GetDirent = .{ .result = -sos.ENOMEM } };
+        }
+
+        if (out_len <= 1) {
+            continuation.ContinuationPool.free(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            return .{ .GetDirent = .{ .result = -sos.ENAMETOOLONG } };
         }
 
         const capacity = @min(out_len - 1, worker.WRITE_BUFFER_CAPACITY);
@@ -364,6 +335,8 @@ const ServerContext = struct {
         const normalized_path = Path.initFromSlice(path) catch |err| {
             const errno: c_int = switch (err) {
                 error.NameTooLong => sos.ENAMETOOLONG,
+                error.InvalidComponent => sos.EPERM,
+                error.Empty => sos.EINVAL,
             };
             continuation.FileOpQueue.remove(cont);
             self.reply.* = old_reply_cap;
@@ -374,20 +347,12 @@ const ServerContext = struct {
             return SyscallResponse{ .Open = .{ .result = -errno } };
         };
 
-        if (normalized_path.isEmpty()) {
-            continuation.FileOpQueue.remove(cont);
-            self.reply.* = old_reply_cap;
-            self.reply_ut.* = old_reply_ut;
-            sos.ut_free(new_reply_ut.?);
-            cont.cleanup();
-            continuation.ContinuationPool.free(cont);
-            return SyscallResponse{ .Open = .{ .result = -sos.EINVAL } };
-        }
-
         var open_params = &file_op_state.params.Open;
         normalized_path.copyTo(open_params.path[0..]) catch |err| {
             const errno: c_int = switch (err) {
                 error.NameTooLong => sos.ENAMETOOLONG,
+                error.InvalidComponent => sos.EPERM,
+                error.Empty => sos.EINVAL,
             };
             continuation.FileOpQueue.remove(cont);
             self.reply.* = old_reply_cap;
@@ -418,6 +383,95 @@ const ServerContext = struct {
         return null;
     }
 
+    fn startAsyncUnlink(
+        self: *ServerContext,
+        caller: *sos.client_t,
+        client_ctx: *clients.Client,
+        path: []const u8,
+    ) ?SyscallResponse {
+        if (path.len == 0) {
+            return SyscallResponse{ .Unlink = .{ .result = -sos.EINVAL } };
+        }
+
+        const cont = continuation.ContinuationPool.alloc() orelse {
+            return SyscallResponse{ .Unlink = .{ .result = -sos.ENOMEM } };
+        };
+
+        const old_reply_cap = self.reply.*;
+        const old_reply_ut = self.reply_ut.*;
+        const new_reply_ut = sos.alloc_retype(self.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
+        if (new_reply_ut == null) {
+            continuation.ContinuationPool.free(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            return SyscallResponse{ .Unlink = .{ .result = -sos.ENOMEM } };
+        }
+
+        cont.client = caller;
+        cont.reply = old_reply_cap;
+        cont.reply_ut = old_reply_ut;
+        cont.resume_fn = fileOpResume;
+        cont.state = .{
+            .FileOp = worker.FileOpState{
+                .params = .{ .Unlink = .{
+                    .path = undefined,
+                    .client_id = @intCast(client_ctx.id),
+                } },
+            },
+        };
+
+        var file_op_state = &cont.state.FileOp;
+        file_op_state.reset();
+
+        const normalized_path = Path.initFromSlice(path) catch |err| {
+            const errno: c_int = switch (err) {
+                error.NameTooLong => sos.ENAMETOOLONG,
+                error.InvalidComponent => sos.EPERM,
+                error.Empty => sos.EINVAL,
+            };
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Unlink = .{ .result = -errno } };
+        };
+
+        var unlink_params = &file_op_state.params.Unlink;
+        normalized_path.copyTo(unlink_params.path[0..]) catch |err| {
+            const errno: c_int = switch (err) {
+                error.NameTooLong => sos.ENAMETOOLONG,
+                error.InvalidComponent => sos.EPERM,
+                error.Empty => sos.EINVAL,
+            };
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Unlink = .{ .result = -errno } };
+        };
+
+        continuation.FileOpQueue.enqueue(cont);
+
+        const enqueue_rc: c_int = worker.workerEnqueue(file_op_state);
+        if (enqueue_rc < 0) {
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Unlink = .{ .result = enqueue_rc } };
+        }
+
+        self.have_reply.* = false;
+        self.reply_ut.* = new_reply_ut.?;
+        return null;
+    }
+
     fn startAsyncRead(
         self: *ServerContext,
         caller: *sos.client_t,
@@ -432,6 +486,17 @@ const ServerContext = struct {
             const errno: c_int = mapFileTableError(err);
             return SyscallResponse{ .Read = .{ .result = -errno } };
         };
+        const io_state = client_ctx.ioState();
+        if (fd_index >= io_state.fds.len) {
+            return SyscallResponse{ .Read = .{ .result = -sos.EBADF } };
+        }
+        const fd_entry = io_state.fds[fd_index];
+        if (!fd_entry.used or fd_entry.kind != file.FileKind.regular) {
+            return SyscallResponse{ .Read = .{ .result = -sos.EBADF } };
+        }
+        if (!fd_entry.readable) {
+            return SyscallResponse{ .Read = .{ .result = -sos.EBADF } };
+        }
 
         const cont = continuation.ContinuationPool.alloc() orelse {
             return SyscallResponse{ .Read = .{ .result = -sos.ENOMEM } };
@@ -447,7 +512,7 @@ const ServerContext = struct {
             return SyscallResponse{ .Read = .{ .result = -sos.ENOMEM } };
         }
 
-        const count = @min(requested, worker.WRITE_BUFFER_CAPACITY);
+        const count = requested;
 
         cont.client = caller;
         cont.reply = old_reply_cap;
@@ -501,6 +566,17 @@ const ServerContext = struct {
             const errno: c_int = mapFileTableError(err);
             return SyscallResponse{ .Write = .{ .result = -errno } };
         };
+        const io_state = client_ctx.ioState();
+        if (fd_index >= io_state.fds.len) {
+            return SyscallResponse{ .Write = .{ .result = -sos.EBADF } };
+        }
+        const fd_entry = io_state.fds[fd_index];
+        if (!fd_entry.used or fd_entry.kind != file.FileKind.regular) {
+            return SyscallResponse{ .Write = .{ .result = -sos.EBADF } };
+        }
+        if (!fd_entry.writable) {
+            return SyscallResponse{ .Write = .{ .result = -sos.EBADF } };
+        }
 
         const cont = continuation.ContinuationPool.alloc() orelse {
             return SyscallResponse{ .Write = .{ .result = -sos.ENOMEM } };
@@ -516,7 +592,7 @@ const ServerContext = struct {
             return SyscallResponse{ .Write = .{ .result = -sos.ENOMEM } };
         }
 
-        const count = @min(requested, worker.WRITE_BUFFER_CAPACITY);
+        const count = requested;
 
         cont.client = caller;
         cont.reply = old_reply_cap;
@@ -536,19 +612,7 @@ const ServerContext = struct {
         var file_op_state = &cont.state.FileOp;
         file_op_state.reset();
         file_op_state.vm_handle = vm_handle;
-        file_op_state.payload_len = count;
-
-        if (count > 0) {
-            vm_handle.copyFromClient(user_buf, file_op_state.payload[0..count]) catch |err| {
-                const errno: c_int = vm.vmErrorToErrno(err);
-                self.reply.* = old_reply_cap;
-                self.reply_ut.* = old_reply_ut;
-                sos.ut_free(new_reply_ut.?);
-                cont.cleanup();
-                continuation.ContinuationPool.free(cont);
-                return SyscallResponse{ .Write = .{ .result = -errno } };
-            };
-        }
+        file_op_state.payload_len = 0;
 
         continuation.FileOpQueue.enqueue(cont);
 
@@ -561,6 +625,78 @@ const ServerContext = struct {
             cont.cleanup();
             continuation.ContinuationPool.free(cont);
             return SyscallResponse{ .Write = .{ .result = enqueue_rc } };
+        }
+
+        self.have_reply.* = false;
+        self.reply_ut.* = new_reply_ut.?;
+        return null;
+    }
+
+    fn startAsyncLseek(
+        self: *ServerContext,
+        caller: *sos.client_t,
+        client_ctx: *clients.Client,
+        fd_index: usize,
+        offset: i64,
+        whence: c_int,
+    ) ?SyscallResponse {
+        const table = client_ctx.fileTable();
+        _ = table.getHandle(fd_index) catch |err| {
+            const errno: c_int = mapFileTableError(err);
+            return SyscallResponse{ .Lseek = .{ .result = -@as(i64, errno) } };
+        };
+        const io_state = client_ctx.ioState();
+        if (fd_index >= io_state.fds.len) {
+            return SyscallResponse{ .Lseek = .{ .result = -@as(i64, sos.EBADF) } };
+        }
+        const fd_entry = io_state.fds[fd_index];
+        if (!fd_entry.used or fd_entry.kind != file.FileKind.regular) {
+            return SyscallResponse{ .Lseek = .{ .result = -@as(i64, sos.EBADF) } };
+        }
+
+        const cont = continuation.ContinuationPool.alloc() orelse {
+            return SyscallResponse{ .Lseek = .{ .result = -@as(i64, sos.ENOMEM) } };
+        };
+
+        const old_reply_cap = self.reply.*;
+        const old_reply_ut = self.reply_ut.*;
+        const new_reply_ut = sos.alloc_retype(self.reply, sel4.seL4_ReplyObject, sel4.seL4_ReplyBits);
+        if (new_reply_ut == null) {
+            continuation.ContinuationPool.free(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            return SyscallResponse{ .Lseek = .{ .result = -@as(i64, sos.ENOMEM) } };
+        }
+
+        cont.client = caller;
+        cont.reply = old_reply_cap;
+        cont.reply_ut = old_reply_ut;
+        cont.resume_fn = fileOpResume;
+        cont.state = .{
+            .FileOp = worker.FileOpState{
+                .params = .{ .Lseek = .{
+                    .fd = fd_index,
+                    .offset = offset,
+                    .whence = whence,
+                    .client_id = @intCast(client_ctx.id),
+                } },
+            },
+        };
+
+        var file_op_state = &cont.state.FileOp;
+        file_op_state.reset();
+
+        continuation.FileOpQueue.enqueue(cont);
+
+        const enqueue_rc: c_int = worker.workerEnqueue(file_op_state);
+        if (enqueue_rc < 0) {
+            continuation.FileOpQueue.remove(cont);
+            self.reply.* = old_reply_cap;
+            self.reply_ut.* = old_reply_ut;
+            sos.ut_free(new_reply_ut.?);
+            cont.cleanup();
+            continuation.ContinuationPool.free(cont);
+            return SyscallResponse{ .Lseek = .{ .result = @as(i64, enqueue_rc) } };
         }
 
         self.have_reply.* = false;
@@ -613,6 +749,8 @@ const ServerContext = struct {
         const normalized_path = Path.initFromSlice(path) catch |err| {
             const errno: c_int = switch (err) {
                 error.NameTooLong => sos.ENAMETOOLONG,
+                error.InvalidComponent => sos.EPERM,
+                error.Empty => sos.EINVAL,
             };
             continuation.FileOpQueue.remove(cont);
             self.reply.* = old_reply_cap;
@@ -623,20 +761,12 @@ const ServerContext = struct {
             return SyscallResponse{ .Stat = .{ .result = -errno } };
         };
 
-        if (normalized_path.isEmpty()) {
-            continuation.FileOpQueue.remove(cont);
-            self.reply.* = old_reply_cap;
-            self.reply_ut.* = old_reply_ut;
-            sos.ut_free(new_reply_ut.?);
-            cont.cleanup();
-            continuation.ContinuationPool.free(cont);
-            return SyscallResponse{ .Stat = .{ .result = -sos.EINVAL } };
-        }
-
         var stat_params = &file_op_state.params.Stat;
         normalized_path.copyTo(stat_params.path[0..]) catch |err| {
             const errno: c_int = switch (err) {
                 error.NameTooLong => sos.ENAMETOOLONG,
+                error.InvalidComponent => sos.EPERM,
+                error.Empty => sos.EINVAL,
             };
             continuation.FileOpQueue.remove(cont);
             self.reply.* = old_reply_cap;
@@ -793,6 +923,9 @@ fn handleDecodedSyscall(ctx: *ServerContext, syscall: Syscall) ?SyscallResponse 
         .Brk => |args| handleBrk(ctx, args),
         .Mmap => |args| handleMmap(ctx, args),
         .GetDirent => |args| handleGetDirent(ctx, args),
+        .PagerStats => handlePagerStats(ctx),
+        .Lseek => |args| handleLseek(ctx, args),
+        .Unlink => |args| handleUnlink(ctx, args),
     };
 }
 
@@ -804,10 +937,44 @@ fn fileOpResume(
     result.* = .{ .Error = .{ .errno = sos.ENOSYS } };
 }
 
+var drain_log_counter: usize = 0;
+
 pub export fn checkCompletedFileOps() callconv(.c) void {
     while (continuation.FileOpQueue.pollCompleted()) |cont| {
         if (!cont.processFileOpCompletion()) {
             continuation.ContinuationPool.free(cont);
+        }
+    }
+    vm_fault.pagerPollCompletions();
+    // Drain page-out completions to avoid synchronous waits
+    drainPageOutCompletions();
+}
+
+fn drainPageOutCompletions() void {
+    if (drain_log_counter < 64) {
+        _ = c.printf("[pageout] drain tick %lu\n", @as(c_ulong, @intCast(drain_log_counter)));
+        drain_log_counter += 1;
+    }
+    var loops: usize = 0;
+    while (loops < 8) : (loops += 1) {
+        var frame_ref: usize = 0;
+        var slot: u32 = 0;
+        const rc = worker.pageout_poll_complete(&frame_ref, &slot);
+        if (rc == -sos.EAGAIN) break;
+
+        if (rc != 0) {
+            _ = c.printf("[pageout] completion error rc=%d frame=%lu slot=%u\n", rc, @as(c_ulong, @intCast(frame_ref)), @as(c_uint, slot));
+            // On failure we still free the slot to avoid leaks
+            pagefile.pagefile_free_slot(slot);
+            continue;
+        }
+
+        const rc2 = vm.vm_pageout_finalise(frame_ref, slot);
+        if (rc2 != 0) {
+            _ = c.printf("[pageout] finalise error rc=%d frame=%lu slot=%u\n", rc2, @as(c_ulong, @intCast(frame_ref)), @as(c_uint, slot));
+            pagefile.pagefile_free_slot(slot);
+        } else {
+            _ = c.printf("[pageout] finalise ok frame=%lu slot=%u\n", @as(c_ulong, @intCast(frame_ref)), @as(c_uint, slot));
         }
     }
 }
@@ -847,6 +1014,17 @@ fn handleGetDirent(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     return ctx.startAsyncGetDirent(caller, client_ctx, vm_handle, idx - 1, out_addr, out_len);
 }
 
+fn handlePagerStats(_: *ServerContext) ?SyscallResponse {
+    const snapshot = vm_fault.pagerStatsSnapshot();
+    return SyscallResponse{ .PagerStats = .{
+        .deferred_faults = @as(u64, @intCast(snapshot.deferred_faults)),
+        .dedup_hits = @as(u64, @intCast(snapshot.dedup_hits)),
+        .job_submissions = @as(u64, @intCast(snapshot.job_submissions)),
+        .job_completions = @as(u64, @intCast(snapshot.job_completions)),
+        .job_failures = @as(u64, @intCast(snapshot.job_failures)),
+    } };
+}
+
 fn handleClose(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     const caller = ctx.caller orelse {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EINVAL)) } };
@@ -860,8 +1038,8 @@ fn handleClose(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     const client_ctx = clients.get(client_id) orelse {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EINVAL)) } };
     };
-    var state = client_ctx.ioState();
-    ensureStdio(state);
+    const state = client_ctx.ioState();
+    ensureStdio(state, client_id_u16);
     if (!state.initialised) {
         return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EBADF)) } };
     }
@@ -877,24 +1055,22 @@ fn handleClose(ctx: *ServerContext, args: anytype) ?SyscallResponse {
 
     if (is_console) {
         const entry = &state.fds[fd_index];
-        if (entry.refcnt != 0) {
-            return SyscallResponse{ .Close = .{ .result = @as(c_int, (-sos.EBUSY)) } };
+        if (entry.refcnt > 1) {
+            entry.refcnt -= 1;
+            return SyscallResponse{ .Close = .{ .result = 0 } };
         }
 
-        if (entry.kind == .dev_console and entry.obj == console_object_ptr) {
-            if (entry.readable and sos.global_console.reader_in_use and sos.global_console.reader_owner_id == client_id_u16) {
-                sos.global_console.reader_in_use = false;
-                sos.global_console.reader_owner_id = 0;
-            }
-            if (entry.writable and sos.global_console.write_refcnt > 0) {
-                sos.global_console.write_refcnt -= 1;
-            }
-        }
+        console.releaseConsoleAccess(client_id_u16, entry);
 
         if (entry.ops) |ops_ptr| {
             if (ops_ptr.close) |close_fn| {
                 _ = close_fn(entry.dev_id);
             }
+        }
+
+        if (fd_index >= 3) {
+            const table = client_ctx.fileTable();
+            table.freeFd(fd_index) catch {};
         }
 
         entry.* = empty_fd;
@@ -957,7 +1133,7 @@ fn readResumeFn(cont: *continuation.Continuation, event_data: ?*anyopaque, resul
         return;
     }
 
-    // Success - copy to user buffer
+    // Success, copy to user buffer
     if (read_result > 0) {
         const copied = state.vm_handle.copyToUserBuffer(state.user_buf_addr, &temp_buf, @intCast(read_result));
         if (!copied) {
@@ -966,7 +1142,7 @@ fn readResumeFn(cont: *continuation.Continuation, event_data: ?*anyopaque, resul
         }
     }
 
-    // Serialize response
+    // Serialise response
     const resp = SyscallResponse{ .Read = .{ .result = @intCast(read_result) } };
     const msg = resp.serialise();
     result.* = .{ .Complete = .{ .response = msg } };
@@ -978,8 +1154,9 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     if (client_id >= MAX_CLIENTS) return .{ .Read = .{ .result = -sos.EINVAL } };
 
     const client_ctx = clients.get(client_id) orelse return .{ .Read = .{ .result = -sos.EINVAL } };
+    const client_id_u16 = @as(u16, @intCast(client_ctx.id));
     const state = client_ctx.ioState();
-    ensureStdio(state);
+    ensureStdio(state, client_id_u16);
     if (!state.initialised) return .{ .Read = .{ .result = -sos.EBADF } };
 
     const fd_raw: c_int = @intCast(args.arg);
@@ -997,6 +1174,9 @@ fn handleRead(ctx: *ServerContext, args: anytype) ?SyscallResponse {
 
     if (is_console) {
         const entry = &state.fds[fd_index];
+        if (!entry.readable) {
+            return .{ .Read = .{ .result = -sos.EBADF } };
+        }
         const ops_ptr = entry.ops orelse return .{ .Read = .{ .result = -sos.ENOSYS } };
         const read_fn = ops_ptr.read orelse return .{ .Read = .{ .result = -sos.ENOSYS } };
 
@@ -1096,8 +1276,9 @@ fn handleWrite(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     if (client_id >= MAX_CLIENTS) return .{ .Write = .{ .result = -sos.EINVAL } };
 
     const client_ctx = clients.get(client_id) orelse return .{ .Write = .{ .result = -sos.EINVAL } };
+    const client_id_u16 = @as(u16, @intCast(client_ctx.id));
     const state = client_ctx.ioState();
-    ensureStdio(state);
+    ensureStdio(state, client_id_u16);
     if (!state.initialised) return .{ .Write = .{ .result = -sos.EBADF } };
 
     const fd_raw: c_int = @intCast(args.arg);
@@ -1115,6 +1296,9 @@ fn handleWrite(ctx: *ServerContext, args: anytype) ?SyscallResponse {
 
     if (is_console) {
         const entry = &state.fds[fd_index];
+        if (!entry.writable) {
+            return .{ .Write = .{ .result = -sos.EBADF } };
+        }
         const write_fn = entry.ops.?.write orelse return .{ .Write = .{ .result = -sos.ENOSYS } };
 
         const WriteCtx = struct {
@@ -1150,14 +1334,39 @@ fn handleWrite(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     return ctx.startAsyncWrite(caller, client_ctx, vm_handle, fd_index, user_buf_addr, req);
 }
 
+fn handleLseek(ctx: *ServerContext, args: anytype) ?SyscallResponse {
+    const caller = ctx.caller orelse return .{ .Lseek = .{ .result = -@as(i64, sos.EINVAL) } };
+    const client_id: usize = @intCast(caller.id);
+    if (client_id >= MAX_CLIENTS) return .{ .Lseek = .{ .result = -@as(i64, sos.EINVAL) } };
+
+    const client_ctx = clients.get(client_id) orelse return .{ .Lseek = .{ .result = -@as(i64, sos.EINVAL) } };
+    const client_id_u16 = @as(u16, @intCast(client_ctx.id));
+    const state = client_ctx.ioState();
+    ensureStdio(state, client_id_u16);
+    if (!state.initialised) return .{ .Lseek = .{ .result = -@as(i64, sos.EBADF) } };
+
+    const fd_raw: c_int = @intCast(wordToI64(args.fd));
+    if (fd_raw < 0 or fd_raw >= SOS_MAX_OPEN_FILES) return .{ .Lseek = .{ .result = -@as(i64, sos.EBADF) } };
+    const fd_index: usize = @intCast(fd_raw);
+
+    const whence_raw: c_int = @intCast(wordToI64(args.whence));
+    if (whence_raw != c.SEEK_SET and whence_raw != c.SEEK_CUR and whence_raw != c.SEEK_END) {
+        return .{ .Lseek = .{ .result = -@as(i64, sos.EINVAL) } };
+    }
+
+    const offset = wordToI64(args.offset);
+    return ctx.startAsyncLseek(caller, client_ctx, fd_index, offset, whence_raw);
+}
+
 fn handleStat(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     const caller = ctx.caller orelse return .{ .Stat = .{ .result = -sos.EINVAL } };
     const client_id: usize = @intCast(caller.id);
     if (client_id >= MAX_CLIENTS) return .{ .Stat = .{ .result = -sos.EINVAL } };
 
     const client_ctx = clients.get(client_id) orelse return .{ .Stat = .{ .result = -sos.EINVAL } };
+    const client_id_u16 = @as(u16, @intCast(client_ctx.id));
     const state = client_ctx.ioState();
-    ensureStdio(state);
+    ensureStdio(state, client_id_u16);
 
     const path_len = std.math.cast(usize, args.path_len) orelse return .{ .Stat = .{ .result = -sos.EINVAL } };
     const out_len = std.math.cast(usize, args.out_len) orelse return .{ .Stat = .{ .result = -sos.EINVAL } };
@@ -1191,7 +1400,56 @@ fn handleStat(ctx: *ServerContext, args: anytype) ?SyscallResponse {
     path_buf[copied] = 0;
     const path_slice = path_buf[0..copied];
 
+    if (path_slice.len == console_name.len and std.mem.eql(u8, path_slice, console_name)) {
+        var console_stat = sos_types.sos_stat_t{
+            .st_type = sos_types.ST_SPECIAL,
+            .st_fmode = sos_types.FM_READ | sos_types.FM_WRITE,
+            .st_size = 0,
+            .st_ctime = 0,
+            .st_atime = 0,
+        };
+        const stat_bytes = std.mem.asBytes(&console_stat);
+        vm_handle.copyToClient(stat_bytes, @intCast(args.out_addr)) catch |err| {
+            const errno: c_int = vm.vmErrorToErrno(err);
+            return .{ .Stat = .{ .result = -errno } };
+        };
+        return .{ .Stat = .{ .result = 0 } };
+    }
+
     return ctx.startAsyncStat(caller, client_ctx, vm_handle, path_slice, @intCast(args.out_addr), out_len);
+}
+
+fn handleUnlink(ctx: *ServerContext, args: anytype) ?SyscallResponse {
+    const caller = ctx.caller orelse return .{ .Unlink = .{ .result = -sos.EINVAL } };
+    const client_id: usize = @intCast(caller.id);
+    if (client_id >= MAX_CLIENTS) return .{ .Unlink = .{ .result = -sos.EINVAL } };
+
+    const client_ctx = clients.get(client_id) orelse return .{ .Unlink = .{ .result = -sos.EINVAL } };
+    const vm_handle = ctx.vm_handle orelse return .{ .Unlink = .{ .result = -sos.EINVAL } };
+
+    const buf_addr: usize = @intCast(args.path_addr);
+    const buf_len: usize = @intCast(args.path_len);
+    if (buf_len == 0 or buf_len > worker.OPEN_PATH_CAPACITY) {
+        return .{ .Unlink = .{ .result = -sos.EINVAL } };
+    }
+
+    var path_buf: [worker.OPEN_PATH_CAPACITY:0]u8 = undefined;
+    @memset(path_buf[0..], 0);
+
+    const copied = vm_handle.copyCStringFromClient(buf_addr, path_buf[0..path_buf.len]) catch |err| {
+        const errno: c_int = vm.vmErrorToErrno(err);
+        return .{ .Unlink = .{ .result = -errno } };
+    };
+
+    if (copied == 0) {
+        return .{ .Unlink = .{ .result = -sos.EINVAL } };
+    }
+    if (copied >= path_buf.len) {
+        return .{ .Unlink = .{ .result = -sos.ENAMETOOLONG } };
+    }
+
+    const path_slice = path_buf[0..copied];
+    return ctx.startAsyncUnlink(caller, client_ctx, path_slice);
 }
 
 fn handleTimestamp(ctx: *ServerContext) SyscallResponse {
@@ -1227,9 +1485,13 @@ fn handleBrk(ctx: *ServerContext, args: anytype) SyscallResponse {
 }
 
 fn handleMmap(ctx: *ServerContext, args: anytype) SyscallResponse {
-    if (ctx.caller == null) {
+    const caller = ctx.caller orelse {
         return SyscallResponse{ .Mmap = .{ .result = -@as(i64, sos.EINVAL) } };
-    }
+    };
+    const client_id: usize = @intCast(caller.id);
+    const client_ctx = clients.get(client_id) orelse {
+        return SyscallResponse{ .Mmap = .{ .result = -@as(i64, sos.EINVAL) } };
+    };
     const handle = ctx.vm_handle orelse {
         return SyscallResponse{ .Mmap = .{ .result = -@as(i64, sos.EINVAL) } };
     };
@@ -1240,7 +1502,7 @@ fn handleMmap(ctx: *ServerContext, args: anytype) SyscallResponse {
     const fd: c_int = @intCast(wordToI64(args.fd));
     const offset: usize = @intCast(args.offset);
 
-    const base = handle.mmap(addr, length, prot, flags, fd, offset) catch |err| {
+    const base = handle.mmap(client_ctx, addr, length, prot, flags, fd, offset) catch |err| {
         const errno = vm.vmErrorToErrno(err);
         return SyscallResponse{ .Mmap = .{ .result = -@as(i64, errno) } };
     };
@@ -1308,6 +1570,7 @@ const sos = cimports.sos;
 const sos_types = cimports.sos_types;
 
 const vm = @import("vm/mod.zig");
+const vm_fault = @import("vm_fault.zig");
 pub const worker = @import("worker.zig");
 pub const delegation = @import("delegation.zig");
 pub const nfs_handler = @import("nfs_handler.zig");
@@ -1316,6 +1579,8 @@ comptime {
     _ = delegation;
     _ = nfs_handler;
     _ = continuation;
+    _ = vm_fault;
+    _ = pagefile;
     _ = &continuation.continuation_bootstrap;
 }
 
@@ -1336,3 +1601,4 @@ const setupConsoleFd = console.setupConsoleFd;
 const console_object_ptr = console.console_object_ptr;
 
 pub const continuation = @import("continuation.zig");
+const pagefile = @import("pagefile.zig");

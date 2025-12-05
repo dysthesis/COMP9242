@@ -43,8 +43,10 @@
 #include "irq.h"
 #include "mapping.h"
 #include "network.h"
+#include "pagefile.h"
 #include "sel4/bootinfo_types.h"
 #include "sel4/simple_types.h"
+#include "sos_time.h"
 #include "syscalls.h"
 #include "tests.h"
 #include "threads.h"
@@ -68,6 +70,7 @@ extern void worker_init(seL4_CPtr delegate_ep, seL4_CPtr work_ntfn);
 
 /* Import Zig NFS handler init */
 extern void nfs_handler_init(void);
+extern void nfs_handler_enter_syscall_loop(void);
 
 /* Poll asynchronous file operations */
 extern void checkCompletedFileOps(void);
@@ -95,6 +98,10 @@ extern void checkCompletedFileOps(void);
 
 /* Network console handle for SOS console output */
 struct network_console *sos_nc;
+
+/* Bootstrap IRQ notification - used by frame eviction during initialization
+ * to actively poll network IRQs before entering syscall loop */
+static seL4_CPtr bootstrap_irq_ntfn = seL4_CapNull;
 
 /*
  * A dummy starting syscall
@@ -254,10 +261,25 @@ NORETURN void syscall_loop(seL4_CPtr ep) {
         caller->vm_state = vm;
       }
 
-      if (handle_vm_fault(vm, badge, &message)) {
+      vm_fault_result_t fault_result =
+          handle_vm_fault(vm, badge, &message, &have_reply, &reply, &reply_ut);
+
+      switch (fault_result) {
+      case VM_FAULT_HANDLED:
         reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
         have_reply = true;
         continue;
+
+      case VM_FAULT_DEFERRED:
+        ZF_LOGD("Deferred VM fault for badge=0x%lx (reply=%#lx ut=%p)",
+                (unsigned long)badge, (unsigned long)reply, (void *)reply_ut);
+        assert(!have_reply);
+        assert(reply_ut != NULL);
+        continue;
+
+      case VM_FAULT_FATAL:
+      default:
+        break;
       }
 
       goto fault_log;
@@ -356,7 +378,7 @@ static int map_process_stack_page(uintptr_t vaddr) {
     return -1;
   }
 
-  frame_ref_t frame = alloc_frame();
+  frame_ref_t frame = alloc_frame(FRAME_OWNER_USER, FRAME_FLAG_EVICTABLE);
   if (frame == NULL_FRAME) {
     ZF_LOGE("Failed to allocate stack frame");
     return -1;
@@ -559,6 +581,7 @@ static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace,
  */
 bool start_first_process(char *app_name, seL4_CPtr ep) {
   bool success = false;
+  bool vm_reset_done = false;
   client_t *client = NULL;
   seL4_Word client_badge = 0;
   user_process.client = NULL;
@@ -596,7 +619,8 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
   }
 
   /* Create an IPC buffer backing frame */
-  user_process.ipc_buffer_frame = alloc_frame();
+  user_process.ipc_buffer_frame =
+      alloc_frame(FRAME_OWNER_USER, FRAME_FLAG_EVICTABLE);
   if (user_process.ipc_buffer_frame == NULL_FRAME) {
     ZF_LOGE("Failed to allocate IPC buffer frame");
     goto out;
@@ -685,7 +709,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep) {
   err = seL4_SchedControl_Configure(
       sched_ctrl_start, user_process.sched_context, US_IN_MS, US_IN_MS, 0, 0);
   if (err != seL4_NoError) {
-    ZF_LOGE("Unable to configure scheduling context");
+    ZF_LOGE("Unable to configure scheduling context err=%ld", err);
     goto out;
   }
 
@@ -774,6 +798,7 @@ out:
   if (!success && client) {
     if (client->vm_state != NULL) {
       vm_reset_state(client->vm_state);
+      vm_reset_done = true;
     }
     client_destroy(client, &cspace);
     user_process.client = NULL;
@@ -785,7 +810,15 @@ out:
     user_process.fault_ep_slot = seL4_CapNull;
   }
   if (!success) {
-    cleanup_stack_frames();
+    if (!vm_reset_done) {
+      cleanup_stack_frames();
+    } else {
+      user_process.stack_frame_count = 0;
+      for (size_t i = 0; i < ARRAY_SIZE(user_process.stack_frames); i++) {
+        user_process.stack_frames[i] = NULL_FRAME;
+        user_process.stack_slots[i] = seL4_CapNull;
+      }
+    }
     if (!user_process.ipc_buffer_vm_owned) {
       release_ipc_buffer_manual();
     }
@@ -813,6 +846,26 @@ static void sos_ipc_init(seL4_CPtr *ipc_ep, seL4_CPtr *ntfn) {
 
 /* called by crt */
 seL4_CPtr get_seL4_CapInitThreadTCB(void) { return seL4_CapInitThreadTCB; }
+
+/* Bootstrap IRQ polling - used during initialization before syscall loop
+ * to drive NFS callbacks for frame eviction operations.
+ * Returns true if an IRQ was processed, false otherwise. */
+bool bootstrap_poll_irqs(void) {
+  if (bootstrap_irq_ntfn == seL4_CapNull) {
+    return false;
+  }
+
+  seL4_Word badge = 0;
+  seL4_Poll(bootstrap_irq_ntfn, &badge);
+
+  if (badge != 0) {
+    bool have_reply = false;
+    sos_handle_irq_notification(&badge, &have_reply);
+    return true;
+  }
+
+  return false;
+}
 
 /* tell muslc about our "syscalls", which will be called by muslc on invocations
  * to the c library */
@@ -873,6 +926,10 @@ NORETURN void *main_continued(UNUSED void *arg) {
   /* Initialise other system compenents here */
   seL4_CPtr ipc_ep, ntfn;
   sos_ipc_init(&ipc_ep, &ntfn);
+
+  /* Store notification handle for bootstrap IRQ polling during frame eviction */
+  bootstrap_irq_ntfn = ntfn;
+
   sos_init_irq_dispatch(&cspace, seL4_CapIRQControl, ntfn, IRQ_EP_BADGE,
                         IRQ_IDENT_BADGE_BITS);
 
@@ -889,8 +946,6 @@ NORETURN void *main_continued(UNUSED void *arg) {
   init_threads(ipc_ep, ipc_ep, sched_ctrl_start, sched_ctrl_end);
 #endif /* CONFIG_SOS_GDB_ENABLED */
 
-  frame_table_init(&cspace, seL4_CapInitThreadVSpace);
-
   /* Map the timer device (NOTE: this is the same mapping you will use for
    * your timer driver - sos uses the watchdog timers on this page to
    * implement reset infrastructure & network ticks, so touching the watchdog
@@ -903,9 +958,13 @@ NORETURN void *main_continued(UNUSED void *arg) {
   network_init(&cspace, timer_vaddr, ntfn);
   sos_nc = network_console_init();
 
-  /* Initialise NFS handler pool */
+  /* Initialise NFS handler pool BEFORE frame table to ensure untyped memory
+   * is available for notification object allocation */
   printf("NFS handler init\n");
   nfs_handler_init();
+
+  /* Initialise frame table AFTER NFS handler to avoid exhausting untyped memory */
+  frame_table_init(&cspace, seL4_CapInitThreadVSpace);
 
   /* Initialise worker thread infrastructure */
   printf("Worker init\n");
@@ -929,19 +988,47 @@ NORETURN void *main_continued(UNUSED void *arg) {
       alloc_retype(&work_ntfn, seL4_NotificationObject, seL4_NotificationBits);
   ZF_LOGF_IF(work_ntfn_ut == NULL, "Failed to alloc work notification");
 
-  /* Initialize worker subsystem */
+  /* Initialise worker subsystem */
   worker_init(delegate_ep_badged, work_ntfn);
 
 #ifdef CONFIG_SOS_GDB_ENABLED
-  /* Initialize the debugger */
+  /* Initialise the debugger */
   seL4_Error err = debugger_init(&cspace, seL4_CapIRQControl, gdb_recv_ep);
-  ZF_LOGF_IF(err, "Failed to initialize debugger %d", err);
+  ZF_LOGF_IF(err, "Failed to initialise debugger %d", err);
   char secret_string[15] = "Welcome to AOS!";
 #endif /* CONFIG_SOS_GDB_ENABLED */
 
-  /* Initialises the timer */
+  /* Initialises the timer (must be started before pagefile init) */
   printf("Timer init\n");
   start_timer(timer_vaddr);
+
+  /* NFS mount is now guaranteed to be complete when network_init() returns.
+   * The active polling within network_init() ensures mount completion before
+   * control returns to this point. Verify this invariant. */
+  ZF_LOGF_IF(!nfs_is_mounted(), "NFS should be mounted after network_init()");
+
+  /* Initialise pagefile subsystem now that NFS is available and timer is
+   * running */
+  printf("Pagefile init\n");
+  pagefile_init();
+
+  /* Wait for pagefile initialisation to complete  */
+  printf("Waiting for pagefile initialisation...\n");
+
+  while (!pagefile_is_ready() && !pagefile_init_failed()) {
+    seL4_Word badge = 0;
+    seL4_Wait(ntfn, &badge);
+    bool have_reply = false;
+    sos_handle_irq_notification(&badge, &have_reply);
+  }
+
+  if (pagefile_init_failed()) {
+    printf("WARNING: Pagefile initialisation failed; eviction disabled\n");
+  } else if (pagefile_is_ready()) {
+    printf("Pagefile initialised successfully\n");
+  } else {
+    printf("WARNING: Pagefile initialisation incomplete; eviction disabled\n");
+  }
 
   /* run sos initialisation tests */
   run_tests(&cspace);
@@ -959,15 +1046,23 @@ NORETURN void *main_continued(UNUSED void *arg) {
   ZF_LOGF_IF(init_irq_err != 0, "Failed to initialise timeout IRQ");
   seL4_IRQHandler_Ack(timeout_irq_handler);
 
-  /* Start the user application */
+  /* Initialise continuation pool allocator */
+  continuation_bootstrap();
+
+  /* Start the user application - BEFORE entering syscall loop to allow bootstrap
+   * IRQ polling to handle frame eviction during process startup. */
   printf("Start first process\n");
   bool success = start_first_process(APP_NAME, ipc_ep);
   ZF_LOGF_IF(!success, "Failed to start first process");
 
-  /* Initialise continuation pool allocator */
-  continuation_bootstrap();
-
   printf("\nSOS entering syscall loop\n");
+
+  /* Clear bootstrap IRQ notification - syscall loop will handle IRQ processing from now on */
+  bootstrap_irq_ntfn = seL4_CapNull;
+
+  /* Enable notification-based blocking in NFS handler now that we're processing IRQs */
+  nfs_handler_enter_syscall_loop();
+
   syscall_loop(ipc_ep);
 }
 /*
@@ -983,6 +1078,11 @@ int main(void) {
   seL4_BootInfo *boot_info = sel4runtime_bootinfo();
 
   debug_print_bootinfo(boot_info);
+
+  /* Fatal if we booted a non-MCS kernel: sched contexts are mandatory. */
+  if (boot_info->schedcontrol.start >= boot_info->schedcontrol.end) {
+    ZF_LOGF("No schedcontrol caps in BootInfo; kernel not built with MCS or image mismatch");
+  }
 
   printf("\nSOS Starting...\n");
 

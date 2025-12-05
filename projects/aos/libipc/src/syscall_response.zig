@@ -36,6 +36,14 @@ fn cIntToWord(value: c_int) sel4.seL4_Word {
     return i64ToWord(@as(i64, value));
 }
 
+fn u64ToWord(value: u64) sel4.seL4_Word {
+    return switch (@bitSizeOf(sel4.seL4_Word)) {
+        64 => @bitCast(value),
+        32 => @intCast(value),
+        else => @compileError("Unsupported seL4_Word size"),
+    };
+}
+
 pub const SyscallResponse = union(lib.SyscallNum) {
     Open: struct { result: c_int },
     Close: struct { result: c_int },
@@ -50,6 +58,15 @@ pub const SyscallResponse = union(lib.SyscallNum) {
     GetDirent: struct {
         result: c_int,
     },
+    PagerStats: struct {
+        deferred_faults: u64,
+        dedup_hits: u64,
+        job_submissions: u64,
+        job_completions: u64,
+        job_failures: u64,
+    },
+    Lseek: struct { result: i64 },
+    Unlink: struct { result: c_int },
 
     pub fn deserialise(tag: lib.SyscallNum, msg: sel4.seL4_MessageInfo_t) lib.SyscallCallError!SyscallResponse {
         const len = sel4.seL4_MessageInfo_get_length(msg);
@@ -73,27 +90,53 @@ pub const SyscallResponse = union(lib.SyscallNum) {
             .Mmap => SyscallResponse{ .Mmap = .{ .result = wordToI64(mr0) } },
             .Stat => SyscallResponse{ .Stat = .{ .result = wordToCInt(mr0) } },
             .GetDirent => SyscallResponse{ .GetDirent = .{ .result = wordToCInt(mr0) } },
+            .PagerStats => if (len < 5) lib.SyscallCallError.EmptyReply else SyscallResponse{
+                .PagerStats = .{
+                    .deferred_faults = wordToU64(sel4.seL4_GetMR(0)),
+                    .dedup_hits = wordToU64(sel4.seL4_GetMR(1)),
+                    .job_submissions = wordToU64(sel4.seL4_GetMR(2)),
+                    .job_completions = wordToU64(sel4.seL4_GetMR(3)),
+                    .job_failures = wordToU64(sel4.seL4_GetMR(4)),
+                },
+            },
+            .Lseek => SyscallResponse{ .Lseek = .{ .result = wordToI64(mr0) } },
+            .Unlink => SyscallResponse{ .Unlink = .{ .result = wordToCInt(mr0) } },
         };
     }
 
     pub fn serialise(self: SyscallResponse) sel4.seL4_MessageInfo_t {
-        sel4.seL4_SetMR(1, 0);
-        sel4.seL4_SetMR(2, 0);
-        sel4.seL4_SetMR(3, 0);
-        const word = switch (self) {
-            .Open => |payload| cIntToWord(payload.result),
-            .Close => |payload| cIntToWord(payload.result),
-            .Read => |payload| cIntToWord(payload.result),
-            .Write => |payload| cIntToWord(payload.result),
-            .Usleep => |payload| cIntToWord(payload.result),
-            .Timestamp => |payload| i64ToWord(payload.timestamp),
-            .MyId => |payload| cIntToWord(payload.pid),
-            .Brk => |payload| i64ToWord(payload.result),
-            .Mmap => |payload| i64ToWord(payload.result),
-            .Stat => |payload| cIntToWord(payload.result),
-            .GetDirent => |payload| cIntToWord(payload.result),
-        };
-        sel4.seL4_SetMR(0, word);
-        return sel4.seL4_MessageInfo_new(0, 0, 0, 1);
+        switch (self) {
+            .PagerStats => |payload| {
+                sel4.seL4_SetMR(0, u64ToWord(payload.deferred_faults));
+                sel4.seL4_SetMR(1, u64ToWord(payload.dedup_hits));
+                sel4.seL4_SetMR(2, u64ToWord(payload.job_submissions));
+                sel4.seL4_SetMR(3, u64ToWord(payload.job_completions));
+                sel4.seL4_SetMR(4, u64ToWord(payload.job_failures));
+                return sel4.seL4_MessageInfo_new(0, 0, 0, 5);
+            },
+            else => {
+                sel4.seL4_SetMR(1, 0);
+                sel4.seL4_SetMR(2, 0);
+                sel4.seL4_SetMR(3, 0);
+                const word = switch (self) {
+                    .Open => |payload| cIntToWord(payload.result),
+                    .Close => |payload| cIntToWord(payload.result),
+                    .Read => |payload| cIntToWord(payload.result),
+                    .Write => |payload| cIntToWord(payload.result),
+                    .Usleep => |payload| cIntToWord(payload.result),
+                    .Timestamp => |payload| i64ToWord(payload.timestamp),
+                    .MyId => |payload| cIntToWord(payload.pid),
+                    .Brk => |payload| i64ToWord(payload.result),
+                    .Mmap => |payload| i64ToWord(payload.result),
+                    .Stat => |payload| cIntToWord(payload.result),
+                    .GetDirent => |payload| cIntToWord(payload.result),
+                    .PagerStats => unreachable,
+                    .Lseek => |payload| i64ToWord(payload.result),
+                    .Unlink => |payload| cIntToWord(payload.result),
+                };
+                sel4.seL4_SetMR(0, word);
+                return sel4.seL4_MessageInfo_new(0, 0, 0, 1);
+            },
+        }
     }
 };
